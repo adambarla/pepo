@@ -530,7 +530,7 @@ for l in range(L):
                 test_prompt,
                 max_new_tokens=1024,
                 do_sample=True,
-                temperature=0.7,
+                temperature=0.05,
                 top_k=50,
                 top_p=0.95,
                 repetition_penalty=1.1,
