@@ -4,6 +4,7 @@ login()
 
 import torch
 import os
+import numpy as np
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 from trl import DPOTrainer, DPOConfig
@@ -110,7 +111,25 @@ else:
 
 print(f"Loaded {len(train_dataset_raw)} training examples and {len(eval_dataset_raw)} evaluation examples.")
 
+train_datasets_raw = {}
+# Create an array of indices from 0 to len(dataset)-1
+train_indices = np.arange(len(train_dataset_raw))
+# Split the indices into L roughly equal parts
+train_split_indices = np.array_split(train_indices, L)
 
+for i, indices in enumerate(train_split_indices):
+    chunk_key = i + 1  # Keys from 1 to L
+    # Select the examples corresponding to the current chunk of indices
+    train_datasets_raw[chunk_key] = train_dataset_raw.select(indices)
+
+# --- 2. Split the Evaluation Dataset ---
+eval_datasets_raw = {}
+eval_indices = np.arange(len(eval_dataset_raw))
+eval_split_indices = np.array_split(eval_indices, L)
+
+for i, indices in enumerate(eval_split_indices):
+    chunk_key = i + 1 # Keys from 1 to L
+    eval_datasets_raw[chunk_key] = eval_dataset_raw.select(indices)
 
 def preprocess_function(examples):
     processed = {
@@ -203,26 +222,29 @@ def preprocess_function(examples):
 
 
 print("Preprocessing dataset (applying chat template and tokenizing)...")
-train_dataset = train_dataset_raw.map(
-    preprocess_function,
-    batched=True,
-    remove_columns=train_dataset_raw.column_names,
-    num_proc=os.cpu_count(),
-    desc="Preprocessing train dataset"
-)
-eval_dataset = eval_dataset_raw.map(
-    preprocess_function,
-    batched=True,
-    remove_columns=eval_dataset_raw.column_names,
-    num_proc=os.cpu_count(),
-    desc="Preprocessing eval dataset"
-)
+train_datasets = {}
+eval_datasets = {}
+for l, (train_dataset_raw, eval_dataset_raw) in enumerate(zip(train_datasets_raw,eval_datasets_raw)):
+    train_datasets[l] = train_dataset_raw.map(
+        preprocess_function,
+        batched=True,
+        remove_columns=train_dataset_raw.column_names,
+        num_proc=os.cpu_count(),
+        desc="Preprocessing train dataset"
+    )
+    eval_datasets[l] = eval_dataset_raw.map(
+        preprocess_function,
+        batched=True,
+        remove_columns=eval_dataset_raw.column_names,
+        num_proc=os.cpu_count(),
+        desc="Preprocessing eval dataset"
+    )
 
-# Convert lists to tensors for DataLoader
-train_dataset.set_format(type="torch", columns=['prompt_input_ids', 'chosen_input_ids', 'rejected_input_ids',
+    # Convert lists to tensors for DataLoader
+    train_datasets[l].set_format(type="torch", columns=['prompt_input_ids', 'chosen_input_ids', 'rejected_input_ids',
+                                                    'prompt_attention_mask', 'chosen_attention_mask', 'rejected_attention_mask', 'prompt_len'])
+    eval_datasets[l].set_format(type="torch", columns=['prompt_input_ids', 'chosen_input_ids', 'rejected_input_ids',
                                                 'prompt_attention_mask', 'chosen_attention_mask', 'rejected_attention_mask', 'prompt_len'])
-eval_dataset.set_format(type="torch", columns=['prompt_input_ids', 'chosen_input_ids', 'rejected_input_ids',
-                                               'prompt_attention_mask', 'chosen_attention_mask', 'rejected_attention_mask', 'prompt_len'])
 
 
 print(f"After preprocessing: {len(train_dataset)} training examples and {len(eval_dataset)} evaluation examples.")
@@ -285,19 +307,21 @@ class DPODataCollator:
         return batch
 
 data_collator = DPODataCollator(tokenizer)
-
-train_dataloader = DataLoader(
-    train_dataset,
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-    collate_fn=data_collator
-)
-eval_dataloader = DataLoader(
-    eval_dataset,
-    batch_size=BATCH_SIZE,
-    shuffle=False,
-    collate_fn=data_collator
-)
+train_dataloaders={}
+eval_dataloaders={}
+for l, (train_dataset,eval_dataset) in enumerate(zip(train_datasets,eval_datasets)):
+    train_dataloaders[l] = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        collate_fn=data_collator
+    )
+    eval_dataloaders[l] = DataLoader(
+        eval_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        collate_fn=data_collator
+    )
 
 # --- 3. Helper Function to Calculate Log Probabilities ---
 def get_log_probs(model, input_ids, attention_mask, prompt_len):
@@ -397,7 +421,7 @@ for l in range(L):
     # --- 4. Optimizer and Scheduler ---
     optimizer = AdamW(policy_model.parameters(), lr=LEARNING_RATE)
 
-    num_training_steps = (len(train_dataloader) // GRADIENT_ACCUMULATION_STEPS) * EPOCHS
+    num_training_steps = (len(train_dataloaders[l]) // GRADIENT_ACCUMULATION_STEPS) * EPOCHS
     lr_scheduler = get_scheduler(
         name="cosine",
         optimizer=optimizer,
@@ -413,7 +437,7 @@ for l in range(L):
     for epoch in range(EPOCHS):
         policy_model.train() # Ensure policy model is in train mode
         total_loss = 0
-        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{EPOCHS} Training")
+        progress_bar = tqdm(train_dataloaders[l], desc=f"Epoch {epoch+1}/{EPOCHS} Training")
 
         for step, batch in enumerate(progress_bar):
             # Move batch to device
@@ -444,7 +468,7 @@ for l in range(L):
 
             total_loss += loss.item() * GRADIENT_ACCUMULATION_STEPS # Scale back up for logging
 
-            if (step + 1) % GRADIENT_ACCUMULATION_STEPS == 0 or (step + 1) == len(train_dataloader):
+            if (step + 1) % GRADIENT_ACCUMULATION_STEPS == 0 or (step + 1) == len(train_dataloaders[l]):
                 # Clip gradients to prevent exploding gradients
                 torch.nn.utils.clip_grad_norm_(policy_model.parameters(), 1.0)
                 
@@ -464,7 +488,7 @@ for l in range(L):
         # --- Evaluation ---
         policy_model.eval()
         eval_loss = 0
-        eval_progress_bar = tqdm(eval_dataloader, desc=f"Epoch {epoch+1}/{EPOCHS} Evaluation")
+        eval_progress_bar = tqdm(eval_dataloaders[l], desc=f"Epoch {epoch+1}/{EPOCHS} Evaluation")
         with torch.no_grad():
             for batch in eval_progress_bar:
                 batch = {k: v.to(DEVICE) for k, v in batch.items()}
@@ -482,7 +506,7 @@ for l in range(L):
                 eval_loss += dpo_loss_components.mean().item()
                 eval_progress_bar.set_postfix({"eval_loss": eval_loss / (eval_progress_bar.n + 1)})
                 
-        print(f"Epoch {epoch+1} finished. Average Evaluation Loss: {eval_loss / len(eval_dataloader)}")
+        print(f"Epoch {epoch+1} finished. Average Evaluation Loss: {eval_loss / len(eval_dataloaders[l])}")
 
         # --- Save the fine-tuned model ---
         # Save the LoRA adapter
