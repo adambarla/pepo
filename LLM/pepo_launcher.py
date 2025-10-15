@@ -1,6 +1,6 @@
 from huggingface_hub import login
 
-login()
+#login()
 
 import torch
 import os
@@ -23,11 +23,11 @@ import argparse
 
 parser = argparse.ArgumentParser(description="Parser for DPO training parameters.")
 
-parser.add_argument("--num_train_examples", type=int, default=10,
+parser.add_argument("--num_train_examples", type=int, default=60000,
                     help="Number of training examples to use.")
-parser.add_argument("--num_eval_examples", type=int, default=2,
+parser.add_argument("--num_eval_examples", type=int, default=1000,
                     help="Number of evaluation examples to use.")
-parser.add_argument("--epochs", type=int, default=1,
+parser.add_argument("--epochs", type=int, default=3,
                     help="Number of training epochs.")
 parser.add_argument("--learning_rate", type=float, default=1e-5,
                     help="Learning rate for the optimizer.")
@@ -60,7 +60,7 @@ MAX_PROMPT_LENGTH = args.max_prompt_length  # Max prompt length
 # --- Configuration ---
 MODEL_ID = "HuggingFaceTB/SmolLM2-1.7B" # A small model for quick demonstration
 DATASET_ID = "HuggingFaceH4/ultrafeedback_binarized" #"HuggingFaceH4/ultrafeedback_binarized"
-OUTPUT_DIR = f"./dpo_ensemble{L}"
+OUTPUT_DIR = f"PessimisticDPO/dpo_ensemble{L}"
 
 
 # Device setup
@@ -80,7 +80,10 @@ else:
 print(f"Selected device: {DEVICE} with dtype: {DTYPE}")
 # --- 1. Load Models and Tokenizer ---
 print(f"Loading model: {MODEL_ID}...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+if "Instruct" not in MODEL_ID:
+    tokenizer = AutoTokenizer.from_pretrained(f"{MODEL_ID}-Instruct")
+else:
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 # Crucial for padding and chat templates
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"
@@ -95,8 +98,8 @@ chat_template = (
         "{{ '<|im_start|>assistant\n' }}"
     "{% endif %}"
 )
-tokenizer.chat_template = chat_template
-print("Chat template has been set manually.")
+#if "Instruct" not in MODEL_ID: tokenizer.chat_template = chat_template
+#print("Chat template has been set manually.")
 
 dataset = load_dataset(path=DATASET_ID, split="train_sft")
 
@@ -224,7 +227,11 @@ def preprocess_function(examples):
 print("Preprocessing dataset (applying chat template and tokenizing)...")
 train_datasets = {}
 eval_datasets = {}
-for l, train_dataset_raw, eval_dataset_raw in enumerate(zip(train_datasets_raw,eval_datasets_raw)):
+print(train_datasets_raw)
+for l,(train_dataset_raw, eval_dataset_raw) in enumerate(zip(train_datasets_raw.values(),eval_datasets_raw.values())):
+    print(l, "l")
+    print(train_dataset_raw, "train")
+    print(eval_dataset_raw, "test")
     train_datasets[l] = train_dataset_raw.map(
         preprocess_function,
         batched=True,
@@ -306,7 +313,7 @@ class DPODataCollator:
 data_collator = DPODataCollator(tokenizer)
 train_dataloaders={}
 eval_dataloaders={}
-for l, (train_dataset,eval_dataset) in enumerate(zip(train_datasets,eval_datasets)):
+for l, (train_dataset,eval_dataset) in enumerate(zip(train_datasets.values(),eval_datasets.values())):
     train_dataloaders[l] = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
@@ -480,7 +487,7 @@ for l in range(L):
                     "global_step": global_step
                 })
 
-        print(f"Epoch {epoch+1} finished. Average Training Loss: {total_loss / len(train_dataloader)}")
+        print(f"Epoch {epoch+1} finished. Average Training Loss: {total_loss / len(train_dataloaders[l])}")
 
         # --- Evaluation ---
         policy_model.eval()
@@ -507,11 +514,28 @@ for l in range(L):
 
         # --- Save the fine-tuned model ---
         # Save the LoRA adapter
-        final_model_path = os.path.join(OUTPUT_DIR, f"final_checkpoint_{l}")
-        policy_model.save_pretrained(final_model_path)
-        tokenizer.save_pretrained(final_model_path)
-        print(f"Model saved to {final_model_path}")
+        #final_model_path = f"OUTPUT_DIR_l{l}"
+        #policy_model.push_to_hub(f"OUTPUT_DIR_l{l}", private=True)
+        #final_model_path = os.path.join(OUTPUT_DIR, f"final_checkpoint_{l}")
+        #policy_model.save_pretrained(final_model_path)
+        #tokenizer.push_to_hub(f"OUTPUT_DIR_l{l}_tokenizer", private=True)#.save_pretrained(final_model_path)
+        hub_repo_id = f"{OUTPUT_DIR}_l{l}" 
 
+        # Push the LoRA adapter model to the Hub
+        policy_model.push_to_hub(
+                    hub_repo_id,
+                        commit_message=f"Upload LoRA adapter checkpoint {l}",
+                            private=True  # Set to True to keep the repository private
+                            )
+
+        # Push the tokenizer to the same repository
+        tokenizer.push_to_hub(
+                    hub_repo_id,
+                        commit_message=f"Upload tokenizer for checkpoint {l}",
+                            private=True
+                            )
+
+        print(f"LoRA adapter and tokenizer successfully pushed to: https://huggingface.co/{hub_repo_id}")
         print(f"DPO l = {l} training complete!")
 
         # --- Optional: Test the trained model ---
@@ -558,8 +582,8 @@ for l in range(L):
                 do_sample=True,
                 temperature=0.3,
                 top_k=50,
-                top_p=0.95,
-                repetition_penalty=1.3,
+                top_p=0.995,
+                repetition_penalty=1.1,
                 eos_token_id=tokenizer.eos_token_id
             )
             print("\nGenerated Response from BASE model (full):")
@@ -586,7 +610,7 @@ for l in range(L):
                 device_map=DEVICE
             )
             # Load the LoRA adapter and merge
-            trained_model = PeftModel.from_pretrained(trained_model_base, final_model_path)
+            trained_model = PeftModel.from_pretrained(trained_model_base, hub_repo_id)
             trained_model = trained_model.merge_and_unload() # Merge LoRA weights into base model
             trained_model.eval()
 
@@ -605,8 +629,8 @@ for l in range(L):
                 do_sample=True,
                 temperature=0.3,
                 top_k=50,
-                top_p=0.95,
-                repetition_penalty=1.3,
+                top_p=0.995,
+                repetition_penalty=1.1,
                 eos_token_id=tokenizer.eos_token_id
             )
             print("\nGenerated Response from TRAINED model (full):")
