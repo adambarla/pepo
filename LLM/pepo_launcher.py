@@ -18,28 +18,54 @@ from datasets import load_dataset
 from tqdm import tqdm
 import os
 import math
+import argparse
 
+parser = argparse.ArgumentParser(description="Parser for DPO training parameters.")
+
+parser.add_argument("--num_train_examples", type=int, default=10,
+                    help="Number of training examples to use.")
+parser.add_argument("--num_eval_examples", type=int, default=2,
+                    help="Number of evaluation examples to use.")
+parser.add_argument("--epochs", type=int, default=1,
+                    help="Number of training epochs.")
+parser.add_argument("--learning_rate", type=float, default=1e-5,
+                    help="Learning rate for the optimizer.")
+parser.add_argument("--beta", type=float, default=0.1,
+                    help="DPO beta parameter, controlling the strength of the preference.")
+parser.add_argument("--batch_size", type=int, default=2,
+                    help="Batch size for training.")
+parser.add_argument("--num_networks", type=int, default=3,
+                    help="Number of networks in the ensemble.")
+parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
+                    help="Number of steps to accumulate gradients before updating.")
+parser.add_argument("--max_length", type=int, default=1024,
+                    help="Maximum total sequence length (prompt + response).")
+parser.add_argument("--cuda_index", type=int, default=0,
+                    help="GPU Index")
+parser.add_argument("--max_prompt_length", type=int, default=512,
+                        help="Maximum prompt length.")
+args=parser.parse_args()
+# Training parameters
+NUM_TRAIN_EXAMPLES = args.num_train_examples # Use a small subset for demonstration
+NUM_EVAL_EXAMPLES = args.num_eval_examples
+EPOCHS = args.epochs
+LEARNING_RATE = args.learning_rate # DPO often uses a lower learning rate than SFT
+BETA = args.beta # DPO beta parameter, controls the strength of the preference. Common values: 0.1, 0.5, 0.8
+BATCH_SIZE = args.batch_size
+L=args.num_networks #Number of networks in the ensemble
+GRADIENT_ACCUMULATION_STEPS = args.gradient_accumulation_steps # Effective batch size = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS = 8
+MAX_LENGTH = args.max_length # Max total sequence length (prompt + response)
+MAX_PROMPT_LENGTH = args.max_prompt_length  # Max prompt length
 # --- Configuration ---
 MODEL_ID = "HuggingFaceTB/SmolLM2-135M" # A small model for quick demonstration
 DATASET_ID = "HuggingFaceH4/ultrafeedback_binarized" #"HuggingFaceH4/ultrafeedback_binarized"
-OUTPUT_DIR = "./dpo_custom_tinyllama_ultrafeedback"
+OUTPUT_DIR = f"./dpo_ensemble{L}"
 
-# Training parameters
-NUM_TRAIN_EXAMPLES = 10 # Use a small subset for demonstration
-NUM_EVAL_EXAMPLES = 2
-EPOCHS = 1
-LEARNING_RATE = 1e-5 # DPO often uses a lower learning rate than SFT
-BETA = 0.1 # DPO beta parameter, controls the strength of the preference. Common values: 0.1, 0.5, 0.8
-BETA1 = 0.3
-BATCH_SIZE = 2
-GRADIENT_ACCUMULATION_STEPS = 4 # Effective batch size = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS = 8
-MAX_LENGTH = 512 # Max total sequence length (prompt + response)
-MAX_PROMPT_LENGTH = 256 # Max prompt length
 
 # Device setup
 
 if torch.cuda.is_available():
-    DEVICE = "cuda"
+    DEVICE = f"cuda:{args.cuda_index}"
     DTYPE = torch.bfloat16 # bfloat16 is usually best for NVIDIA GPUs (Ampere architecture and newer)
 elif torch.backends.mps.is_available():
     DEVICE = "mps"
@@ -57,45 +83,6 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 # Crucial for padding and chat templates
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"
-
-# Policy Model (will be trained with LoRA)
-# Use prepare_model_for_kbit_training if you're using quantization (e.g., 4-bit)
-print(DTYPE)
-policy_model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID,
-    torch_dtype=DTYPE,
-    device_map=DEVICE
-)
-policy_model.config.use_cache = False # Required for gradient checkpointing, often helpful for training
-policy_model.train() # Set to train mode for gradients
-
-# Apply LoRA to the policy model
-peft_config = LoraConfig(
-    r=16,
-    lora_alpha=16,
-    lora_dropout=0.05,
-    bias="none",
-    task_type="CAUSAL_LM",
-    target_modules="all-linear", # or specify: ["q_proj", "v_proj", "k_proj", "o_proj"]
-)
-policy_model = get_peft_model(policy_model, peft_config)
-policy_model.print_trainable_parameters()
-
-# Reference Model (frozen copy of the initial SFT model)
-# Ensure this model is *not* trained and is in eval mode.
-ref_model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID,
-    torch_dtype=DTYPE,
-    device_map=DEVICE
-)
-
-ref_model.eval() # Set to eval mode for no gradients and no dropout
-for param in ref_model.parameters():
-    param.requires_grad = False
-print("Policy model and reference model loaded.")
-
-# --- 2. Data Preparation ---
-print(f"Loading dataset: {DATASET_ID}...")
 
 dataset = load_dataset(path=DATASET_ID, split="train_sft")
 
@@ -354,154 +341,194 @@ def get_log_probs(model, input_ids, attention_mask, prompt_len):
     # Sum the log probabilities for each example
     return masked_log_probs.sum(dim=-1) # (batch_size,)
 
-# --- 4. Optimizer and Scheduler ---
-optimizer = AdamW(policy_model.parameters(), lr=LEARNING_RATE)
+for l in L:
 
-num_training_steps = (len(train_dataloader) // GRADIENT_ACCUMULATION_STEPS) * EPOCHS
-lr_scheduler = get_scheduler(
-    name="cosine",
-    optimizer=optimizer,
-    num_warmup_steps=0,
-    num_training_steps=num_training_steps,
-)
-
-# --- 5. Training Loop ---
-print("Starting DPO training loop...")
-global_step = 0
-policy_model.zero_grad()
-
-for epoch in range(EPOCHS):
-    policy_model.train() # Ensure policy model is in train mode
-    total_loss = 0
-    progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{EPOCHS} Training")
-
-    for step, batch in enumerate(progress_bar):
-        # Move batch to device
-        batch = {k: v.to(DEVICE) for k, v in batch.items()}
-
-        # Compute log probabilities for chosen responses
-        log_prob_chosen_policy = get_log_probs(policy_model, batch['chosen_input_ids'], batch['chosen_attention_mask'], batch['prompt_len'])
-        with torch.no_grad(): # Ensure no gradients for reference model
-            log_prob_chosen_ref = get_log_probs(ref_model, batch['chosen_input_ids'], batch['chosen_attention_mask'], batch['prompt_len'])
-
-        # Compute log probabilities for rejected responses
-        log_prob_rejected_policy = get_log_probs(policy_model, batch['rejected_input_ids'], batch['rejected_attention_mask'], batch['prompt_len'])
-        with torch.no_grad():
-            log_prob_rejected_ref = get_log_probs(ref_model, batch['rejected_input_ids'], batch['rejected_attention_mask'], batch['prompt_len'])
-
-        # Calculate the DPO loss components
-        pi_log_ratio = log_prob_chosen_policy - log_prob_rejected_policy
-        ref_log_ratio = log_prob_chosen_ref - log_prob_rejected_ref
-
-        dpo_loss_components = -F.logsigmoid(BETA * (pi_log_ratio - ref_log_ratio))
-        
-        # Average loss over the batch
-        loss = dpo_loss_components.mean()
-        
-        # Backward pass with gradient accumulation
-        loss = loss / GRADIENT_ACCUMULATION_STEPS
-        loss.backward()
-
-        total_loss += loss.item() * GRADIENT_ACCUMULATION_STEPS # Scale back up for logging
-
-        if (step + 1) % GRADIENT_ACCUMULATION_STEPS == 0 or (step + 1) == len(train_dataloader):
-            # Clip gradients to prevent exploding gradients
-            torch.nn.utils.clip_grad_norm_(policy_model.parameters(), 1.0)
-            
-            optimizer.step()
-            lr_scheduler.step()
-            policy_model.zero_grad()
-            global_step += 1
-            
-            progress_bar.set_postfix({
-                "loss": total_loss / (step + 1),
-                "learning_rate": lr_scheduler.get_last_lr()[0],
-                "global_step": global_step
-            })
-
-    print(f"Epoch {epoch+1} finished. Average Training Loss: {total_loss / len(train_dataloader)}")
-
-    # --- Evaluation ---
-    policy_model.eval()
-    eval_loss = 0
-    eval_progress_bar = tqdm(eval_dataloader, desc=f"Epoch {epoch+1}/{EPOCHS} Evaluation")
-    with torch.no_grad():
-        for batch in eval_progress_bar:
-            batch = {k: v.to(DEVICE) for k, v in batch.items()}
-
-            log_prob_chosen_policy = get_log_probs(policy_model, batch['chosen_input_ids'], batch['chosen_attention_mask'], batch['prompt_len'])
-            log_prob_chosen_ref = get_log_probs(ref_model, batch['chosen_input_ids'], batch['chosen_attention_mask'], batch['prompt_len'])
-
-            log_prob_rejected_policy = get_log_probs(policy_model, batch['rejected_input_ids'], batch['rejected_attention_mask'], batch['prompt_len'])
-            log_prob_rejected_ref = get_log_probs(ref_model, batch['rejected_input_ids'], batch['rejected_attention_mask'], batch['prompt_len'])
-
-            pi_log_ratio = log_prob_chosen_policy - log_prob_rejected_policy
-            ref_log_ratio = log_prob_chosen_ref - log_prob_rejected_ref
-
-            dpo_loss_components = -F.logsigmoid(BETA * (pi_log_ratio - ref_log_ratio))
-            eval_loss += dpo_loss_components.mean().item()
-            eval_progress_bar.set_postfix({"eval_loss": eval_loss / (eval_progress_bar.n + 1)})
-            
-    print(f"Epoch {epoch+1} finished. Average Evaluation Loss: {eval_loss / len(eval_dataloader)}")
-
-# --- Save the fine-tuned model ---
-# Save the LoRA adapter
-final_model_path = os.path.join(OUTPUT_DIR, "final_checkpoint")
-policy_model.save_pretrained(final_model_path)
-tokenizer.save_pretrained(final_model_path)
-print(f"Model saved to {final_model_path}")
-
-print("DPO training complete!")
-
-# --- Optional: Test the trained model ---
-if DEVICE == "cuda":
-    print("\n--- Testing the trained model ---")
-    from transformers import pipeline
-    from peft import PeftModel
-
-    # Load the base model
-    test_model = AutoModelForCausalLM.from_pretrained(
+    # Policy Model (will be trained with LoRA)
+    # Use prepare_model_for_kbit_training if you're using quantization (e.g., 4-bit)
+    print(DTYPE)
+    policy_model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         torch_dtype=DTYPE,
         device_map=DEVICE
     )
-    # Load the LoRA adapter and merge
-    test_model = PeftModel.from_pretrained(test_model, final_model_path)
-    test_model = test_model.merge_and_unload() # Merge LoRA weights into base model
-    test_model.eval()
+    policy_model.config.use_cache = False # Required for gradient checkpointing, often helpful for training
+    policy_model.train() # Set to train mode for gradients
 
-    pipe = pipeline(
-        "text-generation",
-        model=test_model,
-        tokenizer=tokenizer,
+    # Apply LoRA to the policy model
+    peft_config = LoraConfig(
+        r=16,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules="all-linear", # or specify: ["q_proj", "v_proj", "k_proj", "o_proj"]
+    )
+    policy_model = get_peft_model(policy_model, peft_config)
+    policy_model.print_trainable_parameters()
+
+    # Reference Model (frozen copy of the initial SFT model)
+    # Ensure this model is *not* trained and is in eval mode.
+    ref_model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID,
         torch_dtype=DTYPE,
-        device=0
+        device_map=DEVICE
     )
 
-    test_prompt_message = [{"role": "user", "content": "Write a short, heartwarming story about an old cat."}]
-    test_prompt = tokenizer.apply_chat_template(
-        test_prompt_message,
-        tokenize=False,
-        add_generation_prompt=True
+    ref_model.eval() # Set to eval mode for no gradients and no dropout
+    for param in ref_model.parameters():
+        param.requires_grad = False
+    print("Policy model and reference model loaded.")
+
+    # --- 2. Data Preparation ---
+    print(f"Loading dataset: {DATASET_ID}...")
+    # --- 4. Optimizer and Scheduler ---
+    optimizer = AdamW(policy_model.parameters(), lr=LEARNING_RATE)
+
+    num_training_steps = (len(train_dataloader) // GRADIENT_ACCUMULATION_STEPS) * EPOCHS
+    lr_scheduler = get_scheduler(
+        name="cosine",
+        optimizer=optimizer,
+        num_warmup_steps=0,
+        num_training_steps=num_training_steps,
     )
 
-    print(f"Generating response for prompt:\n{test_prompt}")
-    
-    outputs = pipe(
-        test_prompt,
-        max_new_tokens=100,
-        do_sample=True,
-        temperature=0.7,
-        top_k=50,
-        top_p=0.95,
-        repetition_penalty=1.1,
-        eos_token_id=tokenizer.eos_token_id
-    )
-    print("\nGenerated Response (full):")
-    print(outputs[0]['generated_text'])
-    
-    generated_text_only = outputs[0]['generated_text'].replace(test_prompt, '').strip()
-    print("\nGenerated Response (clean):")
-    print(generated_text_only)
-else:
-    print("\nSkipping model testing: CUDA not available. Run on GPU for testing.")
+    # --- 5. Training Loop ---
+    print("Starting DPO training loop...")
+    global_step = 0
+    policy_model.zero_grad()
+
+    for epoch in range(EPOCHS):
+        policy_model.train() # Ensure policy model is in train mode
+        total_loss = 0
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{EPOCHS} Training")
+
+        for step, batch in enumerate(progress_bar):
+            # Move batch to device
+            batch = {k: v.to(DEVICE) for k, v in batch.items()}
+
+            # Compute log probabilities for chosen responses
+            log_prob_chosen_policy = get_log_probs(policy_model, batch['chosen_input_ids'], batch['chosen_attention_mask'], batch['prompt_len'])
+            with torch.no_grad(): # Ensure no gradients for reference model
+                log_prob_chosen_ref = get_log_probs(ref_model, batch['chosen_input_ids'], batch['chosen_attention_mask'], batch['prompt_len'])
+
+            # Compute log probabilities for rejected responses
+            log_prob_rejected_policy = get_log_probs(policy_model, batch['rejected_input_ids'], batch['rejected_attention_mask'], batch['prompt_len'])
+            with torch.no_grad():
+                log_prob_rejected_ref = get_log_probs(ref_model, batch['rejected_input_ids'], batch['rejected_attention_mask'], batch['prompt_len'])
+
+            # Calculate the DPO loss components
+            pi_log_ratio = log_prob_chosen_policy - log_prob_rejected_policy
+            ref_log_ratio = log_prob_chosen_ref - log_prob_rejected_ref
+
+            dpo_loss_components = -F.logsigmoid(BETA * (pi_log_ratio - ref_log_ratio))
+            
+            # Average loss over the batch
+            loss = dpo_loss_components.mean()
+            
+            # Backward pass with gradient accumulation
+            loss = loss / GRADIENT_ACCUMULATION_STEPS
+            loss.backward()
+
+            total_loss += loss.item() * GRADIENT_ACCUMULATION_STEPS # Scale back up for logging
+
+            if (step + 1) % GRADIENT_ACCUMULATION_STEPS == 0 or (step + 1) == len(train_dataloader):
+                # Clip gradients to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(policy_model.parameters(), 1.0)
+                
+                optimizer.step()
+                lr_scheduler.step()
+                policy_model.zero_grad()
+                global_step += 1
+                
+                progress_bar.set_postfix({
+                    "loss": total_loss / (step + 1),
+                    "learning_rate": lr_scheduler.get_last_lr()[0],
+                    "global_step": global_step
+                })
+
+        print(f"Epoch {epoch+1} finished. Average Training Loss: {total_loss / len(train_dataloader)}")
+
+        # --- Evaluation ---
+        policy_model.eval()
+        eval_loss = 0
+        eval_progress_bar = tqdm(eval_dataloader, desc=f"Epoch {epoch+1}/{EPOCHS} Evaluation")
+        with torch.no_grad():
+            for batch in eval_progress_bar:
+                batch = {k: v.to(DEVICE) for k, v in batch.items()}
+
+                log_prob_chosen_policy = get_log_probs(policy_model, batch['chosen_input_ids'], batch['chosen_attention_mask'], batch['prompt_len'])
+                log_prob_chosen_ref = get_log_probs(ref_model, batch['chosen_input_ids'], batch['chosen_attention_mask'], batch['prompt_len'])
+
+                log_prob_rejected_policy = get_log_probs(policy_model, batch['rejected_input_ids'], batch['rejected_attention_mask'], batch['prompt_len'])
+                log_prob_rejected_ref = get_log_probs(ref_model, batch['rejected_input_ids'], batch['rejected_attention_mask'], batch['prompt_len'])
+
+                pi_log_ratio = log_prob_chosen_policy - log_prob_rejected_policy
+                ref_log_ratio = log_prob_chosen_ref - log_prob_rejected_ref
+
+                dpo_loss_components = -F.logsigmoid(BETA * (pi_log_ratio - ref_log_ratio))
+                eval_loss += dpo_loss_components.mean().item()
+                eval_progress_bar.set_postfix({"eval_loss": eval_loss / (eval_progress_bar.n + 1)})
+                
+        print(f"Epoch {epoch+1} finished. Average Evaluation Loss: {eval_loss / len(eval_dataloader)}")
+
+        # --- Save the fine-tuned model ---
+        # Save the LoRA adapter
+        final_model_path = os.path.join(OUTPUT_DIR, f"final_checkpoint_{l}")
+        policy_model.save_pretrained(final_model_path)
+        tokenizer.save_pretrained(final_model_path)
+        print(f"Model saved to {final_model_path}")
+
+        print(f"DPO l = {l} training complete!")
+
+        # --- Optional: Test the trained model ---
+        if DEVICE == "cuda":
+            print("\n--- Testing the trained model ---")
+            from transformers import pipeline
+            from peft import PeftModel
+
+            # Load the base model
+            test_model = AutoModelForCausalLM.from_pretrained(
+                MODEL_ID,
+                torch_dtype=DTYPE,
+                device_map=DEVICE
+            )
+            # Load the LoRA adapter and merge
+            test_model = PeftModel.from_pretrained(test_model, final_model_path)
+            test_model = test_model.merge_and_unload() # Merge LoRA weights into base model
+            test_model.eval()
+
+            pipe = pipeline(
+                "text-generation",
+                model=test_model,
+                tokenizer=tokenizer,
+                torch_dtype=DTYPE,
+                device=0
+            )
+
+            test_prompt_message = [{"role": "user", "content": "Write a short, heartwarming story about an old cat."}]
+            test_prompt = tokenizer.apply_chat_template(
+                test_prompt_message,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+
+            print(f"Generating response for prompt:\n{test_prompt}")
+            
+            outputs = pipe(
+                test_prompt,
+                max_new_tokens=100,
+                do_sample=True,
+                temperature=0.7,
+                top_k=50,
+                top_p=0.95,
+                repetition_penalty=1.1,
+                eos_token_id=tokenizer.eos_token_id
+            )
+            print("\nGenerated Response (full):")
+            print(outputs[0]['generated_text'])
+            
+            generated_text_only = outputs[0]['generated_text'].replace(test_prompt, '').strip()
+            print("\nGenerated Response (clean):")
+            print(generated_text_only)
+        else:
+            print("\nSkipping model testing: CUDA not available. Run on GPU for testing.")
