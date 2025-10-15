@@ -57,7 +57,7 @@ GRADIENT_ACCUMULATION_STEPS = args.gradient_accumulation_steps # Effective batch
 MAX_LENGTH = args.max_length # Max total sequence length (prompt + response)
 MAX_PROMPT_LENGTH = args.max_prompt_length  # Max prompt length
 # --- Configuration ---
-MODEL_ID = "HuggingFaceTB/SmolLM2-135M" # A small model for quick demonstration
+MODEL_ID = "HuggingFaceTB/SmolLM2-1.7B" # A small model for quick demonstration
 DATASET_ID = "HuggingFaceH4/ultrafeedback_binarized" #"HuggingFaceH4/ultrafeedback_binarized"
 OUTPUT_DIR = f"./dpo_ensemble{L}"
 
