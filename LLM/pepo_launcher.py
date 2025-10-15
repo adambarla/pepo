@@ -494,6 +494,7 @@ for l in range(L):
         print(f"DPO l = {l} training complete!")
 
         # --- Optional: Test the trained model ---
+        print(DEVICE)
         if DEVICE == "cuda":
             print("\n--- Testing the trained model ---")
             from transformers import pipeline
