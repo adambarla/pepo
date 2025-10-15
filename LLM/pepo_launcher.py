@@ -354,7 +354,7 @@ def get_log_probs(model, input_ids, attention_mask, prompt_len):
     # Sum the log probabilities for each example
     return masked_log_probs.sum(dim=-1) # (batch_size,)
 
-for l in L:
+for l in range(L):
 
     # Policy Model (will be trained with LoRA)
     # Use prepare_model_for_kbit_training if you're using quantization (e.g., 4-bit)
