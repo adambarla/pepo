@@ -84,6 +84,19 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"
 
+# --- FIX: Manually set the chat template ---
+# Using the popular ChatML format.
+chat_template = (
+    "{% for message in messages %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}"
+        "{{ '<|im_start|>assistant\n' }}"
+    "{% endif %}"
+)
+tokenizer.chat_template = chat_template
+print("Chat template has been set manually.")
+
 dataset = load_dataset(path=DATASET_ID, split="train_sft")
 
 # For demonstration, select a small subset
