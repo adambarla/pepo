@@ -495,28 +495,33 @@ for l in range(L):
 
         # --- Optional: Test the trained model ---
         if DEVICE == f"cuda:{args.cuda_index}":
-            print("\n--- Testing the trained model ---")
-            from transformers import pipeline
-            from peft import PeftModel
+            # Assume MODEL_ID, DTYPE, DEVICE, final_model_path, and tokenizer are already defined
+            # For example: MODEL_ID = "HuggingFaceTB/SmolLM2-1.7B"
 
-            # Load the base model
-            test_model = AutoModelForCausalLM.from_pretrained(
+            # =============================================================
+            #  SECTION 1: Testing the BASE model (before fine-tuning)
+            # =============================================================
+            from transformers import pipeline, AutoModelForCausalLM
+            from peft import PeftModel
+            print("\n--- Testing the BASE model ---")
+
+            # Load the original base model
+            base_model = AutoModelForCausalLM.from_pretrained(
                 MODEL_ID,
                 torch_dtype=DTYPE,
                 device_map=DEVICE
             )
-            # Load the LoRA adapter and merge
-            test_model = PeftModel.from_pretrained(test_model, final_model_path)
-            test_model = test_model.merge_and_unload() # Merge LoRA weights into base model
-            test_model.eval()
+            base_model.eval()
 
-            pipe = pipeline(
+            # Create a pipeline for the base model
+            base_pipe = pipeline(
                 "text-generation",
-                model=test_model,
+                model=base_model,
                 tokenizer=tokenizer,
                 torch_dtype=DTYPE
             )
 
+            # Prepare the prompt (it's the same for both models)
             test_prompt_message = [{"role": "user", "content": "Write a short, heartwarming story about an old cat."}]
             test_prompt = tokenizer.apply_chat_template(
                 test_prompt_message,
@@ -524,8 +529,55 @@ for l in range(L):
                 add_generation_prompt=True
             )
 
-            print(f"Generating response for prompt:\n{test_prompt}")
-            
+            print(f"Generating response for prompt with BASE model:\n{test_prompt}")
+
+            base_outputs = base_pipe(
+                test_prompt,
+                max_new_tokens=1024,
+                do_sample=True,
+                temperature=0.05,
+                top_k=50,
+                top_p=0.95,
+                repetition_penalty=1.1,
+                eos_token_id=tokenizer.eos_token_id
+            )
+            print("\nGenerated Response from BASE model (full):")
+            print(base_outputs[0]['generated_text'])
+
+            base_generated_text_only = base_outputs[0]['generated_text'].replace(test_prompt, '').strip()
+            print("\nGenerated Response from BASE model (clean):")
+            print(base_generated_text_only)
+
+            # Clean up memory before loading the next model (optional, but good practice)
+            del base_model
+            del base_pipe
+
+            # =================================================================
+            #  SECTION 2: Testing the TRAINED (fine-tuned) model
+            # =================================================================
+
+            print("\n\n--- Testing the TRAINED model ---")
+
+            # Load the base model again to apply the adapter
+            trained_model_base = AutoModelForCausalLM.from_pretrained(
+                MODEL_ID,
+                torch_dtype=DTYPE,
+                device_map=DEVICE
+            )
+            # Load the LoRA adapter and merge
+            trained_model = PeftModel.from_pretrained(trained_model_base, final_model_path)
+            trained_model = trained_model.merge_and_unload() # Merge LoRA weights into base model
+            trained_model.eval()
+
+            pipe = pipeline(
+                "text-generation",
+                model=trained_model,
+                tokenizer=tokenizer,
+                torch_dtype=DTYPE
+            )
+
+            print(f"Generating response for prompt with TRAINED model:\n{test_prompt}")
+
             outputs = pipe(
                 test_prompt,
                 max_new_tokens=1024,
@@ -536,11 +588,11 @@ for l in range(L):
                 repetition_penalty=1.1,
                 eos_token_id=tokenizer.eos_token_id
             )
-            print("\nGenerated Response (full):")
+            print("\nGenerated Response from TRAINED model (full):")
             print(outputs[0]['generated_text'])
-            
+
             generated_text_only = outputs[0]['generated_text'].replace(test_prompt, '').strip()
-            print("\nGenerated Response (clean):")
+            print("\nGenerated Response from TRAINED model (clean):")
             print(generated_text_only)
         else:
             print("\nSkipping model testing: CUDA not available. Run on GPU for testing.")
