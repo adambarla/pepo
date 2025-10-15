@@ -224,7 +224,7 @@ def preprocess_function(examples):
 print("Preprocessing dataset (applying chat template and tokenizing)...")
 train_datasets = {}
 eval_datasets = {}
-for l, (train_dataset_raw, eval_dataset_raw) in enumerate(zip(train_datasets_raw,eval_datasets_raw)):
+for l, train_dataset_raw, eval_dataset_raw in enumerate(zip(train_datasets_raw,eval_datasets_raw)):
     train_datasets[l] = train_dataset_raw.map(
         preprocess_function,
         batched=True,
@@ -245,9 +245,6 @@ for l, (train_dataset_raw, eval_dataset_raw) in enumerate(zip(train_datasets_raw
                                                     'prompt_attention_mask', 'chosen_attention_mask', 'rejected_attention_mask', 'prompt_len'])
     eval_datasets[l].set_format(type="torch", columns=['prompt_input_ids', 'chosen_input_ids', 'rejected_input_ids',
                                                 'prompt_attention_mask', 'chosen_attention_mask', 'rejected_attention_mask', 'prompt_len'])
-
-
-print(f"After preprocessing: {len(train_dataset)} training examples and {len(eval_dataset)} evaluation examples.")
 
 # Custom Data Collator for DPO
 class DPODataCollator:
