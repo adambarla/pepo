@@ -535,10 +535,10 @@ for l in range(L):
                 test_prompt,
                 max_new_tokens=1024,
                 do_sample=True,
-                temperature=0.05,
+                temperature=0.3,
                 top_k=50,
                 top_p=0.95,
-                repetition_penalty=1.1,
+                repetition_penalty=1.3,
                 eos_token_id=tokenizer.eos_token_id
             )
             print("\nGenerated Response from BASE model (full):")
@@ -582,10 +582,10 @@ for l in range(L):
                 test_prompt,
                 max_new_tokens=1024,
                 do_sample=True,
-                temperature=0.05,
+                temperature=0.3,
                 top_k=50,
                 top_p=0.95,
-                repetition_penalty=1.1,
+                repetition_penalty=1.3,
                 eos_token_id=tokenizer.eos_token_id
             )
             print("\nGenerated Response from TRAINED model (full):")
