@@ -514,8 +514,7 @@ for l in range(L):
                 "text-generation",
                 model=test_model,
                 tokenizer=tokenizer,
-                torch_dtype=DTYPE,
-                device=0
+                torch_dtype=DTYPE
             )
 
             test_prompt_message = [{"role": "user", "content": "Write a short, heartwarming story about an old cat."}]
