@@ -23,9 +23,9 @@ import argparse
 
 parser = argparse.ArgumentParser(description="Parser for DPO training parameters.")
 
-parser.add_argument("--num_train_examples", type=int, default=60000,
+parser.add_argument("--num_train_examples", type=int, default=20,
                     help="Number of training examples to use.")
-parser.add_argument("--num_eval_examples", type=int, default=1000,
+parser.add_argument("--num_eval_examples", type=int, default=20,
                     help="Number of evaluation examples to use.")
 parser.add_argument("--epochs", type=int, default=3,
                     help="Number of training epochs.")
@@ -45,6 +45,7 @@ parser.add_argument("--cuda_index", type=int, default=0,
                     help="GPU Index")
 parser.add_argument("--max_prompt_length", type=int, default=512,
                         help="Maximum prompt length.")
+parser.add_argument("--model", type=str, default="HuggingFaceTB/SmolLM2-1.7B")
 args=parser.parse_args()
 # Training parameters
 NUM_TRAIN_EXAMPLES = args.num_train_examples # Use a small subset for demonstration
@@ -58,9 +59,10 @@ GRADIENT_ACCUMULATION_STEPS = args.gradient_accumulation_steps # Effective batch
 MAX_LENGTH = args.max_length # Max total sequence length (prompt + response)
 MAX_PROMPT_LENGTH = args.max_prompt_length  # Max prompt length
 # --- Configuration ---
-MODEL_ID = "HuggingFaceTB/SmolLM2-1.7B" # A small model for quick demonstration
+MODEL_ID = args.model# A small model for quick demonstration
 DATASET_ID = "HuggingFaceH4/ultrafeedback_binarized" #"HuggingFaceH4/ultrafeedback_binarized"
-OUTPUT_DIR = f"PessimisticDPO/dpo_ensemble{L}"
+name = last_substring = args.model.rsplit('/', 1)[-1] #Last substring
+OUTPUT_DIR = f"PessimisticDPO/{name}dpo_ensemble{L}"
 
 
 # Device setup
@@ -80,10 +82,10 @@ else:
 print(f"Selected device: {DEVICE} with dtype: {DTYPE}")
 # --- 1. Load Models and Tokenizer ---
 print(f"Loading model: {MODEL_ID}...")
-if "Instruct" not in MODEL_ID:
-    tokenizer = AutoTokenizer.from_pretrained(f"{MODEL_ID}-Instruct")
-else:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+#if "HuggingFaceTB/SmolLM2-1.7B" in MODEL_ID and "Instruct" not in MODEL_ID:
+#    tokenizer = AutoTokenizer.from_pretrained(f"{MODEL_ID}-Instruct")
+#else:
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, force_download=True)
 # Crucial for padding and chat templates
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"
@@ -98,8 +100,32 @@ chat_template = (
         "{{ '<|im_start|>assistant\n' }}"
     "{% endif %}"
 )
-#if "Instruct" not in MODEL_ID: tokenizer.chat_template = chat_template
-#print("Chat template has been set manually.")
+chat_template_smol = (
+            "{% if messages[0]['role'] == 'system' %}"
+                    "{{ messages[0]['content'] }}"
+                        "{% else %}"
+                                "{{ 'You are a helpful AI assistant.' }}"
+                                    "{% endif %}"
+                                        "{% for message in messages %}"
+                                                "{% if message['role'] == 'user' %}"
+                                                            "{{ '\n\n### User:\n' + message['content'] }}"
+                                                                    "{% elif message['role'] == 'assistant' %}"
+                                                                                "{{ '\n\n### Assistant:\n' + message['content'] }}"
+                                                                                        "{% endif %}"
+                                                                                            "{% endfor %}"
+                                                                                            )
+chat_template_gemma = (
+        "{{ bos_token }}"
+            "{% for message in messages %}"
+                    "{{ '<start_of_turn>' + message['role'] + '\n' + message['content'] + '<end_of_turn>\n' }}"
+                        "{% endfor %}"
+                            "{% if add_generation_prompt %}"
+                                    "{{ '<start_of_turn>model\n' }}"
+                                        "{% endif %}"
+                                        )
+if MODEL_ID=="google/gemma-3-1b-pt": tokenizer.chat_template = chat_template_gemma
+elif MODEL_ID=="HuggingFaceTB/SmolLM2-1.7B": tokenizer.chat_template = chat_template_smol
+else: pass  #print("Chat template has been set manually.")
 
 dataset = load_dataset(path=DATASET_ID, split="train_sft")
 
@@ -578,7 +604,7 @@ for l in range(L):
 
             base_outputs = base_pipe(
                 test_prompt,
-                max_new_tokens=1024,
+                max_new_tokens=50,
                 do_sample=True,
                 temperature=0.3,
                 top_k=50,
@@ -625,7 +651,7 @@ for l in range(L):
 
             outputs = pipe(
                 test_prompt,
-                max_new_tokens=1024,
+                max_new_tokens=50,
                 do_sample=True,
                 temperature=0.3,
                 top_k=50,
