@@ -1,12 +1,25 @@
-from huggingface_hub import login
+# python LLM/pepo_sampler.py --num_networks 4 --hf_username PessimisticDPO --model HuggingFaceTB/SmolLM2-1.7B
+
 import torch
 import argparse
+import os
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 from peft import PeftModel
 from tqdm import tqdm
+from huggingface_hub import login
 
-# Uncomment if you need to log in to HuggingFace
-# login()
+# Login to HuggingFace - only if not already logged in
+# This will use the cached token if available, otherwise prompt
+token = os.getenv("HF_TOKEN")
+if token:
+    login(token=token, add_to_git_credential=False)
+else:
+    # This will use cached credentials if available
+    try:
+        login(add_to_git_credential=False)
+    except Exception:
+        # If no cached token, prompt for one
+        login()
 
 # ==============================================================================
 # --- CONFIGURATION ---
@@ -27,7 +40,7 @@ args = parser.parse_args()
 BASE_MODEL_ID = args.model
 L = args.num_networks  # Number of networks in the ensemble
 name = args.model.rsplit('/', 1)[-1]  # Last substring
-OUTPUT_DIR = f"PessimisticDPO/{name}dpo_ensemble{L}"
+OUTPUT_DIR = f"{name}dpo_ensemble{L}"
 
 # Device setup
 if torch.cuda.is_available():
@@ -90,7 +103,7 @@ print(f"\n✓ All {L} ensemble models loaded into memory!")
 print(f"Ensemble models list contains {len(ensemble_models)} models.")
 
 
-def sample_next_token(prompt, use_chat_template=True, t_max=10):
+def sample_next_token(prompt, use_chat_template=True, t_max=10, use_idx_token=False):
     """
     Sample the next token using the ensemble of models with selective resampling.
     
@@ -130,27 +143,47 @@ def sample_next_token(prompt, use_chat_template=True, t_max=10):
             probs_list.append(probs)
 
         min_probs, _ = torch.min(torch.stack(probs_list), dim=0)
-        extra_mass = 1.0 - torch.sum(min_probs, dim=-1, keepdim=True)
-        adjusted_probs = torch.cat([min_probs, extra_mass], dim=-1)
-        # The index for our "I don't know" token is the last one
-        idk_token_id = adjusted_probs.shape[-1] - 1
-        sampled_token_ids = torch.multinomial(adjusted_probs, num_samples=1)
-        needs_resampling_mask = (sampled_token_ids == idk_token_id)
-        # 3. Iteratively resample only the necessary elements
-        for _ in range(t_max - 1): # We already did 1 sample, so loop t_max-1 times
-            # If no elements need resampling, break the loop early
-            if not torch.any(needs_resampling_mask):
-                break
-            
-            # Get the probabilities for only the elements that need resampling
-            # .squeeze(-1) removes the last dimension to make the mask 1D for indexing
-            probs_to_resample = adjusted_probs[needs_resampling_mask.squeeze(-1)]
-            # generate new samples for these elements
-            new_samples = torch.multinomial(probs_to_resample, num_samples=1)
-            # update the original tensor with the new samples at the correct positions
-            sampled_token_ids[needs_resampling_mask] = new_samples
-            # update the mask for the next iteration
+        if use_idx_token:
+            extra_mass = 1.0 - torch.sum(min_probs, dim=-1, keepdim=True)
+            adjusted_probs = torch.cat([min_probs, extra_mass], dim=-1)
+            # The index for our "I don't know" token is the last one
+            idk_token_id = adjusted_probs.shape[-1] - 1
+            sampled_token_ids = torch.multinomial(adjusted_probs, num_samples=1)
             needs_resampling_mask = (sampled_token_ids == idk_token_id)
+            
+            # Print when IDK token is sampled initially
+            if torch.any(needs_resampling_mask):
+                idk_count = needs_resampling_mask.sum().item()
+                idk_prob = extra_mass[needs_resampling_mask].mean().item()
+                print(f"[IDK] Sampled IDK token for {idk_count}/{len(prompt)} prompt(s) (prob: {idk_prob:.4f})")
+            
+            # 3. Iteratively resample only the necessary elements
+            resample_iteration = 0
+            for _ in range(t_max - 1): # We already did 1 sample, so loop t_max-1 times
+                # If no elements need resampling, break the loop early
+                if not torch.any(needs_resampling_mask):
+                    break
+                
+                resample_iteration += 1
+                
+                # Get the probabilities for only the elements that need resampling
+                # .squeeze(-1) removes the last dimension to make the mask 1D for indexing
+                probs_to_resample = adjusted_probs[needs_resampling_mask.squeeze(-1)]
+                # generate new samples for these elements
+                new_samples = torch.multinomial(probs_to_resample, num_samples=1)
+                # update the original tensor with the new samples at the correct positions
+                sampled_token_ids[needs_resampling_mask] = new_samples
+                # update the mask for the next iteration
+                needs_resampling_mask = (sampled_token_ids == idk_token_id)
+                
+                # Print resampling info
+                if torch.any(needs_resampling_mask):
+                    idk_count = needs_resampling_mask.sum().item()
+                    print(f"[IDK] Resampling iteration {resample_iteration}: Still IDK for {idk_count} prompt(s)")
+        else:
+            # renormalize min_probs
+            normalized_probs = min_probs / torch.sum(min_probs, dim=-1, keepdim=True)
+            sampled_token_ids = torch.multinomial(normalized_probs, num_samples=1)
 
 
     return tokenizer.batch_decode(sampled_token_ids)
@@ -160,24 +193,32 @@ if __name__ == "__main__":
     print("--- Simple Iterative Generation Example ---")
     print("="*50)
 
-    prompt = "Switzerland is known for its"
-    max_new_tokens = 30
-    
-    print(f"Initial prompt: '{prompt}'")
-    print(f"Generating up to {max_new_tokens} new tokens...\n")
-    
-    current_prompts = [prompt] 
-    
+    prompts = [
+        "Switzerland is known for its",
+        "The capital of France is",
+        "In computer science, a binary tree is",
+        "The theory of relativity was developed by",
+    ]  
+    max_new_tokens = 50
+
+    print(f"Initial prompts ({len(prompts)} total):")
+    for i, p in enumerate(prompts):
+        print(f"  [{i}] '{p}'")
+    print(f"\nGenerating up to {max_new_tokens} new tokens...\n")
+
+    current_prompts = prompts.copy()  # Start with a copy of the initial prompts
+
     for _ in tqdm(range(max_new_tokens), desc="Generating tokens"):
-        next_tokens = sample_next_token(current_prompts, use_chat_template=False)
+        next_tokens = sample_next_token(current_prompts, use_chat_template=False, t_max=1, use_idx_token=True)
         
-        if next_tokens[0] == tokenizer.eos_token:
-            print("\n[INFO] End-of-sequence token reached.")
+        # Check if any prompt hit EOS token
+        if any(token == tokenizer.eos_token for token in next_tokens):
+            print("\n[INFO] End-of-sequence token reached for at least one prompt.")
             break
         
-        current_prompts[0] += next_tokens[0]
+        # Append each next token to its corresponding prompt
+        current_prompts = [prompt + token for prompt, token in zip(current_prompts, next_tokens)]
 
-    final_text = current_prompts[0]
-    
-    print("\n\n--- Final Generation ---")
-    print(final_text)
+    print("\n\n--- Final Generations ---")
+    for i, text in enumerate(current_prompts):
+        print(f"\n[{i}] {text}")
