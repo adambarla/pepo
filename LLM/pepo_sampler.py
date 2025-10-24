@@ -103,7 +103,7 @@ print(f"\n✓ All {L} ensemble models loaded into memory!")
 print(f"Ensemble models list contains {len(ensemble_models)} models.")
 
 
-def sample_next_token(prompt, use_chat_template=True, t_max=10, use_idx_token=False):
+def sample_next_token(prompt, use_chat_template=True, t_max=10, use_idk_token=False):
     """
     Sample the next token using the ensemble of models with selective resampling.
     
@@ -143,7 +143,7 @@ def sample_next_token(prompt, use_chat_template=True, t_max=10, use_idx_token=Fa
             probs_list.append(probs)
 
         min_probs, _ = torch.min(torch.stack(probs_list), dim=0)
-        if use_idx_token:
+        if use_idk_token:
             extra_mass = 1.0 - torch.sum(min_probs, dim=-1, keepdim=True)
             adjusted_probs = torch.cat([min_probs, extra_mass], dim=-1)
             # The index for our "I don't know" token is the last one
@@ -209,7 +209,7 @@ if __name__ == "__main__":
     current_prompts = prompts.copy()  # Start with a copy of the initial prompts
 
     for _ in tqdm(range(max_new_tokens), desc="Generating tokens"):
-        next_tokens = sample_next_token(current_prompts, use_chat_template=False, t_max=1, use_idx_token=True)
+        next_tokens = sample_next_token(current_prompts, use_chat_template=False, t_max=1, use_idk_token=True)
         
         # Check if any prompt hit EOS token
         if any(token == tokenizer.eos_token for token in next_tokens):

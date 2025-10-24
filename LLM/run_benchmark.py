@@ -21,7 +21,10 @@ def setup_logging(log_file=None):
     """
     if log_file is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = f"benchmark_run_{timestamp}.log"
+        log_file = f"out/benchmark_run_{timestamp}.log"
+    
+    # Ensure out directory exists
+    os.makedirs("out", exist_ok=True)
     
     # Create logger
     logger = logging.getLogger()
@@ -94,7 +97,7 @@ else:
         exit(1)
 
 # ==============================================================================
-# --- PROMETHEUS JUDGE (REPLACES OPENAI) ---
+# --- PROMETHEUS JUDGE ---
 # ==============================================================================
 try:
     from vllm import LLM as VLLM_Engine
@@ -188,6 +191,7 @@ Your judgment:"""
     def get_judgment(self, prompt, response_a, response_b):
         try:
             judge_prompt = self._create_prometheus_prompt(prompt, response_a, response_b)
+            logging.info(f"      Sending prompt to judge (length: {len(judge_prompt)} chars)")
             outputs = self.model.generate([judge_prompt], self.sampling_params)
             
             if not outputs or len(outputs) == 0:
@@ -195,6 +199,7 @@ Your judgment:"""
                 return "ERROR"
             
             judgment_text = outputs[0].outputs[0].text.strip().upper()
+            logging.info(f"      Judge raw output (length: {len(judgment_text)} chars)")
             
             # Parse the judgment from the output
             if "A" in judgment_text[-100:]:  # Check last 100 chars for final judgment
@@ -243,7 +248,7 @@ else:
 # ==============================================================================
 class PepoEnsemble:
     """
-    Loads and manages the PEPO/χPO ensemble models.
+    Loads and manages the PEPO ensemble models.
     """
     def __init__(self, base_model_id, hf_username, num_networks, device, dtype):
         self.base_model_id = base_model_id
@@ -283,9 +288,9 @@ class PepoEnsemble:
         
         logging.info(f"\n✓ All {self.num_networks} PEPO models loaded to {self.device}!")
 
-    def sample_next_token(self, prompts, t_max=10, use_idx_token=False):
+    def sample_next_token(self, prompts, t_max=10, use_idk_token=False):
         """
-        Performs the core PEPO/χPO sampling logic.
+        Performs the core PEPO sampling logic.
         """
         inputs = self.tokenizer(prompts, return_tensors="pt", padding=True).to(self.device)
         
@@ -299,35 +304,55 @@ class PepoEnsemble:
 
             min_probs, _ = torch.min(torch.stack(probs_list), dim=0)
             
-            if use_idx_token:
+            if use_idk_token:
+                # Add an extra "I don't know" token as the last column of probabilities
                 extra_mass = 1.0 - torch.sum(min_probs, dim=-1, keepdim=True)
                 adjusted_probs = torch.cat([min_probs, extra_mass], dim=-1)
                 idk_token_id = adjusted_probs.shape[-1] - 1
-                sampled_token_ids = torch.multinomial(adjusted_probs, num_samples=1)
-                needs_resampling_mask = (sampled_token_ids == idk_token_id)
-                
+
+                # Draw initial samples (shape: [batch, 1]) and convert to 1D for easy masking
+                sampled_token_ids = torch.multinomial(adjusted_probs, num_samples=1).squeeze(-1)
+
+                # Mask where we sampled the IDK token
+                needs_resample = (sampled_token_ids == idk_token_id)
+
+                # Iteratively resample up to t_max-1 times for entries that picked IDK
                 for _ in range(t_max - 1):
-                    if not torch.any(needs_resampling_mask):
+                    if not torch.any(needs_resample):
                         break
-                    probs_to_resample = adjusted_probs[needs_resampling_mask.squeeze(-1)]
-                    new_samples = torch.multinomial(probs_to_resample, num_samples=1)
-                    sampled_token_ids[needs_resampling_mask] = new_samples
-                    needs_resampling_mask = (sampled_token_ids == idk_token_id)
+                    probs_to_resample = adjusted_probs[needs_resample]
+                    # new_samples shape: [num_resample, 1] -> squeeze to [num_resample]
+                    new_samples = torch.multinomial(probs_to_resample, num_samples=1).squeeze(-1)
+                    # Assign back to the 1D sampled_token_ids
+                    sampled_token_ids[needs_resample] = new_samples
+                    needs_resample = (sampled_token_ids == idk_token_id)
+                # For decoding, present token ids as list-of-lists [[id], [id], ...]
+                sampled_token_ids = sampled_token_ids.unsqueeze(-1)
             else:
                 normalized_probs = min_probs / torch.sum(min_probs, dim=-1, keepdim=True)
                 sampled_token_ids = torch.multinomial(normalized_probs, num_samples=1)
 
-        return self.tokenizer.batch_decode(sampled_token_ids)
+        # Ensure we pass a list-of-lists to batch_decode
+        if isinstance(sampled_token_ids, torch.Tensor):
+            token_list = sampled_token_ids.cpu().tolist()
+        else:
+            token_list = sampled_token_ids
+        return self.tokenizer.batch_decode(token_list)
 
-    def generate(self, initial_prompts, max_new_tokens, t_max, use_idx_token):
+    def generate(self, initial_prompts, max_new_tokens, t_max, use_idk_token):
         """
         Generates full sequences for a batch of prompts using the PEPO ensemble.
         """
+        batch_size = len(initial_prompts)
+        logging.info(f"      Starting PEPO generation for {batch_size} prompts (max_tokens={max_new_tokens})")
+        
         current_prompts = initial_prompts.copy()
         finished = [False] * len(current_prompts)
         
+        tokens_generated = 0
         for i in range(max_new_tokens):
             if all(finished):
+                logging.info(f"      All sequences finished after {tokens_generated} tokens")
                 break
             
             active_prompts = [p for p, f in zip(current_prompts, finished) if not f]
@@ -336,10 +361,15 @@ class PepoEnsemble:
             if not active_prompts:
                 break
 
+            # Log every 50 tokens
+            if i > 0 and i % 50 == 0:
+                active_count = len(active_prompts)
+                logging.info(f"      Generated {i}/{max_new_tokens} tokens, {active_count}/{batch_size} sequences still active")
+
             next_tokens = self.sample_next_token(
                 active_prompts, 
                 t_max=t_max, 
-                use_idx_token=use_idx_token
+                use_idk_token=use_idk_token
             )
             
             token_idx = 0
@@ -350,6 +380,10 @@ class PepoEnsemble:
                     finished[idx] = True
                 else:
                     current_prompts[idx] += token
+            
+            tokens_generated = i + 1
+        
+        logging.info(f"      PEPO generation complete: {tokens_generated} tokens, {sum(finished)}/{batch_size} finished")
         
         return [
             current_prompts[i][len(initial_prompts[i]):] 
@@ -377,8 +411,13 @@ def generate_baseline(prompts, model, tokenizer, max_new_tokens):
     """
     Generates full sequences from the baseline DPO model.
     """
+    batch_size = len(prompts)
+    logging.info(f"      Starting DPO generation for {batch_size} prompts (max_tokens={max_new_tokens})")
+    
     tokenizer.padding_side = "left"
     inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
+    
+    logging.info(f"      Input shape: {inputs['input_ids'].shape}")
     
     with torch.no_grad():
         outputs = model.generate(
@@ -390,6 +429,8 @@ def generate_baseline(prompts, model, tokenizer, max_new_tokens):
             top_p=0.9,
         )
     
+    logging.info(f"      DPO generation complete, decoding {outputs.shape[0]} sequences")
+    
     decoded_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
     return [
         decoded_texts[i][len(prompts[i]):] 
@@ -400,7 +441,7 @@ def generate_baseline(prompts, model, tokenizer, max_new_tokens):
 # --- MAIN EVALUATION SCRIPT ---
 # ==============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="Parser for PEPO/χPO Evaluation.")
+    parser = argparse.ArgumentParser(description="Parser for PEPO Evaluation.")
     
     # --- PEPO Ensemble Args ---
     parser.add_argument("--num_networks", type=int, default=4,
@@ -419,7 +460,7 @@ def main():
     # --- PEPO Sampling Args ---
     parser.add_argument("--pepo_t_max", type=int, default=10,
                         help="Maximum resampling attempts for 'I don't know' token.")
-    parser.add_argument("--pepo_use_idx_token", action="store_true",
+    parser.add_argument("--pepo_use_idk_token", action="store_true",
                         help="Use the 'I don't know' token sampling method.")
 
     # --- Evaluation Args (MODIFIED) ---
@@ -446,12 +487,12 @@ def main():
 
     # Update log file name based on arguments
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = f"benchmark_{args.evaluation_dataset}_L{args.num_networks}_{timestamp}.log"
+    log_filename = f"out/benchmark_{args.evaluation_dataset}_L{args.num_networks}_{timestamp}.log"
     global log_file
     log_file = setup_logging(log_filename)
     
     logging.info("="*70)
-    logging.info("PEPO/χPO Benchmark Evaluation Started")
+    logging.info("PEPO Benchmark Evaluation Started")
     logging.info("="*70)
     logging.info(f"Evaluation Dataset: {args.evaluation_dataset}")
     logging.info(f"Number of Ensemble Networks: {args.num_networks}")
@@ -474,7 +515,7 @@ def main():
         PEPO_DEVICE = DPO_DEVICE = JUDGE_DEVICE = DEVICE_NAME
         logging.info(f"Using single device: {PEPO_DEVICE}")
 
-    # 1. Load PEPO/χPO Ensemble Model (Needed for tokenizer)
+    # 1. Load PEPO Ensemble Model (Needed for tokenizer)
     pepo_model = PepoEnsemble(
         base_model_id=args.model,
         hf_username=args.hf_username,
@@ -498,23 +539,23 @@ def main():
     elif args.evaluation_dataset == "alpaca_eval":
         dataset_id = "tatsu-lab/alpaca_eval"
         dataset_split = "eval"
-        prompt_column = "instruction"
+        prompt_column = "turns"
         needs_chat_template = False
         rubric_criteria = "The response should be helpful, relevant, and follow the user's instruction."
         if args.max_new_tokens is None:
             args.max_new_tokens = 512
 
     elif args.evaluation_dataset == "arena_hard":
-        dataset_id = "lmarena-ai/arena-hard-auto"
+        dataset_id = "lmarena-ai/arena-hard-auto-v0.1"
         dataset_split = "train" # Prompts are in the train split
-        prompt_column = "prompt"
+        prompt_column = "turns"
         needs_chat_template = True # This is key
         rubric_criteria = "The response should be helpful, relevant, and follow the user's instruction in the conversation."
         if args.max_new_tokens is None:
             args.max_new_tokens = 512
             
     if args.output_file is None:
-        args.output_file = f"evaluation_results_{args.evaluation_dataset}.jsonl"
+        args.output_file = f"out/evaluation_results_{args.evaluation_dataset}.jsonl"
         
     logging.info(f"Dataset: {dataset_id} ({dataset_split})")
     logging.info(f"Max New Tokens: {args.max_new_tokens}")
@@ -566,23 +607,80 @@ def main():
     dpo_wins = 0
     ties = 0
     
+    total_batches = (len(prompts) + args.batch_size - 1) // args.batch_size
+    
+    # Create a detailed generation log file
+    generation_log_file = args.output_file.replace('.jsonl', '_generations.log')
+    generation_logger = logging.getLogger('generations')
+    generation_logger.setLevel(logging.INFO)
+    gen_handler = logging.FileHandler(generation_log_file, mode='w')
+    gen_handler.setFormatter(logging.Formatter('%(message)s'))
+    generation_logger.addHandler(gen_handler)
+    generation_logger.propagate = False  # Don't propagate to root logger
+    
+    logging.info(f"Detailed generations will be logged to: {generation_log_file}")
+    
     with open(args.output_file, 'w') as f_out:
-        for i in tqdm(range(0, len(prompts), args.batch_size), desc="Evaluating Batches"):
+        for batch_idx, i in enumerate(tqdm(range(0, len(prompts), args.batch_size), desc="Evaluating Batches")):
             batch_prompts = prompts[i:i+args.batch_size]
             
+            import time
+            batch_start_time = time.time()
+            
+            logging.info(f"\n[Batch {batch_idx+1}/{total_batches}] Processing samples {i+1}-{min(i+args.batch_size, len(prompts))}")
+            logging.info(f"  Batch contains {len(batch_prompts)} prompts")
+            logging.info(f"  Average prompt length: {sum(len(p) for p in batch_prompts) / len(batch_prompts):.0f} chars")
+            
+            logging.info(f"  Generating PEPO responses...")
+            pepo_start = time.time()
             pepo_responses = pepo_model.generate(
                 batch_prompts, 
                 args.max_new_tokens, 
                 args.pepo_t_max, 
-                args.pepo_use_idx_token
+                args.pepo_use_idk_token
             )
+            pepo_time = time.time() - pepo_start
+            logging.info(f"  PEPO generation took {pepo_time:.2f}s")
             
+            # Log PEPO responses
+            generation_logger.info(f"\n{'='*80}")
+            generation_logger.info(f"BATCH {batch_idx+1} - PEPO RESPONSES")
+            generation_logger.info(f"{'='*80}")
+            for idx, (prompt, response) in enumerate(zip(batch_prompts, pepo_responses)):
+                generation_logger.info(f"\n[Sample {i+idx+1}] PROMPT:")
+                generation_logger.info(f"{prompt[:200]}..." if len(prompt) > 200 else prompt)
+                generation_logger.info(f"\n[Sample {i+idx+1}] PEPO RESPONSE:")
+                generation_logger.info(response)
+                generation_logger.info("-"*80)
+            
+            logging.info(f"  Generating DPO baseline responses...")
+            dpo_start = time.time()
             dpo_responses = generate_baseline(
                 batch_prompts, 
                 dpo_model, 
                 tokenizer, 
                 args.max_new_tokens
             )
+            dpo_time = time.time() - dpo_start
+            logging.info(f"  DPO generation took {dpo_time:.2f}s")
+            
+            # Log DPO responses
+            generation_logger.info(f"\n{'='*80}")
+            generation_logger.info(f"BATCH {batch_idx+1} - DPO RESPONSES")
+            generation_logger.info(f"{'='*80}")
+            for idx, (prompt, response) in enumerate(zip(batch_prompts, dpo_responses)):
+                generation_logger.info(f"\n[Sample {i+idx+1}] PROMPT:")
+                generation_logger.info(f"{prompt[:200]}..." if len(prompt) > 200 else prompt)
+                generation_logger.info(f"\n[Sample {i+idx+1}] DPO RESPONSE:")
+                generation_logger.info(response)
+                generation_logger.info("-"*80)
+            
+            logging.info(f"  Running judge comparisons...")
+
+            # Log judge evaluations header
+            generation_logger.info(f"\n{'='*80}")
+            generation_logger.info(f"BATCH {batch_idx+1} - JUDGE EVALUATIONS")
+            generation_logger.info(f"{'='*80}")
 
             for j in range(len(batch_prompts)):
                 prompt = batch_prompts[j]
@@ -593,7 +691,18 @@ def main():
                 response_a = pepo_res if is_pepo_a else dpo_res
                 response_b = dpo_res if is_pepo_a else pepo_res
 
+                sample_num = i + j + 1
+                logging.info(f"    [Sample {sample_num}/{len(prompts)}] Calling judge (PEPO={'A' if is_pepo_a else 'B'})...")
                 judgment = judge.get_judgment(prompt, response_a, response_b)
+                logging.info(f"    [Sample {sample_num}/{len(prompts)}] Judge verdict: {judgment}")
+                
+                # Log judge evaluation details
+                generation_logger.info(f"\n[Sample {sample_num}] JUDGE INPUT:")
+                generation_logger.info(f"  PEPO position: {'A' if is_pepo_a else 'B'}")
+                generation_logger.info(f"  Response A: {response_a[:100]}..." if len(response_a) > 100 else f"  Response A: {response_a}")
+                generation_logger.info(f"  Response B: {response_b[:100]}..." if len(response_b) > 100 else f"  Response B: {response_b}")
+                generation_logger.info(f"\n[Sample {sample_num}] PARSED VERDICT: {judgment}")
+                generation_logger.info("-"*80)
 
                 if (judgment == "A" and is_pepo_a) or (judgment == "B" and not is_pepo_a):
                     pepo_wins += 1
@@ -611,6 +720,18 @@ def main():
                     "judgment": judgment
                 }
                 f_out.write(json.dumps(result_entry) + "\n")
+            
+            # Log progress after each batch
+            f_out.flush()
+            batch_total_time = time.time() - batch_start_time
+            logging.info(f"  ✓ Batch {batch_idx+1} complete in {batch_total_time:.2f}s")
+            logging.info(f"    Current scores - PEPO: {pepo_wins}, DPO: {dpo_wins}, Ties: {ties}")
+            
+            # Estimate remaining time
+            avg_time_per_batch = batch_total_time  # Could keep running average
+            remaining_batches = total_batches - (batch_idx + 1)
+            est_remaining_time = avg_time_per_batch * remaining_batches
+            logging.info(f"    Estimated time remaining: {est_remaining_time/60:.1f} minutes")
 
     # 7. Print Final Report
     logging.info("\n--- Evaluation Complete ---")
@@ -624,11 +745,11 @@ def main():
         logging.info(f"\n--- Prometheus ({args.judge_model_id}) Judgment Results ---")
         logging.info(f"Evaluation Dataset:  {args.evaluation_dataset}")
         logging.info(f"Total Judged Samples: {total_judged}")
-        logging.info(f"PEPO (χPO) Wins:    {pepo_wins}")
+        logging.info(f"PEPO Wins:    {pepo_wins}")
         logging.info(f"DPO Baseline Wins: {dpo_wins}")
         logging.info(f"Ties:                {ties}")
         logging.info("-" * 30)
-        logging.info(f"PEPO (χPO) Win-Rate (vs DPO): {pepo_winrate:.2%}")
+        logging.info(f"PEPO Win-Rate (vs DPO): {pepo_winrate:.2%}")
         logging.info(f"DPO Baseline Win-Rate (vs PEPO): {dpo_winrate:.2%}")
     else:
         logging.warning("\nNo samples were judged.")
