@@ -1,7 +1,3 @@
-from huggingface_hub import login
-
-#login()
-
 import torch
 import os
 import numpy as np
@@ -20,6 +16,7 @@ from tqdm import tqdm
 import os
 import math
 import argparse
+import math
 
 parser = argparse.ArgumentParser(description="Parser for DPO training parameters.")
 
@@ -45,9 +42,12 @@ parser.add_argument("--cuda_index", type=int, default=0,
                     help="GPU Index")
 parser.add_argument("--max_prompt_length", type=int, default=512,
                         help="Maximum prompt length.")
+parser.add_argument("--alpha", type=float, default=0.1,
+                    help="Pessimistic margin alpha for the loss function.")
 parser.add_argument("--model", type=str, default="HuggingFaceTB/SmolLM2-1.7B")
 args=parser.parse_args()
 # Training parameters
+ALPHA = args.alpha
 NUM_TRAIN_EXAMPLES = args.num_train_examples # Use a small subset for demonstration
 NUM_EVAL_EXAMPLES = args.num_eval_examples
 EPOCHS = args.epochs
@@ -62,7 +62,7 @@ MAX_PROMPT_LENGTH = args.max_prompt_length  # Max prompt length
 MODEL_ID = args.model# A small model for quick demonstration
 DATASET_ID = "HuggingFaceH4/ultrafeedback_binarized" #"HuggingFaceH4/ultrafeedback_binarized"
 name = last_substring = args.model.rsplit('/', 1)[-1] #Last substring
-OUTPUT_DIR = f"PessimisticDPO/{name}dpo_ensemble{L}"
+OUTPUT_DIR = f"PessimisticDPO/{name}dpo_ensemble_with_alpha{L}"
 
 
 # Device setup
@@ -486,9 +486,10 @@ for l in range(L):
             # Calculate the DPO loss components
             pi_log_ratio = log_prob_chosen_policy - log_prob_rejected_policy
             ref_log_ratio = log_prob_chosen_ref - log_prob_rejected_ref
+            alpha_offset = math.log(1.0 + ALPHA)
+            argument = BETA * (pi_log_ratio - ref_log_ratio - alpha_offset)
+            dpo_loss_components = -F.logsigmoid(argument)
 
-            dpo_loss_components = -F.logsigmoid(BETA * (pi_log_ratio - ref_log_ratio))
-            
             # Average loss over the batch
             loss = dpo_loss_components.mean()
             
@@ -532,7 +533,9 @@ for l in range(L):
                 pi_log_ratio = log_prob_chosen_policy - log_prob_rejected_policy
                 ref_log_ratio = log_prob_chosen_ref - log_prob_rejected_ref
 
-                dpo_loss_components = -F.logsigmoid(BETA * (pi_log_ratio - ref_log_ratio))
+                alpha_offset = math.log(1.0 + ALPHA)
+                argument = BETA * (pi_log_ratio - ref_log_ratio - alpha_offset)
+                dpo_loss_components = -F.logsigmoid(argument)
                 eval_loss += dpo_loss_components.mean().item()
                 eval_progress_bar.set_postfix({"eval_loss": eval_loss / (eval_progress_bar.n + 1)})
                 

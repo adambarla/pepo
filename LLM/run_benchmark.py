@@ -12,9 +12,7 @@ from tqdm import tqdm
 from huggingface_hub import login
 from datasets import load_dataset
 
-# ==============================================================================
-# --- LOGGING SETUP ---
-# ==============================================================================
+
 def setup_logging(log_file=None):
     """
     Sets up logging to both file and console with timestamps.
@@ -23,35 +21,22 @@ def setup_logging(log_file=None):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = f"out/benchmark_run_{timestamp}.log"
     
-    # Ensure out directory exists
     os.makedirs("out", exist_ok=True)
-    
-    # Create logger
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
-    
-    # Remove existing handlers
     logger.handlers = []
-    
-    # Create formatters
     formatter = logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    
-    # File handler
     file_handler = logging.FileHandler(log_file, mode='a')
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
-    
-    # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
-    
-    # Also capture print statements
     class LoggerWriter:
         def __init__(self, level):
             self.level = level
@@ -63,17 +48,11 @@ def setup_logging(log_file=None):
         def flush(self):
             pass
     
-    # Uncomment to redirect print to logging (optional)
-    # sys.stdout = LoggerWriter(logger.info)
-    # sys.stderr = LoggerWriter(logger.error)
-    
     logging.info(f"Logging initialized. Log file: {log_file}")
     return log_file
 
-# Initialize logging early (will be updated with proper filename in main)
 log_file = setup_logging()
 
-# --- HuggingFace Login ---
 token = os.getenv("HF_TOKEN")
 if token:
     login(token=token, add_to_git_credential=False)
@@ -96,9 +75,6 @@ else:
         logging.error("="*70)
         exit(1)
 
-# ==============================================================================
-# --- PROMETHEUS JUDGE ---
-# ==============================================================================
 try:
     from vllm import LLM as VLLM_Engine
     from vllm import SamplingParams
@@ -117,7 +93,6 @@ class PrometheusJudge:
     def __init__(self, model_id, device, rubric_criteria, gpu_memory_utilization=0.9):
         logging.info(f"\n--- Loading Open-Source Judge: {model_id} on {device} ---")
         
-        # Extract GPU ID from device string (e.g., "cuda:2" -> "2")
         if 'cuda' in device:
             gpu_id = device.split(':')[1] if ':' in device else '0'
             tensor_parallel_size = 1
@@ -132,8 +107,7 @@ class PrometheusJudge:
             'dtype': 'auto',
             'tensor_parallel_size': tensor_parallel_size,
         }
-        
-        # Set CUDA_VISIBLE_DEVICES to use specific GPU
+
         if gpu_id is not None:
             logging.info(f"Setting judge to use GPU {gpu_id}")
             original_cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', None)
@@ -141,7 +115,6 @@ class PrometheusJudge:
             
         self.model = VLLM_Engine(**vllm_kwargs)
         
-        # Restore original CUDA_VISIBLE_DEVICES
         if gpu_id is not None:
             if original_cuda_visible is not None:
                 os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda_visible
@@ -226,9 +199,6 @@ Your judgment:"""
             logging.error(f"Error calling judge: {e}")
             return "ERROR"
 
-# ==============================================================================
-# --- DEVICE & DTYPE SETUP ---
-# ==============================================================================
 if torch.cuda.is_available():
     DEFAULT_CUDA_INDEX = torch.cuda.current_device()
     DEVICE_NAME = f"cuda:{DEFAULT_CUDA_INDEX}"
@@ -240,12 +210,6 @@ else:
     DEVICE_NAME = "cpu"
     DTYPE = torch.float32
 
-# This will be configured when main() is called
-# print(f"Default device: {DEVICE_NAME} with dtype: {DTYPE}")
-
-# ==============================================================================
-# --- PEPO ENSEMBLE LOADER CLASS ---
-# ==============================================================================
 class PepoEnsemble:
     """
     Loads and manages the PEPO ensemble models.
@@ -288,9 +252,10 @@ class PepoEnsemble:
         
         logging.info(f"\n✓ All {self.num_networks} PEPO models loaded to {self.device}!")
 
-    def sample_next_token(self, prompts, t_max=10, use_idk_token=False):
+    def sample_next_token(self, prompts, temperature, top_p, t_max=10, use_idk_token=False):
         """
         Performs the core PEPO sampling logic.
+        Applies temperature and top_p sampling to the selected distribution.
         """
         inputs = self.tokenizer(prompts, return_tensors="pt", padding=True).to(self.device)
         
@@ -301,45 +266,73 @@ class PepoEnsemble:
                 next_token_logits = outputs.logits[:, -1, :]
                 probs = torch.softmax(next_token_logits, dim=-1)
                 probs_list.append(probs)
-
             min_probs, _ = torch.min(torch.stack(probs_list), dim=0)
-            
+            idk_token_id = -1
             if use_idk_token:
-                # Add an extra "I don't know" token as the last column of probabilities
+                logging.info(f"      Using PEPO-IDK Top-p sampling (Temp={temperature}, Top-p={top_p})")
                 extra_mass = 1.0 - torch.sum(min_probs, dim=-1, keepdim=True)
-                adjusted_probs = torch.cat([min_probs, extra_mass], dim=-1)
-                idk_token_id = adjusted_probs.shape[-1] - 1
+                extra_mass = torch.clamp(extra_mass, min=0.0) # ensure no negative probs
+                distribution_to_sample = torch.cat([min_probs, extra_mass], dim=-1)
+                idk_token_id = distribution_to_sample.shape[-1] - 1
+            else:
+                logging.info(f"      Using PEPO Top-p sampling (Temp={temperature}, Top-p={top_p})")
+                distribution_to_sample = min_probs
+            scaled_logits = torch.log(distribution_to_sample + 1e-9) / temperature
+            temp_scaled_probs = torch.softmax(scaled_logits, dim=-1)
+            sorted_probs, sorted_indices = torch.sort(temp_scaled_probs, descending=True)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0 # always keep at least one token
+            indices_to_remove = torch.zeros_like(sorted_indices_to_remove).scatter_(
+                dim=1, 
+                index=sorted_indices, 
+                src=sorted_indices_to_remove
+            )
+            filtered_probs = temp_scaled_probs.clone()
+            filtered_probs[indices_to_remove] = 0.0
+            normalized_probs = filtered_probs / torch.sum(filtered_probs, dim=-1, keepdim=True)
+            normalized_probs = torch.nan_to_num(normalized_probs, nan=0.0)
+            sampled_token_ids = torch.multinomial(normalized_probs, num_samples=1).squeeze(-1)
 
-                # Draw initial samples (shape: [batch, 1]) and convert to 1D for easy masking
-                sampled_token_ids = torch.multinomial(adjusted_probs, num_samples=1).squeeze(-1)
-
-                # Mask where we sampled the IDK token
+            if use_idk_token and idk_token_id != -1:
                 needs_resample = (sampled_token_ids == idk_token_id)
-
-                # Iteratively resample up to t_max-1 times for entries that picked IDK
                 for _ in range(t_max - 1):
                     if not torch.any(needs_resample):
                         break
-                    probs_to_resample = adjusted_probs[needs_resample]
-                    # new_samples shape: [num_resample, 1] -> squeeze to [num_resample]
-                    new_samples = torch.multinomial(probs_to_resample, num_samples=1).squeeze(-1)
-                    # Assign back to the 1D sampled_token_ids
-                    sampled_token_ids[needs_resample] = new_samples
-                    needs_resample = (sampled_token_ids == idk_token_id)
-                # For decoding, present token ids as list-of-lists [[id], [id], ...]
-                sampled_token_ids = sampled_token_ids.unsqueeze(-1)
-            else:
-                normalized_probs = min_probs / torch.sum(min_probs, dim=-1, keepdim=True)
-                sampled_token_ids = torch.multinomial(normalized_probs, num_samples=1)
+                    probs_to_resample = normalized_probs[needs_resample]
+                    
+                    # guard against empty/zero probability rows if filtering was too aggressive
+                    if probs_to_resample.shape[0] > 0 and torch.sum(probs_to_resample) > 0:
+                        new_samples = torch.multinomial(probs_to_resample, num_samples=1).squeeze(-1)
+                        sampled_token_ids[needs_resample] = new_samples
+                        needs_resample = (sampled_token_ids == idk_token_id)
+                    else:
+                        break
+            sampled_token_ids = sampled_token_ids.unsqueeze(-1)
 
-        # Ensure we pass a list-of-lists to batch_decode
         if isinstance(sampled_token_ids, torch.Tensor):
             token_list = sampled_token_ids.cpu().tolist()
         else:
             token_list = sampled_token_ids
-        return self.tokenizer.batch_decode(token_list)
+        
+        final_token_list = []
+        if idk_token_id != -1:
+            eos_token_id = self.tokenizer.eos_token_id
+            assert eos_token_id is not None, "Tokenizer must have an EOS token ID defined."
+                
+            for token_id_list in token_list:
+                if token_id_list[0] == idk_token_id:
+                    logging.warning("Warning: 'I don't know' token ID survived sampling. Replacing with EOS token.")
+                    final_token_list.append([eos_token_id])
+                else:
+                    final_token_list.append(token_id_list)
+        else:
+            final_token_list = token_list
 
-    def generate(self, initial_prompts, max_new_tokens, t_max, use_idk_token):
+        return self.tokenizer.batch_decode(final_token_list)
+
+    def generate(self, initial_prompts, max_new_tokens, t_max, use_idk_token, temperature, top_p):
         """
         Generates full sequences for a batch of prompts using the PEPO ensemble.
         """
@@ -353,22 +346,21 @@ class PepoEnsemble:
         for i in range(max_new_tokens):
             if all(finished):
                 logging.info(f"      All sequences finished after {tokens_generated} tokens")
-                break
-            
+                break   
             active_prompts = [p for p, f in zip(current_prompts, finished) if not f]
             active_indices = [i for i, f in enumerate(finished) if not f]
-
             if not active_prompts:
                 break
 
-            # Log every 50 tokens
             if i > 0 and i % 50 == 0:
                 active_count = len(active_prompts)
                 logging.info(f"      Generated {i}/{max_new_tokens} tokens, {active_count}/{batch_size} sequences still active")
 
             next_tokens = self.sample_next_token(
-                active_prompts, 
-                t_max=t_max, 
+                active_prompts,
+                temperature=temperature,
+                top_p=top_p,
+                t_max=t_max,
                 use_idk_token=use_idk_token
             )
             
@@ -390,9 +382,6 @@ class PepoEnsemble:
             for i in range(len(initial_prompts))
         ]
 
-# ==============================================================================
-# --- BASELINE MODEL GENERATION ---
-# ==============================================================================
 def load_baseline_model(model_id, device, dtype):
     """
     Loads the DPO baseline model for comparison.
@@ -407,7 +396,7 @@ def load_baseline_model(model_id, device, dtype):
     logging.info(f"✓ DPO baseline model loaded to {device}!")
     return model
 
-def generate_baseline(prompts, model, tokenizer, max_new_tokens):
+def generate_baseline(prompts, model, tokenizer, max_new_tokens, temperature, top_p):
     """
     Generates full sequences from the baseline DPO model.
     """
@@ -425,10 +414,9 @@ def generate_baseline(prompts, model, tokenizer, max_new_tokens):
             max_new_tokens=max_new_tokens,
             pad_token_id=tokenizer.eos_token_id,
             do_sample=True,
-            temperature=0.7,
-            top_p=0.9,
+            temperature=temperature,
+            top_p=top_p,
         )
-    
     logging.info(f"      DPO generation complete, decoding {outputs.shape[0]} sequences")
     
     decoded_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
@@ -437,9 +425,6 @@ def generate_baseline(prompts, model, tokenizer, max_new_tokens):
         for i in range(len(prompts))
     ]
 
-# ==============================================================================
-# --- MAIN EVALUATION SCRIPT ---
-# ==============================================================================
 def main():
     parser = argparse.ArgumentParser(description="Parser for PEPO Evaluation.")
     
@@ -462,6 +447,12 @@ def main():
                         help="Maximum resampling attempts for 'I don't know' token.")
     parser.add_argument("--pepo_use_idk_token", action="store_true",
                         help="Use the 'I don't know' token sampling method.")
+    
+    # --- Shared Sampling Args ---
+    parser.add_argument("--temperature", type=float, default=0.7,
+                        help="Temperature for sampling (used by both DPO and PEPO).")
+    parser.add_argument("--top_p", type=float, default=0.9,
+                        help="Top-p (nucleus) sampling (used by both DPO and PEPO).")
 
     # --- Evaluation Args (MODIFIED) ---
     parser.add_argument("--evaluation_dataset", type=str, required=True,
@@ -498,6 +489,9 @@ def main():
     logging.info(f"Number of Ensemble Networks: {args.num_networks}")
     logging.info(f"Base Model: {args.model}")
     logging.info(f"DPO Baseline: {args.dpo_baseline_model_id}")
+    logging.info(f"Sampling Temperature: {args.temperature}")
+    logging.info(f"Sampling Top-p: {args.top_p}")
+    logging.info(f"PEPO Use IDK Token: {args.pepo_use_idk_token}")
     logging.info(f"Batch Size: {args.batch_size}")
     logging.info(f"Number of Samples: {args.num_samples}")
     logging.info("="*70)
@@ -637,7 +631,9 @@ def main():
                 batch_prompts, 
                 args.max_new_tokens, 
                 args.pepo_t_max, 
-                args.pepo_use_idk_token
+                args.pepo_use_idk_token,
+                args.temperature,
+                args.top_p
             )
             pepo_time = time.time() - pepo_start
             logging.info(f"  PEPO generation took {pepo_time:.2f}s")
@@ -659,7 +655,9 @@ def main():
                 batch_prompts, 
                 dpo_model, 
                 tokenizer, 
-                args.max_new_tokens
+                args.max_new_tokens,
+                args.temperature,
+                args.top_p
             )
             dpo_time = time.time() - dpo_start
             logging.info(f"  DPO generation took {dpo_time:.2f}s")
