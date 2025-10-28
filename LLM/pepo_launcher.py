@@ -1,6 +1,10 @@
+# python LLM/pepo_launcher.py --num_networks 1 --num_train_examples 0 -
+# -num_eval_examples 0 --epochs 10 --batch_size 2 --cuda_index 0 --alpha 1.0
 import torch
 import os
+import sys
 import numpy as np
+from datetime import datetime
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 from trl import DPOTrainer, DPOConfig
@@ -17,6 +21,26 @@ import os
 import math
 import argparse
 import math
+
+# ============================================
+# Logging Utility: Redirect prints to file and console
+# ============================================
+class Logger:
+    """Logger that writes to both console and file"""
+    def __init__(self, log_file):
+        self.terminal = sys.stdout
+        self.log = open(log_file, 'a', buffering=1)  # Line buffered
+        
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+        
+    def close(self):
+        self.log.close()
 
 parser = argparse.ArgumentParser(description="Parser for DPO training parameters.")
 
@@ -39,13 +63,40 @@ parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
 parser.add_argument("--max_length", type=int, default=1024,
                     help="Maximum total sequence length (prompt + response).")
 parser.add_argument("--cuda_index", type=int, default=0,
-                    help="GPU Index")
+                    help="GPU Index for policy model (trainable)")
+parser.add_argument("--ref_cuda_index", type=int, default=None,
+                    help="GPU Index for reference model (frozen). If None, uses same as cuda_index.")
 parser.add_argument("--max_prompt_length", type=int, default=512,
                         help="Maximum prompt length.")
 parser.add_argument("--alpha", type=float, default=0.1,
                     help="Pessimistic margin alpha for the loss function.")
 parser.add_argument("--model", type=str, default="HuggingFaceTB/SmolLM2-1.7B")
 args=parser.parse_args()
+
+# ============================================
+# Initialize Logging
+# ============================================
+# Create logs directory if it doesn't exist
+os.makedirs("logs", exist_ok=True)
+
+# Generate log filename with timestamp
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+model_name = args.model.rsplit('/', 1)[-1]  # Extract model name
+log_filename = f"logs/pepo_launcher_{model_name}_alpha{args.alpha}_L{args.num_networks}_{timestamp}.log"
+
+# Initialize logger to redirect all prints to both console and file
+logger = Logger(log_filename)
+sys.stdout = logger
+sys.stderr = logger
+
+print("=" * 80)
+print("PEPO Ensemble Training - Internal Log")
+print("=" * 80)
+print(f"Timestamp: {datetime.now()}")
+print(f"Log file: {log_filename}")
+print("=" * 80)
+print()
+
 # Training parameters
 ALPHA = args.alpha
 NUM_TRAIN_EXAMPLES = args.num_train_examples # Use a small subset for demonstration
@@ -62,24 +113,49 @@ MAX_PROMPT_LENGTH = args.max_prompt_length  # Max prompt length
 MODEL_ID = args.model# A small model for quick demonstration
 DATASET_ID = "HuggingFaceH4/ultrafeedback_binarized" #"HuggingFaceH4/ultrafeedback_binarized"
 name = last_substring = args.model.rsplit('/', 1)[-1] #Last substring
-OUTPUT_DIR = f"PessimisticDPO/{name}dpo_ensemble_with_alpha{L}"
+OUTPUT_DIR = f"PessimisticDPO/{name}dpo_ensemble_with_{ALPHA}alpha{L}"
 
+# Print configuration summary
+print("Training Configuration:")
+print("-" * 80)
+print(f"Model: {MODEL_ID}")
+print(f"Dataset: {DATASET_ID}")
+print(f"Output Directory: {OUTPUT_DIR}")
+print(f"Number of Networks (L): {L}")
+print(f"Training Examples: {NUM_TRAIN_EXAMPLES if NUM_TRAIN_EXAMPLES > 0 else 'Full dataset'}")
+print(f"Eval Examples: {NUM_EVAL_EXAMPLES if NUM_EVAL_EXAMPLES > 0 else 'Full dataset'}")
+print(f"Epochs: {EPOCHS}")
+print(f"Batch Size: {BATCH_SIZE}")
+print(f"Gradient Accumulation Steps: {GRADIENT_ACCUMULATION_STEPS}")
+print(f"Effective Batch Size: {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS}")
+print(f"Learning Rate: {LEARNING_RATE}")
+print(f"Beta: {BETA}")
+print(f"Alpha (Pessimistic Margin): {ALPHA}")
+print(f"Max Length: {MAX_LENGTH}")
+print(f"Max Prompt Length: {MAX_PROMPT_LENGTH}")
+print("-" * 80)
+print()
 
 # Device setup
 
 if torch.cuda.is_available():
     DEVICE = f"cuda:{args.cuda_index}"
+    # If ref_cuda_index is not specified, use the same GPU as policy model
+    REF_DEVICE = f"cuda:{args.ref_cuda_index}" if args.ref_cuda_index is not None else DEVICE
     DTYPE = torch.bfloat16 # bfloat16 is usually best for NVIDIA GPUs (Ampere architecture and newer)
 elif torch.backends.mps.is_available():
     DEVICE = "mps"
+    REF_DEVICE = "mps"
     DTYPE = torch.float16 # MPS typically supports float16 (half-precision), but not bfloat16.
                          # If float16 causes issues, fall back to torch.float32
     print("Using MPS backend. Note: BFloat16 is not supported on MPS, using Float16.")
 else:
     DEVICE = "cpu"
+    REF_DEVICE = "cpu"
     DTYPE = torch.float32 # CPU runs best with float32
 
-print(f"Selected device: {DEVICE} with dtype: {DTYPE}")
+print(f"Selected device for policy model: {DEVICE} with dtype: {DTYPE}")
+print(f"Selected device for reference model: {REF_DEVICE}")
 # --- 1. Load Models and Tokenizer ---
 print(f"Loading model: {MODEL_ID}...")
 #if "HuggingFaceTB/SmolLM2-1.7B" in MODEL_ID and "Instruct" not in MODEL_ID:
@@ -189,10 +265,10 @@ def preprocess_function(examples):
                 # If it's a string, try to wrap it as a simple user message.
                 # This is a heuristic for malformed data; assumes the string is the user's input.
                 if is_prompt:
-                    print(f"Warning: Prompt entry {idx} is a string. Wrapping as 'user' message.")
+                    # print(f"Warning: Prompt entry {idx} is a string. Wrapping as 'user' message.")
                     return [{"role": "user", "content": messages}]
                 else: # Chosen/rejected responses should not be simple strings
-                    print(f"Warning: Chosen/Rejected entry {idx} is a string, which is unexpected. Skipping example.")
+                    # print(f"Warning: Chosen/Rejected entry {idx} is a string, which is unexpected. Skipping example.")
                     return None
             else:
                 # If it's not a list or a string, it's an unrecognized format.
@@ -262,14 +338,14 @@ for l,(train_dataset_raw, eval_dataset_raw) in enumerate(zip(train_datasets_raw.
         preprocess_function,
         batched=True,
         remove_columns=train_dataset_raw.column_names,
-        num_proc=os.cpu_count(),
+        num_proc=1,  # Disable multiprocessing to avoid subprocess crashes
         desc="Preprocessing train dataset"
     )
     eval_datasets[l] = eval_dataset_raw.map(
         preprocess_function,
         batched=True,
         remove_columns=eval_dataset_raw.column_names,
-        num_proc=os.cpu_count(),
+        num_proc=1,  # Disable multiprocessing to avoid subprocess crashes
         desc="Preprocessing eval dataset"
     )
 
@@ -279,62 +355,43 @@ for l,(train_dataset_raw, eval_dataset_raw) in enumerate(zip(train_datasets_raw.
     eval_datasets[l].set_format(type="torch", columns=['prompt_input_ids', 'chosen_input_ids', 'rejected_input_ids',
                                                 'prompt_attention_mask', 'chosen_attention_mask', 'rejected_attention_mask', 'prompt_len'])
 
-# Custom Data Collator for DPO
+# Custom Data Collator for DPO (Optimized)
 class DPODataCollator:
     def __init__(self, tokenizer, max_length=MAX_LENGTH, max_prompt_length=MAX_PROMPT_LENGTH):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.max_prompt_length = max_prompt_length
+        self.pad_token_id = tokenizer.pad_token_id
 
     def __call__(self, features):
-        batch = {}
-        for key in features[0].keys():
-            batch[key] = [f[key] for f in features]
+        # Helper function to pad a list of tensors efficiently
+        def pad_tensors(tensors, pad_value=self.pad_token_id):
+            max_len = max(len(t) for t in tensors)
+            padded = torch.full((len(tensors), max_len), pad_value, dtype=torch.long)
+            for i, t in enumerate(tensors):
+                padded[i, :len(t)] = t
+            return padded
+        
+        # Extract and pad all fields
+        prompt_input_ids = pad_tensors([f['prompt_input_ids'] for f in features])
+        chosen_input_ids = pad_tensors([f['chosen_input_ids'] for f in features])
+        rejected_input_ids = pad_tensors([f['rejected_input_ids'] for f in features])
+        
+        prompt_attention_mask = pad_tensors([f['prompt_attention_mask'] for f in features], pad_value=0)
+        chosen_attention_mask = pad_tensors([f['chosen_attention_mask'] for f in features], pad_value=0)
+        rejected_attention_mask = pad_tensors([f['rejected_attention_mask'] for f in features], pad_value=0)
+        
+        prompt_len = torch.tensor([f['prompt_len'] for f in features], dtype=torch.long)
 
-        # Pad sequences
-        batch['prompt_input_ids'] = self.tokenizer.pad(
-            {'input_ids': batch['prompt_input_ids'], 'attention_mask': batch['prompt_attention_mask']},
-            padding='longest',
-            max_length=self.max_prompt_length,
-            return_tensors='pt',
-        )['input_ids']
-        batch['chosen_input_ids'] = self.tokenizer.pad(
-            {'input_ids': batch['chosen_input_ids'], 'attention_mask': batch['chosen_attention_mask']},
-            padding='longest',
-            max_length=self.max_length,
-            return_tensors='pt',
-        )['input_ids']
-        batch['rejected_input_ids'] = self.tokenizer.pad(
-            {'input_ids': batch['rejected_input_ids'], 'attention_mask': batch['rejected_attention_mask']},
-            padding='longest',
-            max_length=self.max_length,
-            return_tensors='pt',
-        )['input_ids']
-
-        # Also pad attention masks
-        batch['prompt_attention_mask'] = self.tokenizer.pad(
-            {'input_ids': [torch.ones(len(ids), dtype=torch.long) for ids in [f['prompt_input_ids'] for f in features]], 'attention_mask': batch['prompt_attention_mask']}, # Use actual lengths here
-            padding='longest',
-            max_length=self.max_prompt_length,
-            return_tensors='pt',
-        )['attention_mask']
-        batch['chosen_attention_mask'] = self.tokenizer.pad(
-            {'input_ids': [torch.ones(len(ids), dtype=torch.long) for ids in [f['chosen_input_ids'] for f in features]], 'attention_mask': batch['chosen_attention_mask']},
-            padding='longest',
-            max_length=self.max_length,
-            return_tensors='pt',
-        )['attention_mask']
-        batch['rejected_attention_mask'] = self.tokenizer.pad(
-            {'input_ids': [torch.ones(len(ids), dtype=torch.long) for ids in [f['rejected_input_ids'] for f in features]], 'attention_mask': batch['rejected_attention_mask']},
-            padding='longest',
-            max_length=self.max_length,
-            return_tensors='pt',
-        )['attention_mask']
-
-        # Convert prompt_len to tensor
-        batch['prompt_len'] = torch.tensor(batch['prompt_len'], dtype=torch.long)
-
-        return batch
+        return {
+            'prompt_input_ids': prompt_input_ids,
+            'chosen_input_ids': chosen_input_ids,
+            'rejected_input_ids': rejected_input_ids,
+            'prompt_attention_mask': prompt_attention_mask,
+            'chosen_attention_mask': chosen_attention_mask,
+            'rejected_attention_mask': rejected_attention_mask,
+            'prompt_len': prompt_len
+        }
 
 data_collator = DPODataCollator(tokenizer)
 train_dataloaders={}
@@ -354,59 +411,68 @@ for l, (train_dataset,eval_dataset) in enumerate(zip(train_datasets.values(),eva
     )
 
 # --- 3. Helper Function to Calculate Log Probabilities ---
-def get_log_probs(model, input_ids, attention_mask, prompt_len):
+def get_log_probs(model, input_ids, attention_mask, prompt_len, original_device=None):
     """
     Calculates the log probability of a sequence of tokens given a model,
     masking out the prompt part and padding.
+    Handles cross-device operations (e.g., when reference model is on different GPU).
 
     Args:
         model: The language model (policy or reference).
         input_ids: Tensor of tokenized sequence (prompt + response).
         attention_mask: Tensor of attention mask for the sequence.
         prompt_len: Tensor of lengths of the prompt for each example in batch.
+        original_device: Device to return results to (if None, uses input_ids device).
 
     Returns:
         A tensor of shape (batch_size,) containing the sum of log probabilities
         for the response tokens only.
     """
+    # Store original device
+    if original_device is None:
+        original_device = input_ids.device
+    
+    # Get the device of the model
+    model_device = next(model.parameters()).device
+    
+    # Move inputs to model's device if needed
+    input_ids_on_model = input_ids.to(model_device)
+    attention_mask_on_model = attention_mask.to(model_device)
+    
     with torch.no_grad() if model.training is False else torch.enable_grad():
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        outputs = model(input_ids=input_ids_on_model, attention_mask=attention_mask_on_model)
         logits = outputs.logits # (batch_size, sequence_length, vocab_size)
 
     # Shift logits and labels for causal LM
-    # The loss is computed for token_i given token_0 to token_{i-1}
-    # So, logits[:, :-1, :] corresponds to predicting token_1 to token_{length-1}
-    # And input_ids[:, 1:] are the actual token_1 to token_{length-1}
     logits = logits[:, :-1, :]
-    labels = input_ids[:, 1:]
+    labels = input_ids_on_model[:, 1:]
     
     # Calculate log_softmax over the vocabulary dimension
     log_probs = F.log_softmax(logits, dim=-1) # (batch_size, sequence_length - 1, vocab_size)
 
     # Gather the log probabilities for the actual next tokens
-    # `labels.unsqueeze(-1)` makes it (batch_size, sequence_length - 1, 1)
-    # `log_probs.gather(dim=-1, index=...)` picks the log_prob at the label index
-    # `squeeze(-1)` removes the last dimension, resulting in (batch_size, sequence_length - 1)
     token_log_probs = torch.gather(log_probs, dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
 
     # Create a mask to only consider response tokens
-    # tokens corresponding to prompt_len[i] up to the end of the sequence.
-    # The mask needs to be shifted by 1 because `token_log_probs` is also shifted.
-    sequence_lengths = attention_mask.sum(dim=-1) # Actual length of each sequence before padding
+    sequence_lengths = attention_mask_on_model.sum(dim=-1)
     
     # Create an index tensor for each position in the shifted sequence
-    indices = torch.arange(token_log_probs.shape[1], device=token_log_probs.device).unsqueeze(0) # (1, seq_len-1)
+    indices = torch.arange(token_log_probs.shape[1], device=model_device).unsqueeze(0)
 
-    # Mask for response tokens: True if index >= prompt_len (shifted by 1) AND index < sequence_length (shifted by 1)
-    response_mask = (indices >= (prompt_len - 1).unsqueeze(1)) & \
+    # Move prompt_len to model device
+    prompt_len_on_model = prompt_len.to(model_device)
+    
+    # Mask for response tokens
+    response_mask = (indices >= (prompt_len_on_model - 1).unsqueeze(1)) & \
                     (indices < (sequence_lengths - 1).unsqueeze(1)) & \
-                    (labels != tokenizer.pad_token_id) # Also exclude padding tokens explicitly
+                    (labels != tokenizer.pad_token_id)
 
     # Apply the mask
     masked_log_probs = token_log_probs * response_mask.float()
     
-    # Sum the log probabilities for each example
-    return masked_log_probs.sum(dim=-1) # (batch_size,)
+    # Sum the log probabilities for each example and move back to original device
+    result = masked_log_probs.sum(dim=-1)
+    return result.to(original_device)
 
 for l in range(L):
 
@@ -419,6 +485,11 @@ for l in range(L):
         device_map=DEVICE
     )
     policy_model.config.use_cache = False # Required for gradient checkpointing, often helpful for training
+    
+    # Enable gradient checkpointing to save memory
+    policy_model.gradient_checkpointing_enable()
+    print("Gradient checkpointing enabled for policy model")
+    
     policy_model.train() # Set to train mode for gradients
 
     # Apply LoRA to the policy model
@@ -434,24 +505,29 @@ for l in range(L):
     policy_model.print_trainable_parameters()
 
     # Reference Model (frozen copy of the initial SFT model)
-    # Ensure this model is *not* trained and is in eval mode.
+    # Load on separate GPU if available to avoid OOM
+    print(f"Loading reference model on {REF_DEVICE}...")
     ref_model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         torch_dtype=DTYPE,
-        device_map=DEVICE
+        device_map=REF_DEVICE
     )
 
     ref_model.eval() # Set to eval mode for no gradients and no dropout
     for param in ref_model.parameters():
         param.requires_grad = False
-    print("Policy model and reference model loaded.")
+    print(f"Policy model loaded on {DEVICE}, reference model loaded on {REF_DEVICE}.")
 
     # --- 2. Data Preparation ---
     print(f"Loading dataset: {DATASET_ID}...")
     # --- 4. Optimizer and Scheduler ---
     optimizer = AdamW(policy_model.parameters(), lr=LEARNING_RATE)
 
-    num_training_steps = (len(train_dataloaders[l]) // GRADIENT_ACCUMULATION_STEPS) * EPOCHS
+    num_batches = len(train_dataloaders[l])
+    if num_batches == 0:
+        num_training_steps = 0
+    else:
+        num_training_steps = math.ceil(num_batches / GRADIENT_ACCUMULATION_STEPS) * EPOCHS
     lr_scheduler = get_scheduler(
         name="cosine",
         optimizer=optimizer,
@@ -514,8 +590,8 @@ for l in range(L):
                     "global_step": global_step
                 })
 
-        print(f"Epoch {epoch+1} finished. Average Training Loss: {total_loss / len(train_dataloaders[l])}")
-
+        avg_train_loss = total_loss / len(train_dataloaders[l]) if len(train_dataloaders[l]) > 0 else 0.0
+        print(f"Epoch {epoch+1} finished. Average Training Loss: {avg_train_loss}")
         # --- Evaluation ---
         policy_model.eval()
         eval_loss = 0
@@ -539,8 +615,8 @@ for l in range(L):
                 eval_loss += dpo_loss_components.mean().item()
                 eval_progress_bar.set_postfix({"eval_loss": eval_loss / (eval_progress_bar.n + 1)})
                 
-        print(f"Epoch {epoch+1} finished. Average Evaluation Loss: {eval_loss / len(eval_dataloaders[l])}")
-
+        avg_eval_loss = eval_loss / len(eval_dataloaders[l]) if len(eval_dataloaders[l]) > 0 else 0.0
+        print(f"Epoch {epoch+1} finished. Average Evaluation Loss: {avg_eval_loss}")
         # --- Save the fine-tuned model ---
         # Save the LoRA adapter
         #final_model_path = f"OUTPUT_DIR_l{l}"
