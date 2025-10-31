@@ -682,25 +682,33 @@ def train_single_model(l, gpu_id, train_dataset, eval_dataset, config):
                 # Move batch to device
                 batch = {k: v.to(DEVICE) for k, v in batch.items()}
 
-                # Concatenate chosen and rejected for a single forward pass per model
-                # This reduces 4 forward passes to 2
-                concat_input_ids = torch.cat([batch['chosen_input_ids'], batch['rejected_input_ids']], dim=0)
-                concat_attention_mask = torch.cat([batch['chosen_attention_mask'], batch['rejected_attention_mask']], dim=0)
-                concat_prompt_len = torch.cat([batch['prompt_len'], batch['prompt_len']], dim=0)
+                # Process chosen and rejected separately (they have different lengths)
+                log_prob_chosen_policy = get_log_probs(
+                    policy_model, 
+                    batch['chosen_input_ids'], 
+                    batch['chosen_attention_mask'], 
+                    batch['prompt_len']
+                )
+                log_prob_rejected_policy = get_log_probs(
+                    policy_model,
+                    batch['rejected_input_ids'],
+                    batch['rejected_attention_mask'],
+                    batch['prompt_len']
+                )
                 
-                # Single forward pass for policy model (both chosen and rejected)
-                concat_log_probs_policy = get_log_probs(policy_model, concat_input_ids, concat_attention_mask, concat_prompt_len)
-                
-                # Single forward pass for reference model (both chosen and rejected)
                 with torch.no_grad():
-                    concat_log_probs_ref = get_log_probs(ref_model, concat_input_ids, concat_attention_mask, concat_prompt_len)
-                
-                # Split the results back into chosen and rejected
-                batch_size = batch['chosen_input_ids'].size(0)
-                log_prob_chosen_policy = concat_log_probs_policy[:batch_size]
-                log_prob_rejected_policy = concat_log_probs_policy[batch_size:]
-                log_prob_chosen_ref = concat_log_probs_ref[:batch_size]
-                log_prob_rejected_ref = concat_log_probs_ref[batch_size:]
+                    log_prob_chosen_ref = get_log_probs(
+                        ref_model,
+                        batch['chosen_input_ids'],
+                        batch['chosen_attention_mask'],
+                        batch['prompt_len']
+                    )
+                    log_prob_rejected_ref = get_log_probs(
+                        ref_model,
+                        batch['rejected_input_ids'],
+                        batch['rejected_attention_mask'],
+                        batch['prompt_len']
+                    )
 
                 # Calculate the DPO loss components
                 pi_log_ratio = log_prob_chosen_policy - log_prob_rejected_policy
@@ -743,22 +751,31 @@ def train_single_model(l, gpu_id, train_dataset, eval_dataset, config):
                 for batch in eval_progress_bar:
                     batch = {k: v.to(DEVICE) for k, v in batch.items()}
 
-                    # Concatenate chosen and rejected for a single forward pass per model
-                    concat_input_ids = torch.cat([batch['chosen_input_ids'], batch['rejected_input_ids']], dim=0)
-                    concat_attention_mask = torch.cat([batch['chosen_attention_mask'], batch['rejected_attention_mask']], dim=0)
-                    concat_prompt_len = torch.cat([batch['prompt_len'], batch['prompt_len']], dim=0)
-                    
-                    # Single forward pass for policy model
-                    concat_log_probs_policy = get_log_probs(policy_model, concat_input_ids, concat_attention_mask, concat_prompt_len)
-                    # Single forward pass for reference model
-                    concat_log_probs_ref = get_log_probs(ref_model, concat_input_ids, concat_attention_mask, concat_prompt_len)
-                    
-                    # Split the results
-                    batch_size = batch['chosen_input_ids'].size(0)
-                    log_prob_chosen_policy = concat_log_probs_policy[:batch_size]
-                    log_prob_rejected_policy = concat_log_probs_policy[batch_size:]
-                    log_prob_chosen_ref = concat_log_probs_ref[:batch_size]
-                    log_prob_rejected_ref = concat_log_probs_ref[batch_size:]
+                    # Process chosen and rejected separately (they have different lengths)
+                    log_prob_chosen_policy = get_log_probs(
+                        policy_model,
+                        batch['chosen_input_ids'],
+                        batch['chosen_attention_mask'],
+                        batch['prompt_len']
+                    )
+                    log_prob_rejected_policy = get_log_probs(
+                        policy_model,
+                        batch['rejected_input_ids'],
+                        batch['rejected_attention_mask'],
+                        batch['prompt_len']
+                    )
+                    log_prob_chosen_ref = get_log_probs(
+                        ref_model,
+                        batch['chosen_input_ids'],
+                        batch['chosen_attention_mask'],
+                        batch['prompt_len']
+                    )
+                    log_prob_rejected_ref = get_log_probs(
+                        ref_model,
+                        batch['rejected_input_ids'],
+                        batch['rejected_attention_mask'],
+                        batch['prompt_len']
+                    )
 
                     pi_log_ratio = log_prob_chosen_policy - log_prob_rejected_policy
                     ref_log_ratio = log_prob_chosen_ref - log_prob_rejected_ref
@@ -817,183 +834,183 @@ if __name__ == "__main__":
     except RuntimeError:
         pass
 
-# Determine available GPUs
-if args.parallel:
-    if args.gpu_ids:
-        # User explicitly specified GPU IDs
-        assert False, "Explicit GPU IDs not supported in this version."
-        available_gpus = [int(x.strip()) for x in args.gpu_ids.split(',')]
-    else:
-        # Auto-detect available GPUs
-        # In SLURM, CUDA_VISIBLE_DEVICES is already set to renumber GPUs starting from 0
-        num_gpus = torch.cuda.device_count()
-        available_gpus = list(range(num_gpus))
-        print(f"Auto-detected {num_gpus} GPUs from CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
-    
-    print(f"Parallel training enabled with {len(available_gpus)} GPUs: {available_gpus}")
-    print(f"Training {L} models across {len(available_gpus)} GPUs")
-    
-
-    # Create processes for parallel training
-    processes = []
-    for l in range(L):
-        gpu_id = available_gpus[l % len(available_gpus)]  # Round-robin GPU assignment
-        p = mp.Process(
-            target=train_single_model,
-            args=(l, gpu_id, train_datasets[l], eval_datasets[l], config)
-        )
-        p.start()
-        processes.append(p)
-        print(f"Started training process for model {l} on GPU {gpu_id}")
-    
-    # Wait for all processes to complete
-    for p in processes:
-        p.join()
-    
-    print("\n" + "=" * 80)
-    print("All models trained successfully!")
-    print("=" * 80)
-
-else:
-    print("Warning: Sequential training mode not tested recently. Proceed with caution.")
-    import sys; sys.exit(1)
-    # --- Sequential Training ---
-    print("Sequential training mode. Models will be trained one by one.")
-    
-    # Use the main GPU specified in args
-    # The 'train_single_model' function will use this GPU ID to set its device
-    main_gpu_id = args.cuda_index
-    print(f"Using main GPU: {main_gpu_id} for all models.")
-
-    for l in range(L):
-        print("\n" + "=" * 80)
-        print(f"Starting training for model {l} on GPU {main_gpu_id}")
-        print("=" * 80)
-        
-        # Call the training function directly instead of duplicating logic.
-        # This function handles loading, training, evaluation, and saving.
-        train_single_model(
-            l=l,
-            gpu_id=main_gpu_id,
-            train_dataset=train_datasets[l],
-            eval_dataset=eval_datasets[l],
-            config=config  # This 'config' dict must be defined outside the if/else block
-        )
-        
-        print(f"Finished training and saving for model {l}.")
-
-        # --- Optional: Test the trained model ---
-        # This logic was in the original 'else' block and is preserved here.
-        # It runs after each model is trained and saved.
-        if DEVICE == f"cuda:{args.cuda_index}":
-            # Imports needed for testing
-            from transformers import pipeline, AutoModelForCausalLM
-            from peft import PeftModel
-            
-            print("\n--- Testing the BASE model ---")
-
-            # Load the original base model
-            base_model = AutoModelForCausalLM.from_pretrained(
-                MODEL_ID,
-                torch_dtype=DTYPE,
-                device_map=DEVICE
-            )
-            base_model.eval()
-
-            # Create a pipeline for the base model
-            base_pipe = pipeline(
-                "text-generation",
-                model=base_model,
-                tokenizer=tokenizer,
-                torch_dtype=DTYPE
-            )
-
-            # Prepare the prompt (it's the same for both models)
-            test_prompt_message = [{"role": "user", "content": "Write a short, heartwarming story about an old cat."}]
-            test_prompt = tokenizer.apply_chat_template(
-                test_prompt_message,
-                tokenize=False,
-                add_generation_prompt=True
-            )
-
-            print(f"Generating response for prompt with BASE model:\n{test_prompt}")
-
-            base_outputs = base_pipe(
-                test_prompt,
-                max_new_tokens=50,
-                do_sample=True,
-                temperature=0.3,
-                top_k=50,
-                top_p=0.995,
-                repetition_penalty=1.1,
-                eos_token_id=tokenizer.eos_token_id
-            )
-            print("\nGenerated Response from BASE model (full):")
-            print(base_outputs[0]['generated_text'])
-
-            base_generated_text_only = base_outputs[0]['generated_text'].replace(test_prompt, '').strip()
-            print("\nGenerated Response from BASE model (clean):")
-            print(base_generated_text_only)
-
-            # Clean up memory
-            del base_model
-            del base_pipe
-            torch.cuda.empty_cache()
-
-            # =================================================================
-            #  SECTION 2: Testing the TRAINED (fine-tuned) model
-            # =================================================================
-            print("\n\n--- Testing the TRAINED model ---")
-            
-            # This is the Hub ID where train_single_model saved the adapter
-            hub_repo_id = f"{OUTPUT_DIR}_l{l}" 
-
-            # Load the base model again to apply the adapter
-            trained_model_base = AutoModelForCausalLM.from_pretrained(
-                MODEL_ID,
-                torch_dtype=DTYPE,
-                device_map=DEVICE
-            )
-            # Load the LoRA adapter and merge
-            trained_model = PeftModel.from_pretrained(trained_model_base, hub_repo_id)
-            trained_model = trained_model.merge_and_unload() # Merge LoRA weights into base model
-            trained_model.eval()
-
-            pipe = pipeline(
-                "text-generation",
-                model=trained_model,
-                tokenizer=tokenizer,
-                torch_dtype=DTYPE
-            )
-
-            print(f"Generating response for prompt with TRAINED model:\n{test_prompt}")
-
-            outputs = pipe(
-                test_prompt,
-                max_new_tokens=50,
-                do_sample=True,
-                temperature=0.3,
-                top_k=50,
-                top_p=0.995,
-                repetition_penalty=1.1,
-                eos_token_id=tokenizer.eos_token_id
-            )
-            print("\nGenerated Response from TRAINED model (full):")
-            print(outputs[0]['generated_text'])
-
-            generated_text_only = outputs[0]['generated_text'].replace(test_prompt, '').strip()
-            print("\nGenerated Response from TRAINED model (clean):")
-            print(generated_text_only)
-            
-            # Clean up
-            del trained_model_base
-            del trained_model
-            del pipe
-            torch.cuda.empty_cache()
-            
+    # Determine available GPUs
+    if args.parallel:
+        if args.gpu_ids:
+            # User explicitly specified GPU IDs
+            assert False, "Explicit GPU IDs not supported in this version."
+            available_gpus = [int(x.strip()) for x in args.gpu_ids.split(',')]
         else:
-            print("\nSkipping model testing: Not on main CUDA device. Run on GPU for testing.")
+            # Auto-detect available GPUs
+            # In SLURM, CUDA_VISIBLE_DEVICES is already set to renumber GPUs starting from 0
+            num_gpus = torch.cuda.device_count()
+            available_gpus = list(range(num_gpus))
+            print(f"Auto-detected {num_gpus} GPUs from CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
+        
+        print(f"Parallel training enabled with {len(available_gpus)} GPUs: {available_gpus}")
+        print(f"Training {L} models across {len(available_gpus)} GPUs")
+        
 
-    print("\n" + "=" * 80)
-    print("All models trained and tested successfully!")
-    print("=" * 80)
+        # Create processes for parallel training
+        processes = []
+        for l in range(L):
+            gpu_id = available_gpus[l % len(available_gpus)]  # Round-robin GPU assignment
+            p = mp.Process(
+                target=train_single_model,
+                args=(l, gpu_id, train_datasets[l], eval_datasets[l], config)
+            )
+            p.start()
+            processes.append(p)
+            print(f"Started training process for model {l} on GPU {gpu_id}")
+        
+        # Wait for all processes to complete
+        for p in processes:
+            p.join()
+        
+        print("\n" + "=" * 80)
+        print("All models trained successfully!")
+        print("=" * 80)
+
+    else:
+        print("Warning: Sequential training mode not tested recently. Proceed with caution.")
+        import sys; sys.exit(1)
+        # --- Sequential Training ---
+        print("Sequential training mode. Models will be trained one by one.")
+        
+        # Use the main GPU specified in args
+        # The 'train_single_model' function will use this GPU ID to set its device
+        main_gpu_id = args.cuda_index
+        print(f"Using main GPU: {main_gpu_id} for all models.")
+
+        for l in range(L):
+            print("\n" + "=" * 80)
+            print(f"Starting training for model {l} on GPU {main_gpu_id}")
+            print("=" * 80)
+            
+            # Call the training function directly instead of duplicating logic.
+            # This function handles loading, training, evaluation, and saving.
+            train_single_model(
+                l=l,
+                gpu_id=main_gpu_id,
+                train_dataset=train_datasets[l],
+                eval_dataset=eval_datasets[l],
+                config=config  # This 'config' dict must be defined outside the if/else block
+                )
+            
+            print(f"Finished training and saving for model {l}.")
+
+            # --- Optional: Test the trained model ---
+            # This logic was in the original 'else' block and is preserved here.
+            # It runs after each model is trained and saved.
+            if DEVICE == f"cuda:{args.cuda_index}":
+                # Imports needed for testing
+                from transformers import pipeline, AutoModelForCausalLM
+                from peft import PeftModel
+                
+                print("\n--- Testing the BASE model ---")
+
+                # Load the original base model
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    MODEL_ID,
+                    torch_dtype=DTYPE,
+                    device_map=DEVICE
+                )
+                base_model.eval()
+
+                # Create a pipeline for the base model
+                base_pipe = pipeline(
+                    "text-generation",
+                    model=base_model,
+                    tokenizer=tokenizer,
+                    torch_dtype=DTYPE
+                )
+
+                # Prepare the prompt (it's the same for both models)
+                test_prompt_message = [{"role": "user", "content": "Write a short, heartwarming story about an old cat."}]
+                test_prompt = tokenizer.apply_chat_template(
+                    test_prompt_message,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+
+                print(f"Generating response for prompt with BASE model:\n{test_prompt}")
+
+                base_outputs = base_pipe(
+                    test_prompt,
+                    max_new_tokens=50,
+                    do_sample=True,
+                    temperature=0.3,
+                    top_k=50,
+                    top_p=0.995,
+                    repetition_penalty=1.1,
+                    eos_token_id=tokenizer.eos_token_id
+                )
+                print("\nGenerated Response from BASE model (full):")
+                print(base_outputs[0]['generated_text'])
+
+                base_generated_text_only = base_outputs[0]['generated_text'].replace(test_prompt, '').strip()
+                print("\nGenerated Response from BASE model (clean):")
+                print(base_generated_text_only)
+
+                # Clean up memory
+                del base_model
+                del base_pipe
+                torch.cuda.empty_cache()
+
+                # =================================================================
+                #  SECTION 2: Testing the TRAINED (fine-tuned) model
+                # =================================================================
+                print("\n\n--- Testing the TRAINED model ---")
+                
+                # This is the Hub ID where train_single_model saved the adapter
+                hub_repo_id = f"{OUTPUT_DIR}_l{l}" 
+
+                # Load the base model again to apply the adapter
+                trained_model_base = AutoModelForCausalLM.from_pretrained(
+                    MODEL_ID,
+                    torch_dtype=DTYPE,
+                    device_map=DEVICE
+                )
+                # Load the LoRA adapter and merge
+                trained_model = PeftModel.from_pretrained(trained_model_base, hub_repo_id)
+                trained_model = trained_model.merge_and_unload() # Merge LoRA weights into base model
+                trained_model.eval()
+
+                pipe = pipeline(
+                    "text-generation",
+                    model=trained_model,
+                    tokenizer=tokenizer,
+                    torch_dtype=DTYPE
+                )
+
+                print(f"Generating response for prompt with TRAINED model:\n{test_prompt}")
+
+                outputs = pipe(
+                    test_prompt,
+                    max_new_tokens=50,
+                    do_sample=True,
+                    temperature=0.3,
+                    top_k=50,
+                    top_p=0.995,
+                    repetition_penalty=1.1,
+                    eos_token_id=tokenizer.eos_token_id
+                )
+                print("\nGenerated Response from TRAINED model (full):")
+                print(outputs[0]['generated_text'])
+
+                generated_text_only = outputs[0]['generated_text'].replace(test_prompt, '').strip()
+                print("\nGenerated Response from TRAINED model (clean):")
+                print(generated_text_only)
+                
+                # Clean up
+                del trained_model_base
+                del trained_model
+                del pipe
+                torch.cuda.empty_cache()
+                
+            else:
+                print("\nSkipping model testing: Not on main CUDA device. Run on GPU for testing.")
+
+        print("\n" + "=" * 80)
+        print("All models trained and tested successfully!")
+        print("=" * 80)
