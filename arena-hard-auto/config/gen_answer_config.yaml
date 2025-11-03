@@ -3,5 +3,6 @@ bench_name: arena-hard-v2.0
 
 # a list of model to generate answers
 model_list:
+  - dpo-baseline
+  # - PessimisticDPO/SmolLM2-1.7Bdpo_ensemble_with_1.0alpha1_l0
   # - deepseek-r1
-  

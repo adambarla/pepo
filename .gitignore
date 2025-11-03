@@ -1,6 +1,7 @@
 out/*
 logs/*
 outputs/
+arena-hard-auto/logs/*
 
 .ipynb_checkpoints/
 __pycache__/

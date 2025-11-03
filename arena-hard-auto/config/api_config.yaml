@@ -100,11 +100,11 @@ aws_nova_light_v1:
     
 
 dpo-baseline:
-    model: <model_name_vllm_uses> 
+    model:  PessimisticDPO/SmolLM2-1.7Bdpo_ensemble_with_1.0alpha1_l0
     endpoints:
-        - api_base: http://0.0.0.0:8001/v1
+        - api_base: http://127.0.0.1:8001/v1 # http://0.0.0.0:8001/v1
           api_key: '-'
     api_type: openai
-    parallel: 128
-    max_tokens: 4096
+    parallel: 1  # Changed from 128 to 1 for single-GPU server
+    max_tokens: 1024
     temperature: 0.0

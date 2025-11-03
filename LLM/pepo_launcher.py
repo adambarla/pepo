@@ -615,10 +615,10 @@ def train_single_model(l, gpu_id, train_dataset, eval_dataset, config):
         policy_model = get_peft_model(policy_model, peft_config)
         policy_model.print_trainable_parameters()
         
-        # Compile the policy model for faster training
-        print("Compiling policy model with torch.compile()...")
-        policy_model = torch.compile(policy_model, mode="reduce-overhead")
-        print("Policy model compiled successfully")
+        # Note: torch.compile() disabled due to PyTorch 2.6.0 + Triton 3.5.0 incompatibility
+        # Error: cannot import name 'AttrsDescriptor' from 'triton.compiler.compiler'
+        # Can be re-enabled when versions are compatible
+        print("Note: torch.compile() disabled due to version incompatibility")
 
         # Reference Model (frozen copy)
         print(f"Loading reference model on {REF_DEVICE}...")
@@ -632,10 +632,7 @@ def train_single_model(l, gpu_id, train_dataset, eval_dataset, config):
         for param in ref_model.parameters():
             param.requires_grad = False
         
-        # Compile the reference model for faster inference
-        print("Compiling reference model with torch.compile()...")
-        ref_model = torch.compile(ref_model, mode="reduce-overhead")
-        print("Reference model compiled successfully")
+        # Note: torch.compile() disabled due to PyTorch 2.6.0 + Triton 3.5.0 incompatibility
         
         print(f"Models loaded successfully on {DEVICE}")
 
