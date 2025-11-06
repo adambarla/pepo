@@ -1,11 +1,11 @@
 import random
-from datasets.table import np
-import hydra
-from omegaconf import DictConfig
 
+import hydra
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import Dataset, load_dataset
+from datasets.table import np
+from omegaconf import DictConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def get_device():
