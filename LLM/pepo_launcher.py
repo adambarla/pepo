@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_scheduler
 
-from pepo.utils import set_seed
+from pepo.utils import Logger, set_seed
 
 # ============================================
 # Set Random Seeds for Reproducibility
@@ -26,28 +26,6 @@ from pepo.utils import set_seed
 SEED = 42
 
 set_seed(SEED)
-
-
-# ============================================
-# Logging Utility: Redirect prints to file and console
-# ============================================
-class Logger:
-    """Logger that writes to both console and file"""
-
-    def __init__(self, log_file):
-        self.terminal = sys.stdout
-        self.log = open(log_file, "a", buffering=1)  # Line buffered
-
-    def write(self, message):
-        self.terminal.write(message)
-        self.log.write(message)
-
-    def flush(self):
-        self.terminal.flush()
-        self.log.flush()
-
-    def close(self):
-        self.log.close()
 
 
 parser = argparse.ArgumentParser(description="Parser for DPO training parameters.")
@@ -123,26 +101,22 @@ args = parser.parse_args()
 # ============================================
 # Initialize Logging
 # ============================================
-# Create logs directory if it doesn't exist
-os.makedirs("logs", exist_ok=True)
-
-# Generate log filename with timestamp
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-model_name = args.model.rsplit("/", 1)[-1]  # Extract model name
-log_filename = f"logs/pepo_launcher_{model_name}_alpha{args.alpha}_L{args.num_networks}_{timestamp}.log"
+model_name = args.model.rsplit("/", 1)[-1]
+log_filename = (
+    f"pepo_launcher_{model_name}_alpha{args.alpha}_L{args.num_networks}_{timestamp}.log"
+)
 
-# Initialize logger to redirect all prints to both console and file
-logger = Logger(log_filename)
-sys.stdout = logger  # type: ignore[assignment]
-sys.stderr = logger  # type: ignore[assignment]
+logger = Logger(
+    name="pepo_launcher",
+    log_file=log_filename,
+    log_dir="logs",
+)
 
-print("=" * 80)
-print("PEPO Ensemble Training - Internal Log")
-print("=" * 80)
-print(f"Timestamp: {datetime.now()}")
-print(f"Log file: {log_filename}")
-print("=" * 80)
-print()
+logger.info("PEPO Ensemble Training - Internal Log")
+logger.info(f"Timestamp: {datetime.now()}")
+logger.info(f"Log file: {logger.log_file}")
+logger.info("")
 
 # Training parameters
 ALPHA = args.alpha
@@ -169,28 +143,27 @@ name = last_substring = args.model.rsplit("/", 1)[-1]  # Last substring
 OUTPUT_DIR = f"PessimisticDPO/{name}dpo_ensemble_with_{ALPHA}alpha{L}"
 
 
-# Print configuration summary
-print("Training Configuration:")
-print("-" * 80)
-print(f"Model: {MODEL_ID}")
-print(f"Dataset: {DATASET_ID}")
-print(f"Output Directory: {OUTPUT_DIR}")
-print(f"Number of Networks (L): {L}")
-print(
+logger.info("Training Configuration:")
+logger.info(f"Model: {MODEL_ID}")
+logger.info(f"Dataset: {DATASET_ID}")
+logger.info(f"Output Directory: {OUTPUT_DIR}")
+logger.info(f"Number of Networks (L): {L}")
+logger.info(
     f"Training Examples: {NUM_TRAIN_EXAMPLES if NUM_TRAIN_EXAMPLES > 0 else 'Full dataset'}"
 )
-print(f"Eval Examples: {NUM_EVAL_EXAMPLES if NUM_EVAL_EXAMPLES > 0 else 'Full dataset'}")
-print(f"Epochs: {EPOCHS}")
-print(f"Batch Size: {BATCH_SIZE}")
-print(f"Gradient Accumulation Steps: {GRADIENT_ACCUMULATION_STEPS}")
-print(f"Effective Batch Size: {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS}")
-print(f"Learning Rate: {LEARNING_RATE}")
-print(f"Beta: {BETA}")
-print(f"Alpha (Pessimistic Margin): {ALPHA}")
-print(f"Max Length: {MAX_LENGTH}")
-print(f"Max Prompt Length: {MAX_PROMPT_LENGTH}")
-print("-" * 80)
-print()
+logger.info(
+    f"Eval Examples: {NUM_EVAL_EXAMPLES if NUM_EVAL_EXAMPLES > 0 else 'Full dataset'}"
+)
+logger.info(f"Epochs: {EPOCHS}")
+logger.info(f"Batch Size: {BATCH_SIZE}")
+logger.info(f"Gradient Accumulation Steps: {GRADIENT_ACCUMULATION_STEPS}")
+logger.info(f"Effective Batch Size: {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS}")
+logger.info(f"Learning Rate: {LEARNING_RATE}")
+logger.info(f"Beta: {BETA}")
+logger.info(f"Alpha (Pessimistic Margin): {ALPHA}")
+logger.info(f"Max Length: {MAX_LENGTH}")
+logger.info(f"Max Prompt Length: {MAX_PROMPT_LENGTH}")
+logger.info("")
 
 # Device setup
 if torch.cuda.is_available():
@@ -218,8 +191,8 @@ if torch.cuda.is_available():
 
         DEVICE = f"cuda:{policy_gpu}"
         REF_DEVICE = f"cuda:{ref_gpu}"
-        print(f"Auto-detected {num_available_gpus} GPU(s)")
-        print(
+        logger.info(f"Auto-detected {num_available_gpus} GPU(s)")
+        logger.info(
             f"Sequential training mode: Policy model on GPU {policy_gpu}, Reference model on GPU {ref_gpu}"
         )
     else:
@@ -239,16 +212,18 @@ elif torch.backends.mps.is_available():
         torch.float16
     )  # MPS typically supports float16 (half-precision), but not bfloat16.
     # If float16 causes issues, fall back to torch.float32
-    print("Using MPS backend. Note: BFloat16 is not supported on MPS, using Float16.")
+    logger.warning(
+        "Using MPS backend. Note: BFloat16 is not supported on MPS, using Float16."
+    )
 else:
     DEVICE = "cpu"
     REF_DEVICE = "cpu"
     DTYPE = torch.float32  # CPU runs best with float32
 
-print(f"Selected device for policy model: {DEVICE} with dtype: {DTYPE}")
-print(f"Selected device for reference model: {REF_DEVICE}")
+logger.info(f"Selected device for policy model: {DEVICE} with dtype: {DTYPE}")
+logger.info(f"Selected device for reference model: {REF_DEVICE}")
 # --- 1. Load Models and Tokenizer ---
-print(f"Loading model: {MODEL_ID}...")
+logger.info(f"Loading model: {MODEL_ID}...")
 # if "HuggingFaceTB/SmolLM2-1.7B" in MODEL_ID and "Instruct" not in MODEL_ID:
 #    tokenizer = AutoTokenizer.from_pretrained(f"{MODEL_ID}-Instruct")
 # else:
@@ -310,7 +285,7 @@ else:
     train_dataset_raw = dataset.train_test_split(test_size=0.1, seed=42)["train"]
     eval_dataset_raw = dataset.train_test_split(test_size=0.1, seed=42)["test"]
 
-print(
+logger.info(
     f"Loaded {len(train_dataset_raw)} training examples and {len(eval_dataset_raw)} evaluation examples."
 )
 
@@ -369,13 +344,9 @@ def preprocess_function(examples):
                     # print(f"Warning: Prompt entry {idx} is a string. Wrapping as 'user' message.")
                     return [{"role": "user", "content": messages}]
                 else:  # Chosen/rejected responses should not be simple strings
-                    # print(f"Warning: Chosen/Rejected entry {idx} is a string, which is unexpected. Skipping example.")
                     return None
             else:
                 # If it's not a list or a string, it's an unrecognized format.
-                print(
-                    f"Warning: Malformed entry {idx} (type: {type(messages)}). Skipping example."
-                )
                 return None
 
         current_prompt_messages = ensure_message_list(
@@ -435,16 +406,16 @@ def preprocess_function(examples):
     return processed
 
 
-print("Preprocessing dataset (applying chat template and tokenizing)...")
+logger.info("Preprocessing dataset (applying chat template and tokenizing)...")
 train_datasets = {}
 eval_datasets = {}
-print(train_datasets_raw)
+logger.debug(f"Train datasets raw: {train_datasets_raw}")
 for model_idx, (train_dataset_raw, eval_dataset_raw) in enumerate(
     zip(train_datasets_raw.values(), eval_datasets_raw.values())
 ):
-    print(model_idx, "model_idx")
-    print(train_dataset_raw, "train")
-    print(eval_dataset_raw, "test")
+    logger.debug(f"{model_idx} model_idx")
+    logger.debug(f"{train_dataset_raw} train")
+    logger.debug(f"{eval_dataset_raw} test")
     train_datasets[model_idx] = train_dataset_raw.map(
         preprocess_function,
         batched=True,
@@ -670,26 +641,21 @@ def train_single_model(model_idx, gpu_id, train_dataset, eval_dataset, config):
     # Setup logging for this model
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_name = MODEL_ID.rsplit("/", 1)[-1]
-    log_filename = (
-        f"logs/pepo_model_{model_idx}_gpu_{gpu_id}_{model_name}_{timestamp}.log"
+    log_filename = f"pepo_model_{model_idx}_gpu_{gpu_id}_{model_name}_{timestamp}.log"
+
+    model_logger = Logger(
+        name=f"pepo_model_{model_idx}",
+        log_file=log_filename,
+        log_dir="logs",
     )
 
-    logger = Logger(log_filename)
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-    sys.stdout = logger  # type: ignore[assignment]
-    sys.stderr = logger  # type: ignore[assignment]
-
-    print("=" * 80)
-    print(f"Training Model {model_idx} on GPU {gpu_id}")
-    print("=" * 80)
-    print(f"Timestamp: {datetime.now()}")
-    print(f"Device: {DEVICE}")
-    print("=" * 80)
+    model_logger.info(f"Training Model {model_idx} on GPU {gpu_id}")
+    model_logger.info(f"Timestamp: {datetime.now()}")
+    model_logger.info(f"Device: {DEVICE}")
 
     try:
         # Policy Model (will be trained with LoRA)
-        print(f"Loading policy model on {DEVICE}...")
+        model_logger.info(f"Loading policy model on {DEVICE}...")
         policy_model = AutoModelForCausalLM.from_pretrained(
             MODEL_ID, torch_dtype=DTYPE, device_map=DEVICE
         )
@@ -716,10 +682,10 @@ def train_single_model(model_idx, gpu_id, train_dataset, eval_dataset, config):
         # Note: torch.compile() disabled due to PyTorch 2.6.0 + Triton 3.5.0 incompatibility
         # Error: cannot import name 'AttrsDescriptor' from 'triton.compiler.compiler'
         # Can be re-enabled when versions are compatible
-        print("Note: torch.compile() disabled due to version incompatibility")
+        model_logger.info("Note: torch.compile() disabled due to version incompatibility")
 
         # Reference Model (frozen copy)
-        print(f"Loading reference model on {REF_DEVICE}...")
+        model_logger.info(f"Loading reference model on {REF_DEVICE}...")
         ref_model = AutoModelForCausalLM.from_pretrained(
             MODEL_ID, torch_dtype=DTYPE, device_map=REF_DEVICE
         )
@@ -730,7 +696,7 @@ def train_single_model(model_idx, gpu_id, train_dataset, eval_dataset, config):
 
         # Note: torch.compile() disabled due to PyTorch 2.6.0 + Triton 3.5.0 incompatibility
 
-        print(f"Models loaded successfully on {DEVICE}")
+        model_logger.info(f"Models loaded successfully on {DEVICE}")
 
         # Create dataloaders
         train_dataloader = DataLoader(
@@ -760,7 +726,7 @@ def train_single_model(model_idx, gpu_id, train_dataset, eval_dataset, config):
         )
 
         # Training Loop
-        print(f"Starting DPO training loop for model {model_idx}...")
+        model_logger.info(f"Starting DPO training loop for model {model_idx}...")
         global_step = 0
         policy_model.zero_grad()  # Zero gradients before training
 
@@ -840,7 +806,7 @@ def train_single_model(model_idx, gpu_id, train_dataset, eval_dataset, config):
             avg_train_loss = (
                 total_loss / len(train_dataloader) if len(train_dataloader) > 0 else 0.0
             )
-            print(
+            model_logger.info(
                 f"Model {model_idx} - Epoch {epoch+1} finished. Average Training Loss: {avg_train_loss}"
             )
 
@@ -894,7 +860,7 @@ def train_single_model(model_idx, gpu_id, train_dataset, eval_dataset, config):
             avg_eval_loss = (
                 eval_loss / len(eval_dataloader) if len(eval_dataloader) > 0 else 0.0
             )
-            print(
+            model_logger.info(
                 f"Model {model_idx} - Epoch {epoch+1} finished. Average Evaluation Loss: {avg_eval_loss}"
             )
 
@@ -915,21 +881,14 @@ def train_single_model(model_idx, gpu_id, train_dataset, eval_dataset, config):
             private=True,
         )
 
-        print(
+        model_logger.info(
             f"Model {model_idx} - LoRA adapter and tokenizer successfully pushed to: https://huggingface.co/{hub_repo_id}"
         )
-        print(f"Model {model_idx} - DPO training complete!")
+        model_logger.info(f"Model {model_idx} - DPO training complete!")
 
     except Exception as e:
-        print(f"Error training model {model_idx} on GPU {gpu_id}: {str(e)}")
-        import traceback
-
-        traceback.print_exc()
-    finally:
-        # Restore stdout/stderr
-        sys.stdout = original_stdout
-        sys.stderr = original_stderr
-        logger.close()
+        model_logger.error(f"Error training model {model_idx} on GPU {gpu_id}: {str(e)}")
+        model_logger.exception("Exception details:")
 
         # Clean up GPU memory
         if "policy_model" in locals():
@@ -958,14 +917,14 @@ if __name__ == "__main__":
             # In SLURM, CUDA_VISIBLE_DEVICES is already set to renumber GPUs starting from 0
             num_gpus = torch.cuda.device_count()
             available_gpus = list(range(num_gpus))
-            print(
+            logger.info(
                 f"Auto-detected {num_gpus} GPUs from CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}"
             )
 
-        print(
+        logger.info(
             f"Parallel training enabled with {len(available_gpus)} GPUs: {available_gpus}"
         )
-        print(f"Training {L} models across {len(available_gpus)} GPUs")
+        logger.info(f"Training {L} models across {len(available_gpus)} GPUs")
 
         # Create processes for parallel training
         processes = []
@@ -985,35 +944,31 @@ if __name__ == "__main__":
             )
             p.start()
             processes.append(p)
-            print(f"Started training process for model {model_idx} on GPU {gpu_id}")
+            logger.info(f"Started training process for model {model_idx} on GPU {gpu_id}")
 
         # Wait for all processes to complete
         for p in processes:
             p.join()
 
-        print("\n" + "=" * 80)
-        print("All models trained successfully!")
-        print("=" * 80)
+        logger.info("All models trained successfully!")
 
     else:
-        print(
+        logger.warning(
             "Warning: Sequential training mode not tested recently. Proceed with caution."
         )
         import sys
 
         sys.exit(1)
         # --- Sequential Training ---
-        print("Sequential training mode. Models will be trained one by one.")
+        logger.info("Sequential training mode. Models will be trained one by one.")
 
         # Use the main GPU specified in args
         # The 'train_single_model' function will use this GPU ID to set its device
         main_gpu_id = args.cuda_index
-        print(f"Using main GPU: {main_gpu_id} for all models.")
+        logger.info(f"Using main GPU: {main_gpu_id} for all models.")
 
         for model_idx in range(L):
-            print("\n" + "=" * 80)
-            print(f"Starting training for model {model_idx} on GPU {main_gpu_id}")
-            print("=" * 80)
+            logger.info(f"Starting training for model {model_idx} on GPU {main_gpu_id}")
 
             # Call the training function directly instead of duplicating logic.
             # This function handles loading, training, evaluation, and saving.
@@ -1025,7 +980,7 @@ if __name__ == "__main__":
                 config=config,  # This 'config' dict must be defined outside the if/else block
             )
 
-            print(f"Finished training and saving for model {model_idx}.")
+            logger.info(f"Finished training and saving for model {model_idx}.")
 
             # --- Optional: Test the trained model ---
             # This logic was in the original 'else' block and is preserved here.
@@ -1035,7 +990,7 @@ if __name__ == "__main__":
                 from peft import PeftModel
                 from transformers import AutoModelForCausalLM, pipeline
 
-                print("\n--- Testing the BASE model ---")
+                logger.info("\n--- Testing the BASE model ---")
 
                 # Load the original base model
                 base_model = AutoModelForCausalLM.from_pretrained(
@@ -1062,7 +1017,9 @@ if __name__ == "__main__":
                     test_prompt_message, tokenize=False, add_generation_prompt=True
                 )
 
-                print(f"Generating response for prompt with BASE model:\n{test_prompt}")
+                logger.info(
+                    f"Generating response for prompt with BASE model:\n{test_prompt}"
+                )
 
                 base_outputs = base_pipe(
                     test_prompt,
@@ -1074,14 +1031,14 @@ if __name__ == "__main__":
                     repetition_penalty=1.1,
                     eos_token_id=tokenizer.eos_token_id,
                 )
-                print("\nGenerated Response from BASE model (full):")
-                print(base_outputs[0]["generated_text"])
+                logger.info("\nGenerated Response from BASE model (full):")
+                logger.info(base_outputs[0]["generated_text"])
 
                 base_generated_text_only = (
                     base_outputs[0]["generated_text"].replace(test_prompt, "").strip()
                 )
-                print("\nGenerated Response from BASE model (clean):")
-                print(base_generated_text_only)
+                logger.info("\nGenerated Response from BASE model (clean):")
+                logger.info(base_generated_text_only)
 
                 # Clean up memory
                 del base_model
@@ -1091,7 +1048,7 @@ if __name__ == "__main__":
                 # =================================================================
                 #  SECTION 2: Testing the TRAINED (fine-tuned) model
                 # =================================================================
-                print("\n\n--- Testing the TRAINED model ---")
+                logger.info("\n\n--- Testing the TRAINED model ---")
 
                 # This is the Hub ID where train_single_model saved the adapter
                 hub_repo_id = f"{OUTPUT_DIR}_l{model_idx}"
@@ -1114,7 +1071,7 @@ if __name__ == "__main__":
                     torch_dtype=DTYPE,
                 )
 
-                print(
+                logger.info(
                     f"Generating response for prompt with TRAINED model:\n{test_prompt}"
                 )
 
@@ -1128,14 +1085,14 @@ if __name__ == "__main__":
                     repetition_penalty=1.1,
                     eos_token_id=tokenizer.eos_token_id,
                 )
-                print("\nGenerated Response from TRAINED model (full):")
-                print(outputs[0]["generated_text"])
+                logger.info("\nGenerated Response from TRAINED model (full):")
+                logger.info(outputs[0]["generated_text"])
 
                 generated_text_only = (
                     outputs[0]["generated_text"].replace(test_prompt, "").strip()
                 )
-                print("\nGenerated Response from TRAINED model (clean):")
-                print(generated_text_only)
+                logger.info("\nGenerated Response from TRAINED model (clean):")
+                logger.info(generated_text_only)
 
                 # Clean up
                 del trained_model_base
@@ -1144,10 +1101,8 @@ if __name__ == "__main__":
                 torch.cuda.empty_cache()
 
             else:
-                print(
+                logger.warning(
                     "\nSkipping model testing: Not on main CUDA device. Run on GPU for testing."
                 )
 
-        print("\n" + "=" * 80)
-        print("All models trained and tested successfully!")
-        print("=" * 80)
+        logger.info("All models trained and tested successfully!")
