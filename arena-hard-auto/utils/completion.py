@@ -771,6 +771,9 @@ def sglang_completion(
     temperature,
     max_tokens=32768,
     end_think_token=None,
+    lora_path=None,
+    tp_size=None,
+    cuda_devices=None,
     **kwargs,
 ):
     from transformers import AutoTokenizer
@@ -779,7 +782,14 @@ def sglang_completion(
     import tiktoken
     import re
 
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    # Set CUDA_VISIBLE_DEVICES if specified
+    if cuda_devices is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_devices)
+        print(f"DEBUG: Set CUDA_VISIBLE_DEVICES={cuda_devices}")
+
+    # If LoRA adapter is specified, use it for tokenizer
+    tokenizer_model = lora_path if lora_path else model
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_model)
     
     uids = [context['uid'] for context in batch_context]
     prompts = [context['prompt'] for context in batch_context]
@@ -794,16 +804,28 @@ def sglang_completion(
         for i in tqdm(range(len(uids)))
     ]
     download_model(model=model)
+    if lora_path:
+        download_model(model=lora_path)
+    
+    # Use provided tp_size or infer from CUDA_VISIBLE_DEVICES
+    if tp_size is None:
+        tp_size = _infer_cuda_tp_world_size()
     
     server_args = {
         "model_path": model,
         "dtype": "auto",
-        "tp_size": _infer_cuda_tp_world_size(),
+        "tp_size": tp_size,
         "mem_fraction_static": 0.7,
         "max_prefill_tokens": max_tokens,
         "max_workers": 256,
         "server_port": 30000,
     }
+    
+    # Add LoRA configuration if lora_path is provided
+    if lora_path:
+        server_args["enable_lora"] = True
+        server_args["lora_paths"] = [lora_path]
+        server_args["max_loras_per_batch"] = 1
     
     executor = SGLangServerExecutor(
         **server_args,
@@ -811,12 +833,21 @@ def sglang_completion(
     
     print(f"DEBUG: sglang_completion_qwq: model: {model}")
     
+    # Get model's max context length from tokenizer
+    max_context_length = getattr(tokenizer, 'model_max_length', None)
+    if max_context_length is None or max_context_length > 1000000:
+        # If not set or unreasonably large, use a safe default for SmolLM2
+        max_context_length = 8192
+    
+    print(f"DEBUG: Using max_context_length: {max_context_length}")
+    
     uid_to_response = batch_submit_sglang(
         executor=executor, 
         tokenizer=tokenizer,
         temperature=temperature,
         max_tokens=max_tokens,
         all_context=processed_context,
+        max_context_length=max_context_length,
         end_think_token=end_think_token,
     )
     

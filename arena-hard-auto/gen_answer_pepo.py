@@ -91,20 +91,26 @@ class PepoEnsemble:
     """
     Loads and manages the PEPO ensemble models.
     """
-    def __init__(self, base_model_id, hf_username, num_networks, device, dtype):
+    def __init__(self, base_model_id, hf_username, num_networks, device, dtype, ensemble_name=None):
         self.base_model_id = base_model_id
         self.hf_username = hf_username
         self.num_networks = num_networks
         self.device = device
         self.dtype = dtype
+        self.ensemble_name = ensemble_name
         self.ensemble_models = []
         self.tokenizer = None
         
         self._load_models()
 
     def _load_models(self):
-        name = self.base_model_id.rsplit('/', 1)[-1]
-        output_dir = f"{name}dpo_ensemble{self.num_networks}"
+        if self.ensemble_name:
+            # Use custom ensemble name if provided
+            output_dir = self.ensemble_name
+        else:
+            # Use default naming convention
+            name = self.base_model_id.rsplit('/', 1)[-1]
+            output_dir = f"{name}dpo_ensemble{self.num_networks}"
         
         hub_repo_id_0 = f"{self.hf_username}/{output_dir}_l0"
         logging.info(f"Loading tokenizer from: {hub_repo_id_0}")
@@ -146,47 +152,52 @@ class PepoEnsemble:
             min_probs, _ = torch.min(torch.stack(probs_list), dim=0)
             idk_token_id = -1
             if use_idk_token:
-                logging.info(f"      Using PEPO-IDK Top-p sampling (Temp={temperature}, Top-p={top_p})")
                 extra_mass = 1.0 - torch.sum(min_probs, dim=-1, keepdim=True)
                 extra_mass = torch.clamp(extra_mass, min=0.0) # ensure no negative probs
                 distribution_to_sample = torch.cat([min_probs, extra_mass], dim=-1)
                 idk_token_id = distribution_to_sample.shape[-1] - 1
             else:
-                logging.info(f"      Using PEPO Top-p sampling (Temp={temperature}, Top-p={top_p})")
                 distribution_to_sample = min_probs
-            scaled_logits = torch.log(distribution_to_sample + 1e-9) / temperature
-            temp_scaled_probs = torch.softmax(scaled_logits, dim=-1)
-            sorted_probs, sorted_indices = torch.sort(temp_scaled_probs, descending=True)
-            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-            sorted_indices_to_remove = cumulative_probs > top_p
-            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-            sorted_indices_to_remove[..., 0] = 0 # always keep at least one token
-            indices_to_remove = torch.zeros_like(sorted_indices_to_remove).scatter_(
-                dim=1, 
-                index=sorted_indices, 
-                src=sorted_indices_to_remove
-            )
-            filtered_probs = temp_scaled_probs.clone()
-            filtered_probs[indices_to_remove] = 0.0
-            normalized_probs = filtered_probs / torch.sum(filtered_probs, dim=-1, keepdim=True)
-            normalized_probs = torch.nan_to_num(normalized_probs, nan=0.0)
-            sampled_token_ids = torch.multinomial(normalized_probs, num_samples=1).squeeze(-1)
+            
+            # Handle temperature=0 case (greedy sampling)
+            if temperature == 0.0 or temperature < 1e-6:
+                # Greedy sampling: select the token with highest probability
+                sampled_token_ids = torch.argmax(distribution_to_sample, dim=-1, keepdim=True)
+            else:
+                # Temperature-based sampling
+                scaled_logits = torch.log(distribution_to_sample + 1e-9) / temperature
+                temp_scaled_probs = torch.softmax(scaled_logits, dim=-1)
+                sorted_probs, sorted_indices = torch.sort(temp_scaled_probs, descending=True)
+                cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0 # always keep at least one token
+                indices_to_remove = torch.zeros_like(sorted_indices_to_remove).scatter_(
+                    dim=1, 
+                    index=sorted_indices, 
+                    src=sorted_indices_to_remove
+                )
+                filtered_probs = temp_scaled_probs.clone()
+                filtered_probs[indices_to_remove] = 0.0
+                normalized_probs = filtered_probs / torch.sum(filtered_probs, dim=-1, keepdim=True)
+                normalized_probs = torch.nan_to_num(normalized_probs, nan=0.0)
+                sampled_token_ids = torch.multinomial(normalized_probs, num_samples=1).squeeze(-1)
 
-            if use_idk_token and idk_token_id != -1:
-                needs_resample = (sampled_token_ids == idk_token_id)
-                for _ in range(t_max - 1):
-                    if not torch.any(needs_resample):
-                        break
-                    probs_to_resample = normalized_probs[needs_resample]
-                    
-                    # guard against empty/zero probability rows if filtering was too aggressive
-                    if probs_to_resample.shape[0] > 0 and torch.sum(probs_to_resample) > 0:
-                        new_samples = torch.multinomial(probs_to_resample, num_samples=1).squeeze(-1)
-                        sampled_token_ids[needs_resample] = new_samples
-                        needs_resample = (sampled_token_ids == idk_token_id)
-                    else:
-                        break
-            sampled_token_ids = sampled_token_ids.unsqueeze(-1)
+                if use_idk_token and idk_token_id != -1:
+                    needs_resample = (sampled_token_ids == idk_token_id)
+                    for _ in range(t_max - 1):
+                        if not torch.any(needs_resample):
+                            break
+                        probs_to_resample = normalized_probs[needs_resample]
+                        
+                        # guard against empty/zero probability rows if filtering was too aggressive
+                        if probs_to_resample.shape[0] > 0 and torch.sum(probs_to_resample) > 0:
+                            new_samples = torch.multinomial(probs_to_resample, num_samples=1).squeeze(-1)
+                            sampled_token_ids[needs_resample] = new_samples
+                            needs_resample = (sampled_token_ids == idk_token_id)
+                        else:
+                            break
+                sampled_token_ids = sampled_token_ids.unsqueeze(-1)
 
         if isinstance(sampled_token_ids, torch.Tensor):
             token_list = sampled_token_ids.cpu().tolist()
@@ -214,7 +225,6 @@ class PepoEnsemble:
         Generates full sequences for a batch of prompts using the PEPO ensemble.
         """
         batch_size = len(initial_prompts)
-        logging.info(f"      Starting PEPO generation for {batch_size} prompts (max_tokens={max_new_tokens})")
         
         current_prompts = initial_prompts.copy()
         finished = [False] * len(current_prompts)
@@ -222,16 +232,11 @@ class PepoEnsemble:
         tokens_generated = 0
         for i in range(max_new_tokens):
             if all(finished):
-                logging.info(f"      All sequences finished after {tokens_generated} tokens")
                 break   
             active_prompts = [p for p, f in zip(current_prompts, finished) if not f]
             active_indices = [i for i, f in enumerate(finished) if not f]
             if not active_prompts:
                 break
-
-            if i > 0 and i % 50 == 0:
-                active_count = len(active_prompts)
-                logging.info(f"      Generated {i}/{max_new_tokens} tokens, {active_count}/{batch_size} sequences still active")
 
             next_tokens = self.sample_next_token(
                 active_prompts,
@@ -252,8 +257,6 @@ class PepoEnsemble:
             
             tokens_generated = i + 1
         
-        logging.info(f"      PEPO generation complete: {tokens_generated} tokens, {sum(finished)}/{batch_size} finished")
-        
         return [
             current_prompts[i][len(initial_prompts[i]):] 
             for i in range(len(initial_prompts))
@@ -272,7 +275,8 @@ def main_generate_pepo_answers(args):
         hf_username=args.hf_username,
         num_networks=args.num_networks,
         device=PEPO_DEVICE,
-        dtype=DTYPE
+        dtype=DTYPE,
+        ensemble_name=args.ensemble_name
     )
     tokenizer = pepo_model.tokenizer
     
@@ -293,8 +297,12 @@ def main_generate_pepo_answers(args):
     encoding = tiktoken.encoding_for_model("gpt-4o")
 
     # 4. Generate and Save Answers
+    total_questions = len(questions)
     with open(answer_file, "w", encoding="utf-8") as fout:
-        for question in tqdm(questions, desc="Generating PEPO Answers"):
+        for idx, question in enumerate(questions, 1):
+            # Print progress
+            print(f"\rGenerating answers: {idx}/{total_questions} ({100*idx/total_questions:.1f}%)", end='', flush=True)
+            
             # 'question["prompt"]' already contains the formatted chat template
             # from arena-hard's 'question.jsonl'
             # Note: Your script's `arena_hard` loading logic was correct
@@ -340,8 +348,9 @@ def main_generate_pepo_answers(args):
                 "metadata": metadata
             }
             fout.write(json.dumps(ans, ensure_ascii=False) + "\n")
-
-    logging.info(f"PEPO answer generation complete.")
+    
+    print()  # New line after progress
+    logging.info(f"PEPO answer generation complete. Generated {total_questions} answers.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Parser for PEPO Evaluation.")
@@ -353,6 +362,8 @@ if __name__ == "__main__":
                         help="Base model ID")
     parser.add_argument("--hf_username", type=str, required=True,
                         help="HuggingFace username where ensemble models are stored")
+    parser.add_argument("--ensemble_name", type=str, default=None,
+                        help="Custom ensemble name (e.g., 'SmolLM2-1.7Bdpo_ensemble_with_1.0alpha4'). If not provided, uses default naming.")
     parser.add_argument("--pepo_cuda_index", type=int, default=0,
                         help="GPU index for PEPO ensemble models (default: 0)")
     parser.add_argument("--dpo_cuda_index", type=int, default=1,

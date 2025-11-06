@@ -102,12 +102,15 @@ aws_nova_light_v1:
 # pepo basleine model (local inference)
 
 dpo-baseline:
-    model:  PessimisticDPO/SmolLM2-1.7Bdpo_ensemble_with_1.0alpha1_l0
+    model: HuggingFaceTB/SmolLM2-1.7B
+    lora_path: PessimisticDPO/SmolLM2-1.7Bdpo_ensemble_with_1.0alpha1_l0
     endpoints:
         - api_base: http://0.0.0.0:8000/v1
           api_key: '-'
     api_type: sglang
     local_engine: True
-    parallel: 2  # Changed from 128 to 1 for single-GPU server
+    parallel: 2
     max_tokens: 1024
     temperature: 0.0
+    tp_size: 2  # Use 2 GPUs for tensor parallelism
+    cuda_devices: "1,2"  # Use GPUs 1 and 2
