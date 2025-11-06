@@ -1,43 +1,47 @@
 repos:
+  # Clean Jupyter notebooks
+  - repo: https://github.com/srstevenson/nb-clean
+    rev: 4.0.1
+    hooks:
+      - id: nb-clean
+        files: \.ipynb$
+        description: "Clean Jupyter notebooks by removing outputs and metadata"
+
+  # Code formatting and linting
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black
+        language_version: python3.9
+        args: [--line-length=90]
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: [--profile=black, --multi-line=3]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+
+  # Type checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.17.1
+    hooks:
+      - id: mypy
+        args: [--ignore-missing-imports, --no-strict-optional]
+
+  # General hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
-        args: ['--unsafe']
       - id: check-added-large-files
-        args: ['--maxkb=1000']
-
-  - repo: https://github.com/psf/black
-    rev: 24.3.0
-    hooks:
-      - id: black
-        language_version: python3
-        args: ['--line-length=100']
-
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.4.7
-    hooks:
-      - id: ruff
-        args: ['--fix', '--exit-non-zero-on-fix', '--ignore=E402,E741,E722']
-      - id: ruff-format
-
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.9.0
-    hooks:
-      - id: mypy
-        additional_dependencies: [types-PyYAML]
-        args: [--ignore-missing-imports, --no-strict-optional]
-
-  - repo: https://github.com/Yelp/detect-secrets
-    rev: v1.5.0
-    hooks:
-      - id: detect-secrets
-        exclude: |
-          (?x)^(
-              .*\.lock$
-              |.*\.secrets\.baseline$
-              |.*\.ipynb$
-              |.*\.ipynb_checkpoints/.*
-          )$
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: debug-statements
