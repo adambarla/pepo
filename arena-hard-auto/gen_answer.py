@@ -88,9 +88,7 @@ if __name__ == "__main__":
     config = make_config(args.config_file)
     endpoints = make_config(args.endpoint_file)
 
-    existing_answer = load_model_answers(os.path.join("data", config["bench_name"], "model_answer"))
-    
-    print(config)
+    existing_answer = load_model_answers(os.path.join("data", config["bench_name"], "model_answer"))        
 
     for model in config["model_list"]:
         assert model in endpoints
