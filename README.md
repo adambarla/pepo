@@ -4,30 +4,68 @@ A project for preference alignment of language models using techniques like DPO 
 
 ## Installation
 
-### Using UV (Recommended)
-
-```bash
-uv sync --all-extras
-```
-
-### Using Pip
-
-```bash
-pip install -e ".[dev]"
-```
-
-## Development Setup
-
-To ensure code quality and consistency, run the development setup script:
+**Important**: Before proceeding with the installation steps below, make sure to run the development setup script first:
 
 ```bash
 chmod +x dev_setup.sh
 ./dev_setup.sh
 ```
 
-After setup, you can manually run pre-commit checks:
+### CSCS Cluster (Clariden)
+
+Clariden nodes have `aarch64` architecture, which makes it difficult to install PyTorch with CUDA support. Follow the instructions below to install the dependencies.
+
+#### Prerequisites
+
+Connect to Clariden: SSH to `clariden.cscs.ch` (may require proxy via `ela.cscs.ch`)
+Request an interactive session with GPUs:
 ```bash
-uv run pre-commit run --all-files
+./scripts/slurm/get_interactive.sh
+```
+This script requests 4 GPUs for 1 hour. Adjust the script if you need different resources.
+
+#### Installation Steps
+
+Start the PyTorch user environment (uenv) and create a virtual environment with system site packages.
+```bash
+uenv image pull pytorch/v2.6.0:v1
+uenv start pytorch/v2.6.0:v1 --view=default
+rm -rf .venv # remove existing virtual environment if present
+uv venv -p $(which python) --system-site-packages .venv
+```
+Using `--system-site-packages` allows access to PyTorch from the uenv environment.
+This provides PyTorch 2.6.0 with CUDA support (Python 3.13) pre-installed.
+
+Activate the virtual environment and install the project dependencies:
+```bash
+source .venv/bin/activate
+uv pip install -e .
+```
+Verify installation:
+```bash
+python -c "import torch; print(f'Torch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
+```
+You should see `Torch: 2.6.0` and `CUDA: True`.
+
+#### Notes
+
+- The uenv environment must be active before creating the virtual environment to ensure the correct Python interpreter is used.
+- The uenv provides PyTorch with CUDA 12.6 support for the GH200 GPUs on Clariden.
+
+### Other Machines
+
+Create a virtual environment with Python 3.13 and install dependencies:
+
+```bash
+uv venv --python 3.13 .venv
+source .venv/bin/activate
+uv pip install torch --index-url https://download.pytorch.org/whl/cuXXX # replace XXX with the correct CUDA version
+uv pip install -e .
+```
+
+Verify installation:
+```bash
+python -c "import torch; print(f'Torch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
 ```
 
 ## Running the Project
@@ -37,5 +75,6 @@ uv run pre-commit run --all-files
 Run scripts with Hydra:
 
 ```bash
-uv run scripts/<script_name>
+source .venv/bin/activate
+python scripts/<script_name>
 ```
