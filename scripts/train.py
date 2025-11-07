@@ -7,7 +7,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 from pepo import PEPOModel
-from pepo.utils import DeviceManager, Logger, set_seed
+from pepo.utils import DeviceManager, HubManager, Logger, set_seed
 
 
 @hydra.main(
@@ -30,15 +30,20 @@ def main(cfg: DictConfig):
 
     device_manager = DeviceManager(
         device_config=cfg.device,
-        num_models=cfg.ensemble.num_networks,
+        num_models=cfg.pepo.num_networks,
+        logger=logger,
+    )
+
+    hub_manager = HubManager(
+        config=cfg.hub,
         logger=logger,
     )
 
     model = PEPOModel(
         pepo_config=cfg.pepo,
-        full_config=cfg,
         logger=logger,
         device_manager=device_manager,
+        hub_manager=hub_manager,
     )
 
     model.train()

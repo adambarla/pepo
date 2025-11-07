@@ -68,6 +68,24 @@ Verify installation:
 python -c "import torch; print(f'Torch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
 ```
 
+## Environment Variables
+
+The project uses environment variables for configuration. Create a `.env` file in the project root (`.env` is already in `.gitignore`):
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env` and set your HuggingFace token:
+
+```
+HF_TOKEN=your_huggingface_token_here
+```
+
+Get your token from: https://huggingface.co/settings/tokens
+
+**Note**: Make sure your token has WRITE permissions if you plan to push models to the HuggingFace Hub.
+
 ## Running the Project
 
 ### Scripts

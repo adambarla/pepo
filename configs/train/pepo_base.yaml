@@ -1,10 +1,6 @@
 # PEPO Ensemble Training Configuration
 # Default parameters for training PEPO ensemble models
 
-# Model configuration
-model:
-  id: "HuggingFaceTB/SmolLM2-1.7B"
-  tokenizer: null  # Will use same as model.id if null
 
 # Dataset configuration
 dataset:
@@ -30,19 +26,18 @@ training:
 pepo:
   beta: 0.1  # DPO beta parameter, controls strength of preference
   alpha: 0.1  # Pessimistic margin alpha
+  num_networks: 2  # Number of networks in the ensemble (L)
+  model:
+    id: "HuggingFaceTB/SmolLM2-1.7B"
+    tokenizer: null  # Will use same as model.id if null
+    lora:
+      r: 16
+      alpha: 16
+      dropout: 0.05
+      bias: "none"
+      task_type: "CAUSAL_LM"
+      target_modules: "all-linear"
 
-# Ensemble configuration
-ensemble:
-  num_networks: 3  # Number of networks in the ensemble (L)
-
-# LoRA configuration
-lora:
-  r: 16
-  alpha: 16
-  dropout: 0.05
-  bias: "none"
-  task_type: "CAUSAL_LM"
-  target_modules: "all-linear"
 
 # Device configuration
 device:
@@ -51,10 +46,11 @@ device:
   parallel: false  # Train models in parallel across GPUs
   gpu_ids: null  # Comma-separated GPU IDs (null = auto-detect)
 
-# Output configuration
-output:
-  base_dir: "PessimisticDPO"  # Base directory for output
-  # Output format: {base_dir}/{model_name}dpo_ensemble_with_{alpha}alpha{num_networks}_l{network_id}
+# HuggingFace Hub configuration
+hub:
+  base_dir: "PessimisticDPO"  # HuggingFace username/organization
+  load_from_hub: false
+  push_to_hub: true
 
 # Reproducibility
 seed: 42
