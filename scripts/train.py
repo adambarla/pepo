@@ -6,6 +6,7 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
+from pepo import PEPOModel
 from pepo.utils import DeviceManager, Logger, set_seed
 
 
@@ -27,18 +28,20 @@ def main(cfg: DictConfig):
     set_seed(cfg.seed)
     logger.info(f"Random seed set to: {cfg.seed}")
 
-    # Device setup
-    policy_cuda_index = cfg.get("device", {}).get("cuda_index", 0)
-    ref_cuda_index = cfg.get("device", {}).get("ref_cuda_index", None)
-    parallel = cfg.get("device", {}).get("parallel", False)
-
     device_manager = DeviceManager(
-        policy_cuda_index=policy_cuda_index,
-        ref_cuda_index=ref_cuda_index,
-        parallel=parallel,
+        device_config=cfg.device,
+        num_models=cfg.ensemble.num_networks,
         logger=logger,
     )
-    device_manager.log_device_info()
+
+    model = PEPOModel(
+        pepo_config=cfg.pepo,
+        full_config=cfg,
+        logger=logger,
+        device_manager=device_manager,
+    )
+
+    model.train()
 
 
 if __name__ == "__main__":
