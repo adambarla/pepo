@@ -8,6 +8,12 @@ model:
   num_networks: ${L}
 dataset:
   n_splits: ${model.num_networks}
+  train_split: 0.9
+  eval_split: 0.1
+  max_length: 1024
+  max_prompt_length: 512
+  cache_dir: ${cache_dir}
+
 
 # Training hyperparameters
 training:
@@ -15,8 +21,6 @@ training:
   batch_size: 2
   gradient_accumulation_steps: 4
   learning_rate: 1.0e-5
-  max_length: 1024
-  max_prompt_length: 512
 
 # Device configuration
 device:
@@ -46,3 +50,6 @@ logger:
 log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
 
 L: 2 # Number of submodels in the ensemble
+
+# cache is $SCRATCH/pepo/cache
+cache_dir: ${oc.env:SCRATCH}/pepo/cache

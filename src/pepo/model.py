@@ -1,7 +1,6 @@
 import threading
 from typing import Optional
 
-import torch
 from peft import LoraConfig, PeftModel, get_peft_model
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -25,6 +24,7 @@ class PEPOModel:
         device_manager: DeviceManager,
         hub_manager: HubManager,
         tokenizer_id: Optional[str] = None,
+        chat_template: Optional[str] = None,
         lora_r: int = 16,
         lora_alpha: int = 16,
         lora_dropout: float = 0.05,
@@ -44,6 +44,7 @@ class PEPOModel:
             device_manager: Device manager instance.
             hub_manager: Hub manager instance.
             tokenizer_id: HuggingFace tokenizer ID. If None, uses model_id.
+            chat_template: Custom chat template string. If None, uses model's built-in template.
             lora_r: LoRA rank parameter.
             lora_alpha: LoRA alpha parameter.
             lora_dropout: LoRA dropout rate.
@@ -57,6 +58,7 @@ class PEPOModel:
         self.num_networks = num_networks
         self.model_id = model_id
         self.tokenizer_id = tokenizer_id
+        self.chat_template = chat_template
         self.logger = logger
         self.device_manager = device_manager
         self.hub_manager = hub_manager
@@ -81,12 +83,37 @@ class PEPOModel:
     def _init_tokenizer(self):
         """
         Initialize tokenizer for the PEPO ensemble.
+        Handles chat template configuration from config or uses model's built-in template.
         """
         tokenizer_id = self.tokenizer_id or self.model_id
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "right"
+
+        # Handle chat template
+        if self.chat_template is not None:
+            tokenizer.chat_template = self.chat_template
+            if self.logger:
+                self.logger.info("Using custom chat template from config")
+                self.logger.debug(f"Chat template: {self.chat_template}")
+        elif tokenizer.chat_template is not None:
+            if self.logger:
+                self.logger.info("Using model's built-in chat template")
+        else:
+            raise ValueError(
+                f"Model {tokenizer_id} has no built-in chat_template. Consider providing one in the model config."
+            )
+
         return tokenizer
+
+    def get_tokenizer(self):
+        """
+        Get the tokenizer used by the PEPO ensemble.
+
+        Returns:
+            The tokenizer instance.
+        """
+        return self.tokenizer
 
     def _get_model_name(self, model_idx: int) -> str:
         """
@@ -128,21 +155,16 @@ class PEPOModel:
             if load_from_hub:
                 repo_id = self.hub_manager.get_repo_id(self._get_model_name(model_idx))
                 model = PeftModel.from_pretrained(base_model, repo_id)
-                if self.logger:
-                    self.logger.info(
-                        f"Submodel id:{model_idx} with LoRA adapter loaded successfully from {repo_id} on {device_map}"
-                    )
             else:
                 model = get_peft_model(base_model, self.lora_config)
-                if self.logger:
-                    self.logger.info(
-                        f"Submodel id:{model_idx} initialized successfully on {device_map}"
-                    )
             models.append(model)
+
             if self.logger:
                 trainable, total = model.get_nb_trainable_parameters()
+                trainable = trainable / 1000000
+                total = total / 1000000
                 self.logger.info(
-                    f"Submodel id:{model_idx} has {trainable} trainable parameters out of {total} total parameters ({trainable/total*100:.2f}%)"
+                    f"Submodel id:{model_idx} on {device_map} has {trainable:.2f}M trainable parameters out of {total:.2f}M total parameters ({trainable/total*100:.2f}%)"
                 )
         return models
 
@@ -158,38 +180,52 @@ class PEPOModel:
             )
 
     def _train_model(
-        self, model_idx: int, train_loader: DataLoader, eval_loader: DataLoader
+        self,
+        model_idx: int,
+        train_loader: DataLoader,
+        eval_loader: DataLoader,
+        n_epochs: int = 1,
     ):
         """
         Train a single model in a thread. Each thread sets its CUDA device context
         to ensure proper GPU isolation.
         """
         device_str = self.device_manager.get_device_for_model(model_idx)
-        device_idx = int(device_str.split(":")[1])
-        torch.cuda.set_device(device_idx)
-
         model = self.models[model_idx]
-        prompt = "Hello, how are you?"
 
-        # Generate with base model (without adapters)
-        base_model = model.base_model
-        base_model.train()
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(device_str)
-        output = base_model.generate(**inputs, pad_token_id=self.tokenizer.pad_token_id)
-        decoded_output = self.tokenizer.decode(output[0], skip_special_tokens=True)
-        self.logger.info(f"submodel {model_idx} base model output: {decoded_output}")
+        if self.logger:
+            train_size = len(train_loader.dataset)  # type: ignore[arg-type]
+            eval_size = len(eval_loader.dataset)  # type: ignore[arg-type]
+            self.logger.info(
+                f"Model {model_idx} - Train: size={train_size}, batches={len(train_loader)} - Eval: size={eval_size}, batches={len(eval_loader)}"
+            )
 
-        # Generate with PEFT model (with adapters)
-        model.train()
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(device_str)
-        output = model.generate(**inputs, pad_token_id=self.tokenizer.pad_token_id)
-        decoded_output = self.tokenizer.decode(output[0], skip_special_tokens=True)
-        self.logger.info(f"submodel {model_idx} adapted model output: {decoded_output}")
+        for epoch in range(n_epochs):
+            model.train()
+            for batch in train_loader:
+                batch = {k: v.to(device_str) for k, v in batch.items()}
 
-    def train(self, data_manager: DataManager):
+                for k, v in batch.items():
+                    self.logger.debug(
+                        f"Model {model_idx} - Batch key: {k} - Shape: {v.shape}"
+                    )
+                # self.logger.debug(f"Model {model_idx} - Batch shapes: {batch}")
+
+                break
+            break
+
+    def train(
+        self,
+        data_manager: DataManager,
+        batch_size: int,
+    ):
         """
         Train the PEPO ensemble models and save the models to the hub.
         Uses threading to run models in parallel on different GPUs.
+
+        Args:
+            data_manager: DataManager instance for getting dataloaders.
+            batch_size: Batch size for training.
         """
         if self.logger:
             self.logger.info("Training PEPO ensemble models...")
@@ -197,8 +233,17 @@ class PEPOModel:
         # Launch training for each model in parallel threads
         threads = []
         for model_idx in range(self.num_networks):
-            train_loader = data_manager.get_dataloader(model_idx, "train")
-            eval_loader = data_manager.get_dataloader(model_idx, "eval")
+            train_loader = data_manager.get_dataloader(
+                model_idx=model_idx,
+                partition="train",
+                batch_size=batch_size,
+            )
+            eval_loader = data_manager.get_dataloader(
+                model_idx=model_idx,
+                partition="eval",
+                batch_size=batch_size,
+            )
+
             thread = threading.Thread(
                 target=self._train_model, args=(model_idx, train_loader, eval_loader)
             )

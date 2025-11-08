@@ -52,10 +52,14 @@ def main(cfg: DictConfig):
 
     data_manager = instantiate(
         cfg.dataset,
+        tokenizer=model.get_tokenizer(),
         logger=logger,
     )
 
-    model.train(data_manager)
+    model.train(
+        data_manager=data_manager,
+        batch_size=cfg.training.batch_size,
+    )
 
 
 if __name__ == "__main__":

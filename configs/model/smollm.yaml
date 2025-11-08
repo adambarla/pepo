@@ -5,6 +5,19 @@ beta: 0.1
 num_networks: 8 # placeholder
 model_id: "HuggingFaceTB/SmolLM2-1.7B"
 tokenizer_id: null
+chat_template: |
+  {% if messages[0]['role'] == 'system' %}
+  {{ messages[0]['content'] }}
+  {% else %}
+  {{ 'You are a helpful AI assistant.' }}
+  {% endif %}
+  {% for message in messages %}
+  {% if message['role'] == 'user' %}
+  {{ '\n\n### User:\n' + message['content'] }}
+  {% elif message['role'] == 'assistant' %}
+  {{ '\n\n### Assistant:\n' + message['content'] }}
+  {% endif %}
+  {% endfor %}
 lora_r: 16
 lora_alpha: 16
 lora_dropout: 0.05

@@ -60,8 +60,6 @@ class DeviceManager:
         gpu_id = self._available_gpus[model_idx % len(self._available_gpus)]
         gpu_device = f"cuda:{gpu_id}"
         torch.cuda.set_device(gpu_id)
-        if self.logger:
-            self.logger.info(f"Model {model_idx} assigned to GPU {gpu_device}")
         return gpu_device
 
     @property

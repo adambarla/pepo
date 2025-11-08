@@ -6,3 +6,7 @@ train_split: 0.8
 eval_split: 0.2
 seed: ${seed}
 n_splits: null # this has to be set depending on the number of models in the ensemble
+max_length: null # Maximum sequence length for responses (null = no limit)
+max_prompt_length: null # Maximum sequence length for prompts (null = no limit)
+num_proc: null # Number of processes for preprocessing (null = use all available CPUs)
+cache_dir: ${oc.env:SCRATCH}/pepo/cache # Directory to cache preprocessed datasets (null = no caching)
