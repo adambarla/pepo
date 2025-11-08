@@ -1,0 +1,48 @@
+# PEPO Ensemble Training Configuration
+defaults:
+  - model: smollm
+  - dataset: ultrafeedback
+  - _self_
+
+model:
+  num_networks: ${L}
+dataset:
+  n_splits: ${model.num_networks}
+
+# Training hyperparameters
+training:
+  epochs: 3
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 1.0e-5
+  max_length: 1024
+  max_prompt_length: 512
+
+# Device configuration
+device:
+  _target_: pepo.utils.device.DeviceManager
+  gpu_ids: null  # list of GPU IDs (null = auto-detect), e.g. [0, 1, 2, 3]
+
+# HuggingFace Hub configuration
+hub:
+  _target_: pepo.utils.hub.HubManager
+  base_dir: "PessimisticDPO"  # HuggingFace username/organization
+  load: false
+  push: true
+
+# Reproducibility
+seed: 42
+
+# Logging configuration
+logger:
+  _target_: pepo.utils.logger.Logger
+  name: "train"
+  log_file: null
+  log_dir: "logs"
+  level: ${log_level}
+  format_string: null
+  date_format: null
+
+log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
+
+L: 2 # Number of submodels in the ensemble

@@ -88,11 +88,54 @@ Get your token from: https://huggingface.co/settings/tokens
 
 ## Running the Project
 
-### Scripts
+### Basic Usage
 
-Run scripts with Hydra:
+Run the training script with the default configuration:
 
 ```bash
 source .venv/bin/activate
-python scripts/<script_name>
+python scripts/train.py
 ```
+
+### Configuration Management
+
+This project uses [Hydra](https://hydra.cc/) for configuration management. Configuration files are stored in the `configs` directory, with `configs/train.yaml` as the default (specified in `scripts/train.py`).
+
+#### Overriding Parameters
+
+Override any configuration parameter from the command line using dot notation:
+
+```bash
+python scripts/train.py hub.push=false L=1 log_level=debug
+```
+
+This example:
+- Disables pushing models to HuggingFace Hub (`hub.push=false`)
+- Sets the number of ensemble networks to 1 (`L=1`)
+- Sets the log level to debug (`log_level=debug`)
+
+For more details, see the [Hydra documentation](https://hydra.cc/docs/intro/).
+
+#### Configuration File Structure
+
+The `configs/train.yaml` file uses Hydra's `defaults:` to compose configurations:
+
+```yaml
+defaults:
+  - model: smollm
+  - dataset: ultrafeedback
+  - _self_
+```
+
+This loads:
+- Model configuration from `configs/model/smollm.yaml` (directory name matches the field name)
+- Dataset configuration from `configs/dataset/ultrafeedback.yaml`
+- The `train.yaml` config itself (via `_self_`), which can override the defaults
+
+For example, `train.yaml` overrides the number of ensemble networks using a variable reference:
+
+```yaml
+model:
+  num_networks: ${L}
+```
+The values in the `train.yaml` config file can be overridden by the command line arguments.

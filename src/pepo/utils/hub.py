@@ -3,7 +3,6 @@ from typing import Optional
 
 import dotenv
 from huggingface_hub import HfApi, login
-from omegaconf import DictConfig
 
 from .logger import Logger
 
@@ -18,7 +17,9 @@ class HubManager:
 
     def __init__(
         self,
-        config: DictConfig,
+        base_dir: str,
+        load: bool = False,
+        push: bool = True,
         logger: Optional[Logger] = None,
         hf_token: Optional[str] = None,
     ):
@@ -27,23 +28,25 @@ class HubManager:
 
         Args:
             base_dir: HuggingFace username/organization (e.g., "PessimisticDPO").
+            load: Whether to load models from hub.
+            push: Whether to push models to hub.
             logger: Optional logger instance.
             hf_token: HuggingFace token. If None, uses HF_TOKEN env var or cached token.
         """
-        self.base_dir = config.base_dir
-        self.load_from_hub = config.load_from_hub
-        self.push_to_hub = config.push_to_hub
+        self.base_dir = base_dir
+        self.should_load = load
+        self.should_push = push
         self.logger = logger
         self.api = HfApi()
         self._authenticate(hf_token)
 
     @property
     def should_push_to_hub(self) -> bool:
-        return self.push_to_hub
+        return self.should_push
 
     @property
     def should_load_from_hub(self) -> bool:
-        return self.load_from_hub
+        return self.should_load
 
     def _authenticate(self, hf_token: Optional[str] = None):
         """Authenticate with HuggingFace Hub."""

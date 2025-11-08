@@ -1,51 +1,88 @@
 import threading
+from typing import Optional
 
 import torch
-from omegaconf import DictConfig
 from peft import LoraConfig, PeftModel, get_peft_model
+from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .utils import DeviceManager, HubManager, Logger
+from .utils import DataManager, DeviceManager, HubManager, Logger
+
+# TODO(adam): possible abstraction here is to define a PEPOSubModel base class that handles the logic of a single model in the ensemble
+#             we could inherit this class to define submodels such as smollm, gemma, etc. which would handle their own chat template, tokenizer, etc.
+#             this would allow for more modularity and easier to extend to new models.
+#             we would define hydra configs for each submodel we support and in the pepo config just specify the submodel with a single word (smollm) which would load the appropriate config and instantiate the submodel.
+#             ISSUE: instantiation of L submodels requires a factory/passing config to pepo
 
 
 class PEPOModel:
     def __init__(
         self,
-        pepo_config: DictConfig,
-        logger: Logger,
+        alpha: float,
+        beta: float,
+        num_networks: int,
+        model_id: str,
         device_manager: DeviceManager,
         hub_manager: HubManager,
+        tokenizer_id: Optional[str] = None,
+        lora_r: int = 16,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.05,
+        lora_bias: str = "none",
+        lora_task_type: str = "CAUSAL_LM",
+        lora_target_modules: str = "all-linear",
+        logger: Optional[Logger] = None,
     ):
         """
         Initialize PEPO Model.
 
         Args:
-            pepo_config: PEPO-specific configuration (cfg.pepo).
-            logger: Logger instance.
+            alpha: Pessimistic margin alpha parameter.
+            beta: DPO beta parameter, controls strength of preference.
+            num_networks: Number of networks in the ensemble (L).
+            model_id: HuggingFace model ID (e.g., "HuggingFaceTB/SmolLM2-1.7B").
             device_manager: Device manager instance.
             hub_manager: Hub manager instance.
+            tokenizer_id: HuggingFace tokenizer ID. If None, uses model_id.
+            lora_r: LoRA rank parameter.
+            lora_alpha: LoRA alpha parameter.
+            lora_dropout: LoRA dropout rate.
+            lora_bias: LoRA bias setting.
+            lora_task_type: LoRA task type.
+            lora_target_modules: LoRA target modules.
+            logger: Optional logger instance.
         """
-        self.config = pepo_config
+        self.alpha = alpha
+        self.beta = beta
+        self.num_networks = num_networks
+        self.model_id = model_id
+        self.tokenizer_id = tokenizer_id
         self.logger = logger
         self.device_manager = device_manager
         self.hub_manager = hub_manager
 
-        self.alpha = pepo_config.alpha
-        self.beta = pepo_config.beta
-        self.num_networks = pepo_config.num_networks
+        self.lora_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            bias=lora_bias,
+            task_type=lora_task_type,
+            target_modules=lora_target_modules,
+        )
 
         self.models = self._load_models()
         self.tokenizer = self._init_tokenizer()
 
-        self.logger.info(
-            f"PEPOModel initialized with alpha={self.alpha}, beta={self.beta}, L={self.num_networks}"
-        )
+        if self.logger:
+            self.logger.info(
+                f"PEPOModel initialized with alpha={self.alpha}, beta={self.beta}, L={self.num_networks}"
+            )
 
     def _init_tokenizer(self):
         """
         Initialize tokenizer for the PEPO ensemble.
         """
-        tokenizer_id = self.config.model.tokenizer or self.config.model.id
+        tokenizer_id = self.tokenizer_id or self.model_id
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "right"
@@ -62,7 +99,7 @@ class PEPOModel:
         Returns:
             Repository name (without base_dir, e.g., "model-name-pepo-a0.1-b0.1-L3-l0").
         """
-        model_name = self.config.model.id.rsplit("/", 1)[-1]
+        model_name = self.model_id.rsplit("/", 1)[-1]
         repo_name = f"{model_name}-pepo-a{self.alpha}-b{self.beta}-L{self.num_networks}-l{model_idx}"
         return repo_name
 
@@ -71,7 +108,6 @@ class PEPOModel:
         Load all ensemble models from Hub or initialize them from scratch.
         """
         models = []
-        # check if all models can be loaded from hub
         load_from_hub = self.hub_manager.should_load_from_hub
         for model_idx in range(self.num_networks):
             if not load_from_hub:
@@ -80,37 +116,34 @@ class PEPOModel:
                 load_from_hub = False
 
         for model_idx in range(self.num_networks):
+            device_map = self.device_manager.get_device_for_model(model_idx)
+            dtype = self.device_manager.dtype
+
             base_model = AutoModelForCausalLM.from_pretrained(
-                self.config.model.id,
-                torch_dtype=self.device_manager.dtype,
-                device_map=self.device_manager.get_device_for_model(model_idx),
+                self.model_id,
+                torch_dtype=dtype,
+                device_map=device_map,
             )
             base_model.config.use_cache = False
             if load_from_hub:
                 repo_id = self.hub_manager.get_repo_id(self._get_model_name(model_idx))
                 model = PeftModel.from_pretrained(base_model, repo_id)
-                self.logger.info(
-                    f"Submodel id:{model_idx} with LoRA adapter loaded successfully from {repo_id} on {self.device_manager.get_device_for_model(model_idx)}"
-                )
+                if self.logger:
+                    self.logger.info(
+                        f"Submodel id:{model_idx} with LoRA adapter loaded successfully from {repo_id} on {device_map}"
+                    )
             else:
-                peft_config = LoraConfig(
-                    r=self.config.model.lora.r,
-                    lora_alpha=self.config.model.lora.alpha,
-                    lora_dropout=self.config.model.lora.dropout,
-                    bias=self.config.model.lora.bias,
-                    task_type=self.config.model.lora.task_type,
-                    target_modules=self.config.model.lora.target_modules,
-                )
-                model = get_peft_model(base_model, peft_config)
-                self.logger.info(
-                    f"Submodel id:{model_idx} with initialized successfully on {self.device_manager.get_device_for_model(model_idx)}"
-                )
+                model = get_peft_model(base_model, self.lora_config)
+                if self.logger:
+                    self.logger.info(
+                        f"Submodel id:{model_idx} initialized successfully on {device_map}"
+                    )
             models.append(model)
-            # trainable parameters
-            trainable, total = model.get_nb_trainable_parameters()
-            self.logger.info(
-                f"Submodel id:{model_idx} has {trainable} trainable parameters out of {total} total parameters ({trainable/total*100:.2f}%)"
-            )
+            if self.logger:
+                trainable, total = model.get_nb_trainable_parameters()
+                self.logger.info(
+                    f"Submodel id:{model_idx} has {trainable} trainable parameters out of {total} total parameters ({trainable/total*100:.2f}%)"
+                )
         return models
 
     def _push_models(self):
@@ -124,7 +157,9 @@ class PEPOModel:
                 commit_message=f"Upload PEPO ensemble model {model_idx}",
             )
 
-    def _train_model(self, model_idx: int):
+    def _train_model(
+        self, model_idx: int, train_loader: DataLoader, eval_loader: DataLoader
+    ):
         """
         Train a single model in a thread. Each thread sets its CUDA device context
         to ensure proper GPU isolation.
@@ -151,21 +186,25 @@ class PEPOModel:
         decoded_output = self.tokenizer.decode(output[0], skip_special_tokens=True)
         self.logger.info(f"submodel {model_idx} adapted model output: {decoded_output}")
 
-    def train(self):
+    def train(self, data_manager: DataManager):
         """
         Train the PEPO ensemble models and save the models to the hub.
         Uses threading to run models in parallel on different GPUs.
         """
-        self.logger.info("Training PEPO ensemble models...")
+        if self.logger:
+            self.logger.info("Training PEPO ensemble models...")
 
         # Launch training for each model in parallel threads
         threads = []
         for model_idx in range(self.num_networks):
-            thread = threading.Thread(target=self._train_model, args=(model_idx,))
+            train_loader = data_manager.get_dataloader(model_idx, "train")
+            eval_loader = data_manager.get_dataloader(model_idx, "eval")
+            thread = threading.Thread(
+                target=self._train_model, args=(model_idx, train_loader, eval_loader)
+            )
             thread.start()
             threads.append(thread)
 
-        # Wait for all threads to complete
         for thread in threads:
             thread.join()
 

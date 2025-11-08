@@ -1,0 +1,8 @@
+# UltraFeedback Binarized Dataset Configuration
+_target_: pepo.utils.data.DataManager
+dataset_id: "HuggingFaceH4/ultrafeedback_binarized"
+split: "train_sft"
+train_split: 0.8
+eval_split: 0.2
+seed: ${seed}
+n_splits: null # this has to be set depending on the number of models in the ensemble
