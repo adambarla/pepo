@@ -44,20 +44,22 @@ class DeviceManager:
             raise RuntimeError("CUDA is not available")
 
         num_gpus = torch.cuda.device_count()
+        available_gpus = [i for i in range(num_gpus)]
 
         # Check if gpu_ids are specified in config
-        if self.device_config.get("gpu_ids") is not None:
-            gpu_ids = [int(x.strip()) for x in str(self.device_config.gpu_ids).split(",")]
-            # Validate GPU IDs
-            invalid = [gpu_id for gpu_id in gpu_ids if gpu_id >= num_gpus]
-            if invalid:
-                raise ValueError(
-                    f"Invalid GPU IDs: {invalid}. Available GPUs: 0-{num_gpus-1}"
-                )
+        if self.device_config.gpu_ids is not None:
+            # validate gpu_ids
+            for gpu_id in self.device_config.gpu_ids:
+                if gpu_id not in available_gpus:
+                    raise ValueError(
+                        f"Invalid GPU ID: {gpu_id}. Available GPUs: {available_gpus}"
+                    )
+            # remove duplicates
+            gpu_ids = list(set(self.device_config.gpu_ids))
+            gpu_ids.sort()
             return gpu_ids
 
-        # Otherwise use all available GPUs
-        return list(range(num_gpus))
+        return available_gpus
 
     def _assign_devices(self) -> List[str]:
         """
@@ -69,16 +71,6 @@ class DeviceManager:
         Raises:
             RuntimeError: If not enough GPUs available.
         """
-        if len(self._available_gpus) < self.num_models:
-            error_msg = (
-                f"Not enough GPUs available. "
-                f"Need {self.num_models} GPUs, but only {len(self._available_gpus)} available. "
-                f"Available GPUs: {self._available_gpus}"
-            )
-            if self.logger:
-                self.logger.error(error_msg)
-            raise RuntimeError(error_msg)
-
         # Assign one GPU per model (round-robin if more GPUs than models)
         devices = []
         for model_idx in range(self.num_models):

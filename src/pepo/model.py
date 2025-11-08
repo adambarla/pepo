@@ -90,7 +90,7 @@ class PEPOModel:
                 repo_id = self.hub_manager.get_repo_id(self._get_model_name(model_idx))
                 model = PeftModel.from_pretrained(base_model, repo_id)
                 self.logger.info(
-                    f"Submodel {model_idx}/{self.num_networks} with LoRA adapter loaded successfully from {repo_id} on {self.device_manager.get_device_for_model(model_idx)}"
+                    f"Submodel id:{model_idx} with LoRA adapter loaded successfully from {repo_id} on {self.device_manager.get_device_for_model(model_idx)}"
                 )
             else:
                 peft_config = LoraConfig(
@@ -103,13 +103,13 @@ class PEPOModel:
                 )
                 model = get_peft_model(base_model, peft_config)
                 self.logger.info(
-                    f"Submodel {model_idx}/{self.num_networks} with initialized successfully on {self.device_manager.get_device_for_model(model_idx)}"
+                    f"Submodel id:{model_idx} with initialized successfully on {self.device_manager.get_device_for_model(model_idx)}"
                 )
             models.append(model)
             # trainable parameters
             trainable, total = model.get_nb_trainable_parameters()
             self.logger.info(
-                f"Submodel {model_idx}/{self.num_networks} has {trainable} trainable parameters out of {total} total parameters ({trainable/total*100:.2f}%)"
+                f"Submodel id:{model_idx} has {trainable} trainable parameters out of {total} total parameters ({trainable/total*100:.2f}%)"
             )
         return models
 

@@ -41,10 +41,7 @@ pepo:
 
 # Device configuration
 device:
-  cuda_index: 0  # GPU index for policy model
-  ref_cuda_index: null  # GPU index for reference model (null = auto-assign)
-  parallel: false  # Train models in parallel across GPUs
-  gpu_ids: null  # Comma-separated GPU IDs (null = auto-detect)
+  gpu_ids: null  # list of GPU IDs (null = auto-detect), e.g. [0, 1, 2, 3]
 
 # HuggingFace Hub configuration
 hub:
