@@ -1,6 +1,9 @@
+import math
 import threading
 from typing import Optional
 
+import torch
+import torch.nn.functional as F
 from peft import LoraConfig, PeftModel, get_peft_model
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -179,6 +182,50 @@ class PEPOModel:
                 commit_message=f"Upload PEPO ensemble model {model_idx}",
             )
 
+    def _get_log_probs(
+        self,
+        model: AutoModelForCausalLM,
+        device: torch.device,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        prompt_len: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Get the log probabilities of the response tokens.
+        Creates a mask of the responses and
+        """
+        # B, T = input_ids.shape
+        # V = model.config.vocab_size
+
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
+        with torch.no_grad() if model.training is False else torch.enable_grad():
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs.logits  # (B, T , V); shifted by 1 (removed first, added new)
+
+        logits = logits[:, :-1, :]  # (B, T-1, V); remove the new token
+        labels = input_ids[:, 1:]  # (B, T-1); remove the first token
+        attn_mask_shifted = attention_mask[:, 1:]
+
+        log_probs = F.log_softmax(
+            logits, dim=-1
+        )  # (B, T-1, V); log prob over vocab dimension
+        # select only the log probs for the labels, (B, T-1)
+        log_probs = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
+
+        # mask out the response probs by creating a mask of the response tokens
+        pos = torch.arange(log_probs.shape[1], device=device).view(1, -1)  # (1, T-1)
+        response_mask = (pos >= (prompt_len - 1).unsqueeze(1)).float()
+        response_mask *= attn_mask_shifted.float()
+        response_mask = torch.where(
+            labels == self.tokenizer.pad_token_id, 0, response_mask
+        )
+        log_probs = log_probs * response_mask.float()  # mask
+
+        # use debug_tokens from utils.debug to debug the masks and log probs
+        log_probs_sum = log_probs.sum(dim=-1)
+        return log_probs_sum
+
     def _train_model(
         self,
         model_idx: int,
@@ -190,8 +237,12 @@ class PEPOModel:
         Train a single model in a thread. Each thread sets its CUDA device context
         to ensure proper GPU isolation.
         """
-        device_str = self.device_manager.get_device_for_model(model_idx)
+        device = torch.device(self.device_manager.get_device_for_model(model_idx))
         model = self.models[model_idx]
+
+        # Custom initialization for testing - set LoRA weights to small fixed values
+        # debug the ref and model log prop computation by setting the LoRA weights to small fixed values
+        # initialize_lora_for_testing(model, std=0.1, logger=self.logger)
 
         if self.logger:
             train_size = len(train_loader.dataset)  # type: ignore[arg-type]
@@ -203,13 +254,65 @@ class PEPOModel:
         for epoch in range(n_epochs):
             model.train()
             for batch in train_loader:
-                batch = {k: v.to(device_str) for k, v in batch.items()}
+                batch = {k: v.to(device) for k, v in batch.items()}
 
                 for k, v in batch.items():
                     self.logger.debug(
                         f"Model {model_idx} - Batch key: {k} - Shape: {v.shape}"
                     )
-                # self.logger.debug(f"Model {model_idx} - Batch shapes: {batch}")
+                log_probs_chosen = self._get_log_probs(
+                    model,
+                    device,
+                    batch["chosen_input_ids"],
+                    batch["chosen_attention_mask"],
+                    batch["prompt_len"],
+                )
+                log_probs_rejected = self._get_log_probs(
+                    model,
+                    device,
+                    batch["rejected_input_ids"],
+                    batch["rejected_attention_mask"],
+                    batch["prompt_len"],
+                )
+                with torch.no_grad():
+                    # Temporarily disable LoRA adapters to get base model output
+                    with model.disable_adapter():
+                        log_probs_chosen_ref = self._get_log_probs(
+                            model,
+                            device,
+                            batch["chosen_input_ids"],
+                            batch["chosen_attention_mask"],
+                            batch["prompt_len"],
+                        )
+                        log_probs_rejected_ref = self._get_log_probs(
+                            model,
+                            device,
+                            batch["rejected_input_ids"],
+                            batch["rejected_attention_mask"],
+                            batch["prompt_len"],
+                        )
+
+                if self.logger:
+                    self.logger.debug(f"Log probs chosen: {log_probs_chosen}")
+                    self.logger.debug(f"Log probs chosen ref: {log_probs_chosen_ref}")
+                    self.logger.debug(f"Log probs rejected: {log_probs_rejected}")
+                    self.logger.debug(f"Log probs rejected ref: {log_probs_rejected_ref}")
+
+                # Calculate DPO loss with pessimistic margin (alpha)
+                pi_log_ratio = log_probs_chosen - log_probs_rejected
+                ref_log_ratio = log_probs_chosen_ref - log_probs_rejected_ref
+                alpha_offset = math.log(1.0 + self.alpha)
+                argument = self.beta * (pi_log_ratio - ref_log_ratio - alpha_offset)
+                dpo_loss_components = -F.logsigmoid(argument)
+                loss = dpo_loss_components.mean()
+
+                if self.logger:
+                    self.logger.debug(f"Loss: {loss.item()}")
+
+                # TODO(adam): Add optimizer and backward pass here
+                # loss.backward()
+                # optimizer.step()
+                # optimizer.zero_grad()
 
                 break
             break

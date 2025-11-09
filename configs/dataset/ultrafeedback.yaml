@@ -10,3 +10,4 @@ max_length: null # Maximum sequence length for responses (null = no limit)
 max_prompt_length: null # Maximum sequence length for prompts (null = no limit)
 num_proc: null # Number of processes for preprocessing (null = use all available CPUs)
 cache_dir: ${oc.env:SCRATCH}/pepo/cache # Directory to cache preprocessed datasets (null = no caching)
+force_recompute: false # If true, skip loading from cache and recompute the dataset

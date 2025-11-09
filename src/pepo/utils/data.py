@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -67,6 +68,7 @@ class DataManager:
         tokenizer: AutoTokenizer,
         num_proc: Optional[int] = None,
         cache_dir: Optional[str] = None,
+        force_recompute: bool = False,
         logger: Optional[Logger] = None,
     ):
         """
@@ -82,6 +84,7 @@ class DataManager:
             tokenizer: Tokenizer with chat template configured.
             num_proc: Number of processes for preprocessing. None uses all CPUs.
             cache_dir: Directory to cache preprocessed datasets. None means no caching.
+            force_recompute: If True, skip loading from cache and recompute the dataset.
             logger: Optional logger instance.
         """
         self.logger = logger
@@ -100,6 +103,7 @@ class DataManager:
         self.tokenizer = tokenizer
         self.num_proc = num_proc
         self.cache_dir = cache_dir
+        self.force_recompute = force_recompute
 
         self.cache_path = self._get_cache_path()
         self._initialize_dataset()
@@ -134,6 +138,9 @@ class DataManager:
         return str(cache_path)
 
     def _load_cache(self) -> Optional[Dataset]:
+        if self.force_recompute:
+            return None
+
         cache_exists = self.cache_path is not None and os.path.exists(self.cache_path)
         if not self.cache_path or not cache_exists:
             return None
@@ -158,6 +165,9 @@ class DataManager:
     def _save_cache(self, dataset: Dataset) -> None:
         if not self.cache_path:
             return
+
+        if self.force_recompute and os.path.exists(self.cache_path):
+            shutil.rmtree(self.cache_path)
 
         if self.logger:
             self.logger.info(f"Saving preprocessed dataset to cache: {self.cache_path}")
@@ -371,11 +381,15 @@ class DataManager:
 
     def _initialize_dataset(self) -> None:
         dataset_preprocessed = self._load_cache()
+
         if dataset_preprocessed is None:
             if self.logger:
-                self.logger.info(
-                    f"No cached dataset found at {self.cache_path}. Creating new dataset..."
-                )
+                if self.force_recompute:
+                    self.logger.info("Recomputing dataset (force_recompute=True)...")
+                else:
+                    self.logger.info(
+                        f"No cached dataset found at {self.cache_path}. Creating new dataset..."
+                    )
             dataset_raw = self._load()
             dataset_preprocessed = self._process(dataset_raw)
             self._save_cache(dataset_preprocessed)
