@@ -231,7 +231,10 @@ class PEPOModel:
         model_idx: int,
         train_loader: DataLoader,
         eval_loader: DataLoader,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler._LRScheduler,
         n_epochs: int = 1,
+        gradient_accumulation_steps: int = 1,
     ):
         """
         Train a single model in a thread. Each thread sets its CUDA device context
@@ -251,15 +254,21 @@ class PEPOModel:
                 f"Model {model_idx} - Train: size={train_size}, batches={len(train_loader)} - Eval: size={eval_size}, batches={len(eval_loader)}"
             )
 
+        model.train()
+        global_step = 0
+
         for epoch in range(n_epochs):
             model.train()
-            for batch in train_loader:
+            optimizer.zero_grad()
+            for step, batch in enumerate(train_loader):
                 batch = {k: v.to(device) for k, v in batch.items()}
 
-                for k, v in batch.items():
-                    self.logger.debug(
-                        f"Model {model_idx} - Batch key: {k} - Shape: {v.shape}"
-                    )
+                if self.logger:
+                    for k, v in batch.items():
+                        self.logger.debug(
+                            f"Model {model_idx} - Batch key: {k} - Shape: {v.shape}"
+                        )
+
                 log_probs_chosen = self._get_log_probs(
                     model,
                     device,
@@ -275,7 +284,6 @@ class PEPOModel:
                     batch["prompt_len"],
                 )
                 with torch.no_grad():
-                    # Temporarily disable LoRA adapters to get base model output
                     with model.disable_adapter():
                         log_probs_chosen_ref = self._get_log_probs(
                             model,
@@ -298,7 +306,6 @@ class PEPOModel:
                     self.logger.debug(f"Log probs rejected: {log_probs_rejected}")
                     self.logger.debug(f"Log probs rejected ref: {log_probs_rejected_ref}")
 
-                # Calculate DPO loss with pessimistic margin (alpha)
                 pi_log_ratio = log_probs_chosen - log_probs_rejected
                 ref_log_ratio = log_probs_chosen_ref - log_probs_rejected_ref
                 alpha_offset = math.log(1.0 + self.alpha)
@@ -306,21 +313,36 @@ class PEPOModel:
                 dpo_loss_components = -F.logsigmoid(argument)
                 loss = dpo_loss_components.mean()
 
+                loss = loss / gradient_accumulation_steps
+                loss.backward()
+
                 if self.logger:
-                    self.logger.debug(f"Loss: {loss.item()}")
+                    self.logger.debug(
+                        f"Loss: {loss.item() * gradient_accumulation_steps}"
+                    )
 
-                # TODO(adam): Add optimizer and backward pass here
-                # loss.backward()
-                # optimizer.step()
-                # optimizer.zero_grad()
+                if (step + 1) % gradient_accumulation_steps == 0:
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+                    global_step += 1
 
-                break
-            break
+                    if self.logger:
+                        current_lr = scheduler.get_last_lr()[0]
+                        self.logger.info(
+                            f"Model {model_idx} - Epoch {epoch+1}/{n_epochs} - Step {global_step} - "
+                            f"Loss: {loss.item() * gradient_accumulation_steps:.4f} - "
+                            f"LR: {current_lr:.2e}"
+                        )
 
     def train(
         self,
         data_manager: DataManager,
+        optimizers: list[torch.optim.Optimizer],
+        schedulers: list[torch.optim.lr_scheduler._LRScheduler],
         batch_size: int,
+        gradient_accumulation_steps: int = 1,
+        epochs: int = 1,
     ):
         """
         Train the PEPO ensemble models and save the models to the hub.
@@ -328,12 +350,21 @@ class PEPOModel:
 
         Args:
             data_manager: DataManager instance for getting dataloaders.
+            optimizers: List of optimizers, one per model in the ensemble.
+            schedulers: List of schedulers, one per model in the ensemble.
             batch_size: Batch size for training.
+            gradient_accumulation_steps: Number of steps to accumulate gradients.
+            epochs: Number of training epochs.
         """
         if self.logger:
             self.logger.info("Training PEPO ensemble models...")
 
-        # Launch training for each model in parallel threads
+        if len(optimizers) != self.num_networks or len(schedulers) != self.num_networks:
+            raise ValueError(
+                f"Number of optimizers ({len(optimizers)}) and schedulers ({len(schedulers)}) "
+                f"must match number of networks ({self.num_networks})"
+            )
+
         threads = []
         for model_idx in range(self.num_networks):
             train_loader = data_manager.get_dataloader(
@@ -348,7 +379,16 @@ class PEPOModel:
             )
 
             thread = threading.Thread(
-                target=self._train_model, args=(model_idx, train_loader, eval_loader)
+                target=self._train_model,
+                args=(
+                    model_idx,
+                    train_loader,
+                    eval_loader,
+                    optimizers[model_idx],
+                    schedulers[model_idx],
+                    epochs,
+                    gradient_accumulation_steps,
+                ),
             )
             thread.start()
             threads.append(thread)

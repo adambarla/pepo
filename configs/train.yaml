@@ -20,7 +20,16 @@ training:
   epochs: 3
   batch_size: 2
   gradient_accumulation_steps: 4
-  learning_rate: 1.0e-5
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1e-5
+  fused: true
+
+# Learning rate scheduler configuration
+scheduler:
+  name: cosine
+  num_warmup_steps: 0
 
 # Device configuration
 device:

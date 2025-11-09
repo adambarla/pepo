@@ -7,6 +7,7 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
+from transformers import get_scheduler
 
 from pepo.utils import set_seed
 
@@ -19,7 +20,6 @@ def main(cfg: DictConfig):
     log_level_str = cfg.get("log_level", "INFO").upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
 
-    # instantiate from hydra creates a class instance specified in _target_ with the given arguments
     logger = instantiate(
         cfg.logger,
         log_dir=str(original_work_dir / "logs"),
@@ -56,9 +56,48 @@ def main(cfg: DictConfig):
         logger=logger,
     )
 
+    num_networks = model.num_networks
+    optimizers = []
+    schedulers = []
+
+    for model_idx in range(num_networks):
+        model_params = model.models[model_idx].parameters()
+
+        optimizer = instantiate(
+            cfg.optimizer,
+            params=model_params,
+        )
+        optimizers.append(optimizer)
+
+        train_loader = data_manager.get_dataloader(
+            model_idx=model_idx,
+            partition="train",
+            batch_size=cfg.training.batch_size,
+        )
+        num_training_steps = (
+            len(train_loader) // cfg.training.gradient_accumulation_steps
+        ) * cfg.training.epochs
+
+        scheduler = get_scheduler(
+            name=cfg.scheduler.name,
+            optimizer=optimizer,
+            num_warmup_steps=cfg.scheduler.num_warmup_steps,
+            num_training_steps=num_training_steps,
+        )
+        schedulers.append(scheduler)
+
+        logger.info(
+            f"Created optimizer and scheduler for model {model_idx}. "
+            f"Training steps: {num_training_steps}"
+        )
+
     model.train(
         data_manager=data_manager,
+        optimizers=optimizers,
+        schedulers=schedulers,
         batch_size=cfg.training.batch_size,
+        gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
+        epochs=cfg.training.epochs,
     )
 
 
