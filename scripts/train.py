@@ -9,7 +9,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from transformers import get_scheduler
 
-from pepo.utils import set_seed
+from pepo.utils import WandbHandler, set_seed
 
 
 @hydra.main(config_path="../configs", config_name="train.yaml", version_base="1.1")
@@ -26,9 +26,17 @@ def main(cfg: DictConfig):
         level=log_level,
     )
 
-    logger.info("PEPO Training - Starting")
     resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
+    logger.info("PEPO Training - Starting")
     logger.info(f"Configuration:\n{OmegaConf.to_yaml(resolved_cfg)}")
+
+    wandb_config = cfg.wandb
+    resolved_cfg_plain = None
+    if wandb_config.enabled:
+        resolved_cfg_plain = OmegaConf.to_container(
+            cfg, resolve=True, structured_config_mode=False
+        )
+        logger.info("Weights & Biases logging enabled")
 
     set_seed(cfg.seed)
     logger.info(f"Random seed set to: {cfg.seed}")
@@ -91,6 +99,25 @@ def main(cfg: DictConfig):
             f"Training steps: {num_training_steps}"
         )
 
+    wandb_handlers = None
+    if wandb_config.enabled:
+        base_model_name = model.model_id.rsplit("/", 1)[-1]
+        wandb_handlers = []
+        for model_idx in range(num_networks):
+            run_name = model._get_model_name(model_idx)
+            handler = WandbHandler(
+                enabled=True,
+                project=wandb_config.project,
+                name=run_name,
+                tags=list(wandb_config.tags) + [base_model_name],
+                notes=wandb_config.notes,
+                entity=wandb_config.entity,
+                mode=wandb_config.mode,
+                cfg=resolved_cfg_plain,
+                _lazy_init=True,
+            )
+            wandb_handlers.append(handler)
+
     model.train(
         data_manager=data_manager,
         optimizers=optimizers,
@@ -98,7 +125,14 @@ def main(cfg: DictConfig):
         batch_size=cfg.training.batch_size,
         gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
         epochs=cfg.training.epochs,
+        wandb_handlers=wandb_handlers,
     )
+
+    if wandb_handlers is not None:
+        for handler in wandb_handlers:
+            if handler.enabled:
+                handler.finish()
+        logger.info("Weights & Biases logging finished")
 
 
 if __name__ == "__main__":

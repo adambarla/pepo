@@ -8,8 +8,8 @@ model:
   num_networks: ${L}
 dataset:
   n_splits: ${model.num_networks}
-  train_split: 0.9
-  eval_split: 0.1
+  train_split: 0.99
+  eval_split: 0.01
   max_length: 1024
   max_prompt_length: 512
   cache_dir: ${cache_dir}
@@ -17,9 +17,9 @@ dataset:
 
 # Training hyperparameters
 training:
-  epochs: 3
-  batch_size: 2
-  gradient_accumulation_steps: 4
+  epochs: 8
+  batch_size: 8
+  gradient_accumulation_steps: 1
 
 optimizer:
   _target_: torch.optim.AdamW
@@ -55,6 +55,17 @@ logger:
   level: ${log_level}
   format_string: null
   date_format: null
+
+# Weights & Biases configuration
+wandb:
+  _target_: pepo.utils.logger.WandbHandler
+  enabled: true
+  project: "pepo"
+  name: null  # null = auto-generate run name
+  tags: []
+  notes: null
+  entity: null  # null = use default entity
+  mode: "online"  # Options: "online", "offline", "disabled"
 
 log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
 

@@ -8,7 +8,7 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .utils import DataManager, DeviceManager, HubManager, Logger
+from .utils import DataManager, DeviceManager, HubManager, Logger, WandbHandler
 
 # TODO(adam): possible abstraction here is to define a PEPOSubModel base class that handles the logic of a single model in the ensemble
 #             we could inherit this class to define submodels such as smollm, gemma, etc. which would handle their own chat template, tokenizer, etc.
@@ -226,6 +226,108 @@ class PEPOModel:
         log_probs_sum = log_probs.sum(dim=-1)
         return log_probs_sum
 
+    def _eval_model(
+        self,
+        model_idx: int,
+        model: torch.nn.Module,
+        eval_loader: DataLoader,
+        device: torch.device,
+        epoch: int,
+        n_epochs: int,
+        global_step: int,
+        wandb_handler: Optional[WandbHandler] = None,
+    ) -> None:
+        """
+        Evaluate the model on the evaluation dataset.
+
+        Args:
+            model_idx: Index of the model in the ensemble.
+            model: The model to evaluate.
+            eval_loader: DataLoader for evaluation data.
+            device: Device to run evaluation on.
+            epoch: Current epoch number.
+            n_epochs: Total number of epochs.
+            global_step: Current global training step.
+            wandb_handler: Optional wandb handler for logging.
+
+        Returns:
+            Average evaluation loss.
+        """
+        model.eval()
+        eval_loss = 0.0
+        num_eval_batches = 0
+        total_eval_batches = len(eval_loader)
+
+        with torch.no_grad():
+            for eval_step, eval_batch in enumerate(eval_loader):
+                eval_batch = {k: v.to(device) for k, v in eval_batch.items()}
+
+                log_probs_chosen = self._get_log_probs(
+                    model,
+                    device,
+                    eval_batch["chosen_input_ids"],
+                    eval_batch["chosen_attention_mask"],
+                    eval_batch["prompt_len"],
+                )
+                log_probs_rejected = self._get_log_probs(
+                    model,
+                    device,
+                    eval_batch["rejected_input_ids"],
+                    eval_batch["rejected_attention_mask"],
+                    eval_batch["prompt_len"],
+                )
+                with model.disable_adapter():  # type: ignore[operator]
+                    log_probs_chosen_ref = self._get_log_probs(
+                        model,
+                        device,
+                        eval_batch["chosen_input_ids"],
+                        eval_batch["chosen_attention_mask"],
+                        eval_batch["prompt_len"],
+                    )
+                    log_probs_rejected_ref = self._get_log_probs(
+                        model,
+                        device,
+                        eval_batch["rejected_input_ids"],
+                        eval_batch["rejected_attention_mask"],
+                        eval_batch["prompt_len"],
+                    )
+
+                pi_log_ratio = log_probs_chosen - log_probs_rejected
+                ref_log_ratio = log_probs_chosen_ref - log_probs_rejected_ref
+                alpha_offset = math.log(1.0 + self.alpha)
+                argument = self.beta * (pi_log_ratio - ref_log_ratio - alpha_offset)
+                dpo_loss_components = -F.logsigmoid(argument)
+                batch_eval_loss = dpo_loss_components.mean().item()
+                eval_loss += batch_eval_loss
+                num_eval_batches += 1
+
+                if (
+                    self.logger
+                    and (eval_step + 1) % max(1, total_eval_batches // 10) == 0
+                ):
+                    current_avg_loss = eval_loss / num_eval_batches
+                    self.logger.info(
+                        f"Model {model_idx} - Epoch {epoch}/{n_epochs} - Eval Step {eval_step + 1}/{total_eval_batches} - "
+                        f"Current Avg Loss: {current_avg_loss:.4f}"
+                    )
+
+        avg_eval_loss = eval_loss / num_eval_batches if num_eval_batches > 0 else 0.0
+
+        if self.logger:
+            self.logger.info(
+                f"Model {model_idx} - Epoch {epoch}/{n_epochs} - "
+                f"Average Eval Loss: {avg_eval_loss:.4f}"
+            )
+
+        if wandb_handler is not None:
+            wandb_handler.log(
+                {
+                    "eval/loss": avg_eval_loss,
+                    "train/epoch": epoch,
+                },
+                step=global_step,
+            )
+
     def _train_model(
         self,
         model_idx: int,
@@ -235,6 +337,7 @@ class PEPOModel:
         scheduler: torch.optim.lr_scheduler._LRScheduler,
         n_epochs: int = 1,
         gradient_accumulation_steps: int = 1,
+        wandb_handler: Optional[WandbHandler] = None,
     ):
         """
         Train a single model in a thread. Each thread sets its CUDA device context
@@ -242,6 +345,12 @@ class PEPOModel:
         """
         device = torch.device(self.device_manager.get_device_for_model(model_idx))
         model = self.models[model_idx]
+
+        if wandb_handler is not None and wandb_handler.enabled:
+            import wandb
+
+            run_id = wandb.util.generate_id()
+            wandb_handler.init_run(run_id=run_id)
 
         # Custom initialization for testing - set LoRA weights to small fixed values
         # debug the ref and model log prop computation by setting the LoRA weights to small fixed values
@@ -254,12 +363,31 @@ class PEPOModel:
                 f"Model {model_idx} - Train: size={train_size}, batches={len(train_loader)} - Eval: size={eval_size}, batches={len(eval_loader)}"
             )
 
-        model.train()
         global_step = 0
+
+        if self.logger:
+            self.logger.info(f"Model {model_idx} - Running initial evaluation...")
+
+        self._eval_model(
+            model_idx=model_idx,
+            model=model,
+            eval_loader=eval_loader,
+            device=device,
+            epoch=0,
+            n_epochs=n_epochs,
+            global_step=global_step,
+            wandb_handler=wandb_handler,
+        )
+
+        model.train()
 
         for epoch in range(n_epochs):
             model.train()
             optimizer.zero_grad()
+            epoch_train_loss = 0.0
+            num_train_batches = 0
+            steps_per_epoch = len(train_loader) // gradient_accumulation_steps
+
             for step, batch in enumerate(train_loader):
                 batch = {k: v.to(device) for k, v in batch.items()}
 
@@ -284,7 +412,7 @@ class PEPOModel:
                     batch["prompt_len"],
                 )
                 with torch.no_grad():
-                    with model.disable_adapter():
+                    with model.disable_adapter():  # type: ignore[operator]
                         log_probs_chosen_ref = self._get_log_probs(
                             model,
                             device,
@@ -327,13 +455,58 @@ class PEPOModel:
                     optimizer.zero_grad()
                     global_step += 1
 
-                    if self.logger:
-                        current_lr = scheduler.get_last_lr()[0]
+                    loss_value = loss.item() * gradient_accumulation_steps
+                    epoch_train_loss += loss_value
+                    num_train_batches += 1
+                    current_lr = scheduler.get_last_lr()[0]
+
+                    if self.logger and global_step % max(1, steps_per_epoch // 10) == 0:
                         self.logger.info(
-                            f"Model {model_idx} - Epoch {epoch+1}/{n_epochs} - Step {global_step} - "
-                            f"Loss: {loss.item() * gradient_accumulation_steps:.4f} - "
-                            f"LR: {current_lr:.2e}"
+                            f"Model {model_idx} - Epoch {epoch+1}/{n_epochs} - Train Step {step}/{steps_per_epoch} - "
+                            f"Loss: {loss_value:.4f} - "
+                            f"Avg_loss: {epoch_train_loss / num_train_batches:.4f}"
                         )
+
+                    if wandb_handler is not None:
+                        wandb_handler.log(
+                            {
+                                "train/loss": loss_value,
+                                "train/learning_rate": current_lr,
+                                "train/epoch": epoch + 1,
+                                "train/step": global_step,
+                            },
+                            step=global_step,
+                        )
+
+            avg_train_loss = (
+                epoch_train_loss / num_train_batches if num_train_batches > 0 else 0.0
+            )
+
+            if self.logger:
+                self.logger.info(
+                    f"Model {model_idx} - Epoch {epoch+1}/{n_epochs} - "
+                    f"Average Train Loss: {avg_train_loss:.4f}"
+                )
+
+            if wandb_handler is not None:
+                wandb_handler.log(
+                    {
+                        "train/avg_loss": avg_train_loss,
+                        "train/epoch": epoch + 1,
+                    },
+                    step=global_step,
+                )
+
+            self._eval_model(
+                model_idx=model_idx,
+                model=model,
+                eval_loader=eval_loader,
+                device=device,
+                epoch=epoch + 1,
+                n_epochs=n_epochs,
+                global_step=global_step,
+                wandb_handler=wandb_handler,
+            )
 
     def train(
         self,
@@ -343,6 +516,7 @@ class PEPOModel:
         batch_size: int,
         gradient_accumulation_steps: int = 1,
         epochs: int = 1,
+        wandb_handlers: Optional[list[WandbHandler]] = None,
     ):
         """
         Train the PEPO ensemble models and save the models to the hub.
@@ -355,6 +529,7 @@ class PEPOModel:
             batch_size: Batch size for training.
             gradient_accumulation_steps: Number of steps to accumulate gradients.
             epochs: Number of training epochs.
+            wandb_handlers: Optional list of wandb handlers, one per model.
         """
         if self.logger:
             self.logger.info("Training PEPO ensemble models...")
@@ -362,6 +537,12 @@ class PEPOModel:
         if len(optimizers) != self.num_networks or len(schedulers) != self.num_networks:
             raise ValueError(
                 f"Number of optimizers ({len(optimizers)}) and schedulers ({len(schedulers)}) "
+                f"must match number of networks ({self.num_networks})"
+            )
+
+        if wandb_handlers is not None and len(wandb_handlers) != self.num_networks:
+            raise ValueError(
+                f"Number of wandb handlers ({len(wandb_handlers)}) "
                 f"must match number of networks ({self.num_networks})"
             )
 
@@ -388,6 +569,7 @@ class PEPOModel:
                     schedulers[model_idx],
                     epochs,
                     gradient_accumulation_steps,
+                    wandb_handlers[model_idx] if wandb_handlers is not None else None,
                 ),
             )
             thread.start()
