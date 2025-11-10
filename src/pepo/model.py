@@ -110,28 +110,31 @@ class PEPOModel:
         return tokenizer
 
     def get_tokenizer(self):
-        """
-        Get the tokenizer used by the PEPO ensemble.
-
-        Returns:
-            The tokenizer instance.
-        """
         return self.tokenizer
 
-    def _get_model_name(self, model_idx: int) -> str:
+    def _get_model_name(self) -> str:
         """
-        Generate model-specific repository name for a specific ensemble member.
-        PEPO-specific logic lives here.
-
-        Args:
-            model_idx: Index of the ensemble model.
-
-        Returns:
-            Repository name (without base_dir, e.g., "model-name-pepo-a0.1-b0.1-L3-l0").
+        Generate model-specific repository name for the ensemble.
+        e.g., "model-name-pepo-a0.1-b0.1-L3".
         """
         model_name = self.model_id.rsplit("/", 1)[-1]
-        repo_name = f"{model_name}-pepo-a{self.alpha}-b{self.beta}-L{self.num_networks}-l{model_idx}"
+        repo_name = f"{model_name}-pepo-a{self.alpha}-b{self.beta}-L{self.num_networks}"
         return repo_name
+
+    def _get_submodel_name(self, model_idx: int) -> str:
+        """
+        Generate submodel name for a specific ensemble member.
+        e.g., "model-name-pepo-a0.1-b0.1-L3-l0".
+        """
+        model_name = self._get_model_name()
+        return f"{model_name}-l{model_idx}"
+
+    def _get_base_model_name(self) -> str:
+        """
+        Generate base model name for the ensemble.
+        e.g., "SmolLM2-1.7B".
+        """
+        return self.model_id.rsplit("/", 1)[-1]
 
     def _load_models(self):
         """
@@ -142,7 +145,7 @@ class PEPOModel:
         for model_idx in range(self.num_networks):
             if not load_from_hub:
                 break
-            if not self.hub_manager.model_exists(self._get_model_name(model_idx)):
+            if not self.hub_manager.model_exists(self._get_submodel_name(model_idx)):
                 load_from_hub = False
 
         for model_idx in range(self.num_networks):
@@ -156,7 +159,7 @@ class PEPOModel:
             )
             base_model.config.use_cache = False
             if load_from_hub:
-                repo_id = self.hub_manager.get_repo_id(self._get_model_name(model_idx))
+                repo_id = self.hub_manager.get_repo_id(self._get_submodel_name(model_idx))
                 model = PeftModel.from_pretrained(base_model, repo_id)
             else:
                 model = get_peft_model(base_model, self.lora_config)
@@ -177,7 +180,7 @@ class PEPOModel:
         """
         for model_idx in range(self.num_networks):
             self.hub_manager.push_model(
-                model_name=self._get_model_name(model_idx),
+                model_name=self._get_submodel_name(model_idx),
                 model=self.models[model_idx],
                 commit_message=f"Upload PEPO ensemble model {model_idx}",
             )
@@ -347,10 +350,7 @@ class PEPOModel:
         model = self.models[model_idx]
 
         if wandb_handler is not None and wandb_handler.enabled:
-            import wandb
-
-            run_id = wandb.util.generate_id()
-            wandb_handler.init_run(run_id=run_id)
+            wandb_handler.init_run()
 
         # Custom initialization for testing - set LoRA weights to small fixed values
         # debug the ref and model log prop computation by setting the LoRA weights to small fixed values
@@ -379,9 +379,10 @@ class PEPOModel:
             wandb_handler=wandb_handler,
         )
 
-        model.train()
-
         for epoch in range(n_epochs):
+            if self.logger:
+                self.logger.info(f"Model {model_idx} - Starting training epoch {epoch+1}")
+
             model.train()
             optimizer.zero_grad()
             epoch_train_loss = 0.0
@@ -390,12 +391,6 @@ class PEPOModel:
 
             for step, batch in enumerate(train_loader):
                 batch = {k: v.to(device) for k, v in batch.items()}
-
-                if self.logger:
-                    for k, v in batch.items():
-                        self.logger.debug(
-                            f"Model {model_idx} - Batch key: {k} - Shape: {v.shape}"
-                        )
 
                 log_probs_chosen = self._get_log_probs(
                     model,
@@ -428,12 +423,6 @@ class PEPOModel:
                             batch["prompt_len"],
                         )
 
-                if self.logger:
-                    self.logger.debug(f"Log probs chosen: {log_probs_chosen}")
-                    self.logger.debug(f"Log probs chosen ref: {log_probs_chosen_ref}")
-                    self.logger.debug(f"Log probs rejected: {log_probs_rejected}")
-                    self.logger.debug(f"Log probs rejected ref: {log_probs_rejected_ref}")
-
                 pi_log_ratio = log_probs_chosen - log_probs_rejected
                 ref_log_ratio = log_probs_chosen_ref - log_probs_rejected_ref
                 alpha_offset = math.log(1.0 + self.alpha)
@@ -443,11 +432,6 @@ class PEPOModel:
 
                 loss = loss / gradient_accumulation_steps
                 loss.backward()
-
-                if self.logger:
-                    self.logger.debug(
-                        f"Loss: {loss.item() * gradient_accumulation_steps}"
-                    )
 
                 if (step + 1) % gradient_accumulation_steps == 0:
                     optimizer.step()
@@ -461,8 +445,10 @@ class PEPOModel:
                     current_lr = scheduler.get_last_lr()[0]
 
                     if self.logger and global_step % max(1, steps_per_epoch // 10) == 0:
+                        epoch_string_length = len(str(n_epochs))
+                        step_string_length = len(str(steps_per_epoch))
                         self.logger.info(
-                            f"Model {model_idx} - Epoch {epoch+1}/{n_epochs} - Train Step {step}/{steps_per_epoch} - "
+                            f"Model {model_idx} - Epoch {epoch+1:>{epoch_string_length}}/{n_epochs} - Train Step {step:>{step_string_length}}/{steps_per_epoch} - "
                             f"Loss: {loss_value:.4f} - "
                             f"Avg_loss: {epoch_train_loss / num_train_batches:.4f}"
                         )
@@ -577,6 +563,10 @@ class PEPOModel:
 
         for thread in threads:
             thread.join()
+
+        if wandb_handlers is not None:
+            for wandb_handler in wandb_handlers:
+                wandb_handler.finish()
 
         if self.hub_manager.should_push_to_hub:
             self._push_models()

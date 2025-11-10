@@ -1,6 +1,7 @@
 # script to train the pepo model, using a hydra config file, log the training process to wb and save the model to huggingface
 
 import logging
+from datetime import datetime
 from pathlib import Path
 
 import hydra
@@ -80,11 +81,9 @@ def main(cfg: DictConfig):
         train_loader = data_manager.get_dataloader(
             model_idx=model_idx,
             partition="train",
-            batch_size=cfg.training.batch_size,
+            batch_size=cfg.batch_size,
         )
-        num_training_steps = (
-            len(train_loader) // cfg.training.gradient_accumulation_steps
-        ) * cfg.training.epochs
+        num_training_steps = (len(train_loader) // cfg.acc_steps) * cfg.epochs
 
         scheduler = get_scheduler(
             name=cfg.scheduler.name,
@@ -101,19 +100,20 @@ def main(cfg: DictConfig):
 
     wandb_handlers = None
     if wandb_config.enabled:
-        base_model_name = model.model_id.rsplit("/", 1)[-1]
         wandb_handlers = []
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         for model_idx in range(num_networks):
-            run_name = model._get_model_name(model_idx)
             handler = WandbHandler(
                 enabled=True,
                 project=wandb_config.project,
-                name=run_name,
-                tags=list(wandb_config.tags) + [base_model_name],
+                name=model._get_submodel_name(model_idx),
+                tags=list(wandb_config.tags) + [model._get_base_model_name()],
                 notes=wandb_config.notes,
                 entity=wandb_config.entity,
                 mode=wandb_config.mode,
                 cfg=resolved_cfg_plain,
+                group=f"{model._get_model_name()}-{timestamp}",
+                logger=logger,
                 _lazy_init=True,
             )
             wandb_handlers.append(handler)
@@ -122,17 +122,11 @@ def main(cfg: DictConfig):
         data_manager=data_manager,
         optimizers=optimizers,
         schedulers=schedulers,
-        batch_size=cfg.training.batch_size,
-        gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
-        epochs=cfg.training.epochs,
+        batch_size=cfg.batch_size,
+        gradient_accumulation_steps=cfg.acc_steps,
+        epochs=cfg.epochs,
         wandb_handlers=wandb_handlers,
     )
-
-    if wandb_handlers is not None:
-        for handler in wandb_handlers:
-            if handler.enabled:
-                handler.finish()
-        logger.info("Weights & Biases logging finished")
 
 
 if __name__ == "__main__":

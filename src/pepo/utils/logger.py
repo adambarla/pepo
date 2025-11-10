@@ -10,113 +10,6 @@ except ImportError:
     wandb = None
 
 
-class WandbHandler:
-    """
-    Handler for Weights & Biases logging.
-    Manages wandb initialization and provides logging interface.
-    """
-
-    def __init__(
-        self,
-        enabled: bool = False,
-        project: Optional[str] = None,
-        name: Optional[str] = None,
-        tags: Optional[List[str]] = None,
-        notes: Optional[str] = None,
-        entity: Optional[str] = None,
-        mode: str = "online",
-        cfg: Optional[Dict[str, Any]] = None,
-        reinit: Optional[str] = None,
-        _lazy_init: bool = False,
-    ):
-        """
-        Initialize wandb handler.
-
-        Args:
-            enabled: Whether wandb logging is enabled.
-            project: Wandb project name.
-            name: Wandb run name (None = auto-generate).
-            tags: List of tags for the run.
-            notes: Notes/description for the run.
-            entity: Wandb entity/team name.
-            mode: Wandb mode ("online", "offline", "disabled").
-            cfg: Configuration dictionary to log to wandb.
-            reinit: How to handle multiple runs ("create_new", "finish_previous", "return_previous").
-        """
-        self.enabled = enabled
-        self.wandb = wandb
-        self.initialized = False
-        self.run: Optional[Any] = None
-        self.project = project
-        self.name = name
-        self.tags = tags or []
-        self.notes = notes
-        self.entity = entity
-        self.mode = mode
-        self.cfg = cfg
-        self.reinit = reinit
-        self._lazy_init = _lazy_init
-
-        if enabled and not _lazy_init:
-            self.init_run()
-
-    def init_run(self, run_id: Optional[str] = None):
-        """
-        Initialize the wandb run. Can be called from a thread with a unique run_id.
-
-        Args:
-            run_id: Optional run ID. If None, wandb will generate one.
-        """
-        if not self.enabled:
-            return
-
-        if self.initialized and self.run is not None:
-            return
-
-        if self.wandb is None:
-            raise ImportError(
-                "wandb is not installed. Install it with: pip install wandb"
-            )
-
-        init_kwargs: Dict[str, Any] = {
-            "project": self.project,
-            "name": self.name,
-            "tags": self.tags,
-            "notes": self.notes,
-            "entity": self.entity,
-            "mode": self.mode,
-        }
-        if run_id is not None:
-            init_kwargs["id"] = run_id
-        if self.reinit is not None:
-            init_kwargs["reinit"] = self.reinit
-        if self.cfg is not None:
-            init_kwargs["config"] = self.cfg
-        self.run = self.wandb.init(**init_kwargs)  # type: ignore[assignment,arg-type]
-        self.initialized = True
-
-    def log(self, metrics: Dict[str, Any], step: Optional[int] = None):
-        """
-        Log metrics to wandb.
-
-        Args:
-            metrics: Dictionary of metrics to log.
-            step: Optional step number.
-        """
-        if self.enabled and self.initialized and self.run is not None:
-            try:
-                self.run.log(metrics, step=step)
-            except Exception:
-                pass
-
-    def finish(self):
-        """Finish wandb run."""
-        if self.enabled and self.initialized and self.run is not None:
-            self.run.finish()
-            self.initialized = False
-            self.run = None
-
-
 class Logger:
     """
     A general-purpose logging class that provides a simple API for logging.
@@ -206,3 +99,126 @@ class Logger:
     def get_logger(self):
         """Get the underlying Python logger object for advanced usage."""
         return self.logger
+
+
+class WandbHandler:
+    """
+    Handler for Weights & Biases logging.
+    Manages wandb initialization and provides logging interface.
+    """
+
+    def __init__(
+        self,
+        enabled: bool = False,
+        project: Optional[str] = None,
+        name: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        notes: Optional[str] = None,
+        entity: Optional[str] = None,
+        mode: str = "online",
+        cfg: Optional[Dict[str, Any]] = None,
+        reinit: Optional[str] = None,
+        group: Optional[str] = None,
+        _lazy_init: bool = False,
+        logger: Optional[Logger] = None,
+    ):
+        """
+        Initialize wandb handler.
+
+        Args:
+            enabled: Whether wandb logging is enabled.
+            project: Wandb project name.
+            name: Wandb run name (None = auto-generate).
+            tags: List of tags for the run.
+            notes: Notes/description for the run.
+            entity: Wandb entity/team name.
+            mode: Wandb mode ("online", "offline", "disabled").
+            cfg: Configuration dictionary to log to wandb.
+            reinit: How to handle multiple runs ("create_new", "finish_previous", "return_previous").
+            group: Group name for organizing related runs together.
+        """
+        self.enabled = enabled
+        self.wandb = wandb
+        self.initialized = False
+        self.run: Optional[Any] = None
+        self.project = project
+        self.name = name
+        self.tags = tags or []
+        self.notes = notes
+        self.entity = entity
+        self.mode = mode
+        self.cfg = cfg
+        self.group = group
+        self._lazy_init = _lazy_init
+        self.logger = logger
+
+        self.run_id = wandb.util.generate_id()
+
+        if enabled and not _lazy_init:
+            self.init_run()
+
+    def init_run(self):
+        """
+        Initialize the wandb run.
+        """
+        if not self.enabled:
+            if self.logger is not None:
+                self.logger.info("Wandb logging is disabled, skipping init_run")
+            return
+
+        if self.initialized and self.run is not None:
+            if self.logger is not None:
+                self.logger.warning("Wandb run is already initialized, skipping init_run")
+            return
+
+        if self.wandb is None:
+            if self.logger is not None:
+                self.logger.error("Wandb is not installed, skipping init_run")
+            return
+
+        init_kwargs: Dict[str, Any] = {
+            "project": self.project,
+            "name": self.name,
+            "tags": self.tags,
+            "notes": self.notes,
+            "entity": self.entity,
+            "mode": self.mode,
+            "id": self.run_id,
+        }
+        if self.group is not None:
+            init_kwargs["group"] = self.group
+        if self.cfg is not None:
+            init_kwargs["config"] = self.cfg
+        self.run = self.wandb.init(**init_kwargs)  # type: ignore[assignment,arg-type]
+        self.initialized = True
+
+        if self.logger is not None:
+            self.logger.info(
+                f"Wandb run {self.name} was initialized. Run: {self.run_id}, Group: {self.group}, Project: {self.project}, Entity: {self.entity}"
+            )
+
+    def log(self, metrics: Dict[str, Any], step: Optional[int] = None):
+        """
+        Log metrics to wandb.
+
+        Args:
+            metrics: Dictionary of metrics to log.
+            step: Optional step number.
+        """
+        if self.enabled and self.initialized and self.run is not None:
+            try:
+                self.run.log(metrics, step=step)
+            except Exception:
+                if self.logger is not None:
+                    self.logger.exception(
+                        f"Failed to log metrics to wandb. Metrics: {metrics}, Step: {step}"
+                    )
+
+    def finish(self):
+        """Finish wandb run."""
+        if self.enabled and self.initialized and self.run is not None:
+            self.run.finish()
+            self.initialized = False
+            self.run = None
+            if self.logger is not None:
+                self.logger.info(f"Wandb run {self.name} finished.")

@@ -12,14 +12,7 @@ dataset:
   eval_split: 0.01
   max_length: 1024
   max_prompt_length: 512
-  cache_dir: ${cache_dir}
-
-
-# Training hyperparameters
-training:
-  epochs: 8
-  batch_size: 8
-  gradient_accumulation_steps: 1
+  cache_dir: ${oc.env:SCRATCH}/pepo/cache # cache is $SCRATCH/pepo/cache
 
 optimizer:
   _target_: torch.optim.AdamW
@@ -64,12 +57,17 @@ wandb:
   name: null  # null = auto-generate run name
   tags: []
   notes: null
-  entity: null  # null = use default entity
+  entity: "pepo-team"
   mode: "online"  # Options: "online", "offline", "disabled"
 
 log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
 
-L: 2 # Number of submodels in the ensemble
+L: 4 # Number of submodels in the ensemble
+epochs: 8
+acc_steps: 1 # acc_steps * batch_size should stay constant
+batch_size: 8
 
-# cache is $SCRATCH/pepo/cache
-cache_dir: ${oc.env:SCRATCH}/pepo/cache
+# note: if L>gpus, decrease batch_size to batch_size/(ceil(L/gpus)) and increase acc_steps to ceil(L/gpus)
+#   the submodels will be distributed across the GPUs round-robin so they would run out of memory if batch_size is too large
+#   batch_size depends on the model size, e.g. for smollm batch_size=8 utilizes ~90% of the GPU memory
+#       to get what batch_size is optimal you need to experiment a bit
