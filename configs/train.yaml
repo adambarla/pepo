@@ -63,7 +63,7 @@ wandb:
 log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
 
 L: 4 # Number of submodels in the ensemble
-epochs: 8
+epochs: 4
 acc_steps: 1 # acc_steps * batch_size should stay constant
 batch_size: 8
 
