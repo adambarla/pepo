@@ -9,13 +9,20 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from pepo import PEPOModel
-from pepo.utils import set_seed
+from pepo.utils import constants, set_seed
+
+OmegaConf.register_new_resolver(
+    "pepo.constants",
+    lambda name: getattr(constants, name),
+)
 
 
 def chat(model: PEPOModel):
-    model.generate(["Hello, how are you?", "What is the capital of France?"])
-
-    pass
+    # prompts = ["Hello, how are you?", "What is the capital of France?"]
+    prompts = ["Hello, how are you?"]
+    model.generate_base_model(prompts, max_length=200)
+    model.generate_base_model(prompts, max_length=200, apply_chat_template=False)
+    model.generate(prompts, max_length=200)
 
 
 @hydra.main(config_path="../configs", config_name="chat.yaml", version_base="1.1")

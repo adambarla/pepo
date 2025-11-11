@@ -15,37 +15,52 @@ from .logger import Logger
 
 
 class DataCollator:
-    """Pads tokenized sequences. Tokenization happens during preprocessing."""
+    """Tokenizes and pads sequences on-the-fly using fast tokenizer optimization."""
 
-    def __init__(self, pad_token_id: int):
-        self.pad_token_id = pad_token_id
+    def __init__(
+        self,
+        tokenizer: AutoTokenizer,
+        max_length: Optional[int] = None,
+        max_prompt_length: Optional[int] = None,
+    ):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.max_prompt_length = max_prompt_length
 
     def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
-        def pad_tensors(tensors, pad_value=self.pad_token_id):
-            max_len = max(len(t) for t in tensors)
-            padded = torch.full((len(tensors), max_len), pad_value, dtype=torch.long)
-            for i, t in enumerate(tensors):
-                if isinstance(t, torch.Tensor):
-                    padded[i, : len(t)] = t.clone().detach().to(torch.long)
-                else:
-                    padded[i, : len(t)] = torch.tensor(t, dtype=torch.long)
-            return padded
+        prompt_texts = [f["prompt_text"] for f in features]
+        chosen_texts = [f["chosen_text"] for f in features]
+        rejected_texts = [f["rejected_text"] for f in features]
+
+        prompt_encoded = self.tokenizer(
+            prompt_texts,
+            padding=True,
+            truncation=self.max_prompt_length is not None,
+            max_length=self.max_prompt_length,
+            return_tensors="pt",
+        )
+        chosen_encoded = self.tokenizer(
+            chosen_texts,
+            padding=True,
+            truncation=self.max_length is not None,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
+        rejected_encoded = self.tokenizer(
+            rejected_texts,
+            padding=True,
+            truncation=self.max_length is not None,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
 
         return {
-            "prompt_input_ids": pad_tensors([f["prompt_input_ids"] for f in features]),
-            "chosen_input_ids": pad_tensors([f["chosen_input_ids"] for f in features]),
-            "rejected_input_ids": pad_tensors(
-                [f["rejected_input_ids"] for f in features]
-            ),
-            "prompt_attention_mask": pad_tensors(
-                [f["prompt_attention_mask"] for f in features], pad_value=0
-            ),
-            "chosen_attention_mask": pad_tensors(
-                [f["chosen_attention_mask"] for f in features], pad_value=0
-            ),
-            "rejected_attention_mask": pad_tensors(
-                [f["rejected_attention_mask"] for f in features], pad_value=0
-            ),
+            "prompt_input_ids": prompt_encoded["input_ids"],
+            "chosen_input_ids": chosen_encoded["input_ids"],
+            "rejected_input_ids": rejected_encoded["input_ids"],
+            "prompt_attention_mask": prompt_encoded["attention_mask"],
+            "chosen_attention_mask": chosen_encoded["attention_mask"],
+            "rejected_attention_mask": rejected_encoded["attention_mask"],
             "prompt_len": torch.tensor(
                 [f["prompt_len"] for f in features], dtype=torch.long
             ),
@@ -69,6 +84,9 @@ class DataManager:
         num_proc: Optional[int] = None,
         cache_dir: Optional[str] = None,
         force_recompute: bool = False,
+        dataloader_num_workers: int = 0,
+        dataloader_pin_memory: bool = False,
+        dataloader_persistent_workers: bool = False,
         logger: Optional[Logger] = None,
     ):
         """
@@ -85,6 +103,9 @@ class DataManager:
             num_proc: Number of processes for preprocessing. None uses all CPUs.
             cache_dir: Directory to cache preprocessed datasets. None means no caching.
             force_recompute: If True, skip loading from cache and recompute the dataset.
+            dataloader_num_workers: Number of worker processes for data loading (0 = main thread only).
+            dataloader_pin_memory: Pin memory for faster CPU->GPU transfer.
+            dataloader_persistent_workers: Keep workers alive between epochs.
             logger: Optional logger instance.
         """
         self.logger = logger
@@ -104,6 +125,10 @@ class DataManager:
         self.num_proc = num_proc
         self.cache_dir = cache_dir
         self.force_recompute = force_recompute
+
+        self.dataloader_num_workers = dataloader_num_workers
+        self.dataloader_pin_memory = dataloader_pin_memory
+        self.dataloader_persistent_workers = dataloader_persistent_workers
 
         self.cache_path = self._get_cache_path()
         self._initialize_dataset()
@@ -202,16 +227,14 @@ class DataManager:
 
     def _process_helper(self, examples):
         """
-        Tokenize examples and filter invalid ones.
-        Filters out invalid message formats and sequences that are too long.
+        Apply chat templates and filter invalid/long examples.
+        Stores formatted strings instead of tokenized sequences.
+        Tokenization happens in the collator for better performance.
         """
         processed = {
-            "prompt_input_ids": [],
-            "chosen_input_ids": [],
-            "rejected_input_ids": [],
-            "prompt_attention_mask": [],
-            "chosen_attention_mask": [],
-            "rejected_attention_mask": [],
+            "prompt_text": [],
+            "chosen_text": [],
+            "rejected_text": [],
             "prompt_len": [],
         }
 
@@ -250,46 +273,40 @@ class DataManager:
                 current_rejected_messages, tokenize=False
             )
 
+            # Tokenize just to check length for filtering
+            # Use add_special_tokens=True to get accurate length (matches actual tokenization)
             prompt_encoded = self.tokenizer(
                 prompt_str,
-                truncation=self.max_prompt_length is not None,
-                max_length=self.max_prompt_length,
+                truncation=False,
             )
             chosen_encoded = self.tokenizer(
                 chosen_str,
-                truncation=self.max_length is not None,
-                max_length=self.max_length,
+                truncation=False,
             )
             rejected_encoded = self.tokenizer(
                 rejected_str,
-                truncation=self.max_length is not None,
-                max_length=self.max_length,
+                truncation=False,
             )
 
             if (
                 (
                     self.max_prompt_length is not None
-                    and len(prompt_encoded["input_ids"]) >= self.max_prompt_length
+                    and len(prompt_encoded["input_ids"]) > self.max_prompt_length
                 )
                 or (
                     self.max_length is not None
-                    and len(chosen_encoded["input_ids"]) >= self.max_length
+                    and len(chosen_encoded["input_ids"]) > self.max_length
                 )
                 or (
                     self.max_length is not None
-                    and len(rejected_encoded["input_ids"]) >= self.max_length
+                    and len(rejected_encoded["input_ids"]) > self.max_length
                 )
             ):
                 continue
 
-            processed["prompt_input_ids"].append(prompt_encoded["input_ids"])
-            processed["chosen_input_ids"].append(chosen_encoded["input_ids"])
-            processed["rejected_input_ids"].append(rejected_encoded["input_ids"])
-            processed["prompt_attention_mask"].append(prompt_encoded["attention_mask"])
-            processed["chosen_attention_mask"].append(chosen_encoded["attention_mask"])
-            processed["rejected_attention_mask"].append(
-                rejected_encoded["attention_mask"]
-            )
+            processed["prompt_text"].append(prompt_str)
+            processed["chosen_text"].append(chosen_str)
+            processed["rejected_text"].append(rejected_str)
             processed["prompt_len"].append(len(prompt_encoded["input_ids"]))
 
         return processed
@@ -297,7 +314,7 @@ class DataManager:
     def _process(self, dataset: Dataset) -> Dataset:
         if self.logger:
             self.logger.info(
-                "Preprocessing dataset (applying chat template and tokenizing)..."
+                "Preprocessing dataset (applying chat template and filtering)..."
             )
 
         original_size = len(dataset)
@@ -321,7 +338,7 @@ class DataManager:
     def _split(self, dataset: Dataset) -> None:
         """
         Split preprocessed dataset into train/eval, then split train into n_splits.
-        Sets torch format for all datasets.
+        Format conversion is handled by the DataCollator.
         """
         dataset_split = dataset.train_test_split(
             test_size=self.eval_split, seed=self.seed
@@ -348,33 +365,7 @@ class DataManager:
                     f"Train split {model_idx} has {len(self.train_datasets[model_idx])} examples"
                 )
 
-        eval_dataset_preprocessed.set_format(
-            type="torch",
-            columns=[
-                "prompt_input_ids",
-                "chosen_input_ids",
-                "rejected_input_ids",
-                "prompt_attention_mask",
-                "chosen_attention_mask",
-                "rejected_attention_mask",
-                "prompt_len",
-            ],
-        )
         self.eval_dataset = eval_dataset_preprocessed
-
-        for model_idx in range(self.n_splits):
-            self.train_datasets[model_idx].set_format(
-                type="torch",
-                columns=[
-                    "prompt_input_ids",
-                    "chosen_input_ids",
-                    "rejected_input_ids",
-                    "prompt_attention_mask",
-                    "chosen_attention_mask",
-                    "rejected_attention_mask",
-                    "prompt_len",
-                ],
-            )
 
         if self.logger:
             self.logger.info("Dataset preprocessing and splitting complete.")
@@ -427,11 +418,22 @@ class DataManager:
         else:
             raise ValueError(f"Partition must be 'train' or 'eval', got '{partition}'")
 
-        collator = DataCollator(pad_token_id=self.tokenizer.pad_token_id)
+        collator = DataCollator(
+            tokenizer=self.tokenizer,
+            max_length=self.max_length,
+            max_prompt_length=self.max_prompt_length,
+        )
 
         return DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             collate_fn=collator,
+            num_workers=self.dataloader_num_workers,
+            pin_memory=self.dataloader_pin_memory,
+            persistent_workers=(
+                self.dataloader_persistent_workers
+                if self.dataloader_num_workers > 0
+                else False
+            ),
         )

@@ -34,13 +34,13 @@ def debug_tokens(
         decoded_tokens_chosen = [tokenizer.decode(token) for token in input_ids[b][1:]]
         for i in range(len(decoded_tokens_chosen)):
             if input_ids[b][i + 1] == tokenizer.eos_token_id:
-                decoded_tokens_chosen[i] = "<eot>"
+                decoded_tokens_chosen[i] = "<eos>"
             elif input_ids[b][i + 1] == tokenizer.pad_token_id:
                 decoded_tokens_chosen[i] = "<pad>"
             elif input_ids[b][i + 1] == tokenizer.bos_token_id:
                 decoded_tokens_chosen[i] = "<bos>"
         decoded_tokens_chosen = [
-            token.replace("\n", " ") for token in decoded_tokens_chosen
+            token.replace("\n", "<nline>") for token in decoded_tokens_chosen
         ]
         longest_token = max(len(token) for token in decoded_tokens_chosen)
         K = 10

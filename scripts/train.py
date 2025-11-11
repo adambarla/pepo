@@ -10,7 +10,12 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from transformers import get_scheduler
 
-from pepo.utils import WandbHandler, set_seed
+from pepo.utils import WandbHandler, constants, set_seed
+
+OmegaConf.register_new_resolver(
+    "pepo.constants",
+    lambda name: getattr(constants, name),
+)
 
 
 @hydra.main(config_path="../configs", config_name="train.yaml", version_base="1.1")
@@ -65,6 +70,11 @@ def main(cfg: DictConfig):
         logger=logger,
     )
 
+    if wandb_config.enabled and resolved_cfg_plain is not None:
+        dataset_path = data_manager._get_cache_path()
+        dataset_hash = dataset_path.split("/")[-1]
+        resolved_cfg_plain["dataset"]["hash"] = dataset_hash
+
     num_networks = model.num_networks
     optimizers = []
     schedulers = []
@@ -98,6 +108,7 @@ def main(cfg: DictConfig):
             f"Training steps: {num_training_steps}"
         )
 
+    # TODO(adam): use instantiate to create wandb handlers
     wandb_handlers = None
     if wandb_config.enabled:
         wandb_handlers = []

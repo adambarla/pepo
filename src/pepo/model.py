@@ -90,8 +90,13 @@ class PEPOModel:
         """
         tokenizer_id = self.tokenizer_id or self.model_id
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
-        tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.padding_side = "right"
+        # if pad token is not set, add a new one
+        if tokenizer.pad_token is None:
+            tokenizer.add_special_tokens({"pad_token": "<pad>"})
+            for model in self.models:
+                model.resize_token_embeddings(len(tokenizer))
+            if self.logger:
+                self.logger.info("Added new pad token <pad> to tokenizer")
 
         # Handle chat template
         if self.chat_template is not None:
@@ -136,6 +141,31 @@ class PEPOModel:
         """
         return self.model_id.rsplit("/", 1)[-1]
 
+    def _load_model(self, model_idx: int, load_from_hub: bool) -> AutoModelForCausalLM:
+        device_map = self.device_manager.get_device_for_model(model_idx)
+        dtype = self.device_manager.dtype
+
+        base_model = AutoModelForCausalLM.from_pretrained(
+            self.model_id,
+            torch_dtype=dtype,
+            device_map=device_map,
+        )
+        base_model.config.use_cache = False
+        if load_from_hub:
+            repo_id = self.hub_manager.get_repo_id(self._get_submodel_name(model_idx))
+            model = PeftModel.from_pretrained(base_model, repo_id, is_trainable=True)
+        else:
+            model = get_peft_model(base_model, self.lora_config)
+
+        if self.logger:
+            trainable, total = model.get_nb_trainable_parameters()
+            trainable = trainable / 1000000
+            total = total / 1000000
+            self.logger.info(
+                f"Submodel id:{model_idx} on {device_map} has {trainable:.2f}M trainable parameters out of {total:.2f}M total parameters ({trainable/total*100:.2f}%)"
+            )
+        return model
+
     def _load_models(self):
         """
         Load all ensemble models from Hub or initialize them from scratch.
@@ -153,29 +183,7 @@ class PEPOModel:
                 load_from_hub = False
 
         for model_idx in range(self.num_networks):
-            device_map = self.device_manager.get_device_for_model(model_idx)
-            dtype = self.device_manager.dtype
-
-            base_model = AutoModelForCausalLM.from_pretrained(
-                self.model_id,
-                torch_dtype=dtype,
-                device_map=device_map,
-            )
-            base_model.config.use_cache = False
-            if load_from_hub:
-                repo_id = self.hub_manager.get_repo_id(self._get_submodel_name(model_idx))
-                model = PeftModel.from_pretrained(base_model, repo_id, is_trainable=True)
-            else:
-                model = get_peft_model(base_model, self.lora_config)
-            models.append(model)
-
-            if self.logger:
-                trainable, total = model.get_nb_trainable_parameters()
-                trainable = trainable / 1000000
-                total = total / 1000000
-                self.logger.info(
-                    f"Submodel id:{model_idx} on {device_map} has {trainable:.2f}M trainable parameters out of {total:.2f}M total parameters ({trainable/total*100:.2f}%)"
-                )
+            models.append(self._load_model(model_idx, load_from_hub))
         return models
 
     def _push_models(self):
