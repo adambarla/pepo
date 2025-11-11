@@ -93,7 +93,7 @@ def main(cfg: DictConfig):
             partition="train",
             batch_size=cfg.batch_size,
         )
-        num_training_steps = (len(train_loader) // cfg.acc_steps) * cfg.epochs
+        num_training_steps = (len(train_loader) // cfg.acc_steps) * cfg.max_epochs
 
         scheduler = get_scheduler(
             name=cfg.scheduler.name,
@@ -135,8 +135,10 @@ def main(cfg: DictConfig):
         schedulers=schedulers,
         batch_size=cfg.batch_size,
         gradient_accumulation_steps=cfg.acc_steps,
-        epochs=cfg.epochs,
+        max_epochs=cfg.max_epochs,
         wandb_handlers=wandb_handlers,
+        early_stopping_patience=cfg.early_stopping.patience,
+        early_stopping_min_delta=cfg.early_stopping.min_delta,
     )
 
 

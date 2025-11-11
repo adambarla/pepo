@@ -63,9 +63,14 @@ wandb:
 log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
 
 L: 4 # Number of submodels in the ensemble
-epochs: 4
+max_epochs: 8
 acc_steps: 1 # acc_steps * batch_size should stay constant
 batch_size: 8
+
+# Early stopping configuration
+early_stopping:
+  patience: 1  # Number of epochs to wait before stopping if no improvement. null = disabled
+  min_delta: 0.001  # Minimum change to qualify as an improvement
 
 # note: if L>gpus, decrease batch_size to batch_size/(ceil(L/gpus)) and increase acc_steps to ceil(L/gpus)
 #   the submodels will be distributed across the GPUs round-robin so they would run out of memory if batch_size is too large

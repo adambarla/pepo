@@ -252,7 +252,7 @@ class PEPOModel:
         n_epochs: int,
         global_step: int,
         wandb_handler: Optional[WandbHandler] = None,
-    ) -> None:
+    ) -> float:
         """
         Evaluate the model on the evaluation dataset.
 
@@ -344,6 +344,8 @@ class PEPOModel:
                 step=global_step,
             )
 
+        return avg_eval_loss
+
     def _train_model(
         self,
         model_idx: int,
@@ -354,10 +356,25 @@ class PEPOModel:
         n_epochs: int = 1,
         gradient_accumulation_steps: int = 1,
         wandb_handler: Optional[WandbHandler] = None,
+        early_stopping_patience: Optional[int] = None,
+        early_stopping_min_delta: float = 0.0,
     ):
         """
         Train a single model in a thread. Each thread sets its CUDA device context
         to ensure proper GPU isolation.
+
+        Args:
+            model_idx: Index of the model in the ensemble.
+            train_loader: DataLoader for training data.
+            eval_loader: DataLoader for evaluation data.
+            optimizer: Optimizer for training.
+            scheduler: Learning rate scheduler.
+            n_epochs: Maximum number of training epochs.
+            gradient_accumulation_steps: Number of steps to accumulate gradients.
+            wandb_handler: Optional wandb handler for logging.
+            early_stopping_patience: Number of epochs to wait before stopping if no improvement.
+                                     If None, early stopping is disabled.
+            early_stopping_min_delta: Minimum change to qualify as an improvement.
         """
         device = torch.device(self.device_manager.get_device_for_model(model_idx))
         model = self.models[model_idx]
@@ -381,7 +398,7 @@ class PEPOModel:
         if self.logger:
             self.logger.info(f"Model {model_idx} - Running initial evaluation...")
 
-        self._eval_model(
+        initial_eval_loss = self._eval_model(
             model_idx=model_idx,
             model=model,
             eval_loader=eval_loader,
@@ -391,6 +408,16 @@ class PEPOModel:
             global_step=global_step,
             wandb_handler=wandb_handler,
         )
+
+        best_eval_loss = initial_eval_loss
+        patience_counter = 0
+        early_stopping_enabled = early_stopping_patience is not None
+
+        if early_stopping_enabled and self.logger:
+            self.logger.info(
+                f"Model {model_idx} - Early stopping enabled with patience={early_stopping_patience}, "
+                f"min_delta={early_stopping_min_delta}"
+            )
 
         for epoch in range(n_epochs):
             if self.logger:
@@ -461,7 +488,7 @@ class PEPOModel:
                         epoch_string_length = len(str(n_epochs))
                         step_string_length = len(str(steps_per_epoch))
                         self.logger.info(
-                            f"Model {model_idx} - Epoch {epoch+1:>{epoch_string_length}}/{n_epochs} - Train Step {step:>{step_string_length}}/{steps_per_epoch} - "
+                            f"Model {model_idx} - Epoch {epoch+1:>{epoch_string_length}}/{n_epochs} - Train Step {global_step:>{step_string_length}}/{steps_per_epoch} - "
                             f"Loss: {loss_value:.4f} - "
                             f"Avg_loss: {epoch_train_loss / num_train_batches:.4f}"
                         )
@@ -496,7 +523,7 @@ class PEPOModel:
                     step=global_step,
                 )
 
-            self._eval_model(
+            eval_loss = self._eval_model(
                 model_idx=model_idx,
                 model=model,
                 eval_loader=eval_loader,
@@ -507,6 +534,21 @@ class PEPOModel:
                 wandb_handler=wandb_handler,
             )
 
+            if early_stopping_enabled:
+                if eval_loss < best_eval_loss - early_stopping_min_delta:
+                    best_eval_loss = eval_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+                if patience_counter >= early_stopping_patience:
+                    if self.logger:
+                        self.logger.info(
+                            f"Model {model_idx} - Early stopping triggered after {epoch + 1} epochs. "
+                            f"Best validation loss: {best_eval_loss:.4f}"
+                        )
+                    break
+
     def train(
         self,
         data_manager: DataManager,
@@ -514,8 +556,10 @@ class PEPOModel:
         schedulers: list[torch.optim.lr_scheduler._LRScheduler],
         batch_size: int,
         gradient_accumulation_steps: int = 1,
-        epochs: int = 1,
+        max_epochs: int = 1,
         wandb_handlers: Optional[list[WandbHandler]] = None,
+        early_stopping_patience: Optional[int] = None,
+        early_stopping_min_delta: float = 0.0,
     ):
         """
         Train the PEPO ensemble models and save the models to the hub.
@@ -527,8 +571,11 @@ class PEPOModel:
             schedulers: List of schedulers, one per model in the ensemble.
             batch_size: Batch size for training.
             gradient_accumulation_steps: Number of steps to accumulate gradients.
-            epochs: Number of training epochs.
+            max_epochs: Maximum number of training epochs.
             wandb_handlers: Optional list of wandb handlers, one per model.
+            early_stopping_patience: Number of epochs to wait before stopping if no improvement.
+                                     If None, early stopping is disabled.
+            early_stopping_min_delta: Minimum change to qualify as an improvement.
         """
         if self.logger:
             self.logger.info("Training PEPO ensemble models...")
@@ -566,9 +613,11 @@ class PEPOModel:
                     eval_loader,
                     optimizers[model_idx],
                     schedulers[model_idx],
-                    epochs,
+                    max_epochs,
                     gradient_accumulation_steps,
                     wandb_handlers[model_idx] if wandb_handlers is not None else None,
+                    early_stopping_patience,
+                    early_stopping_min_delta,
                 ),
             )
             thread.start()

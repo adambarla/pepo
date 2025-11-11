@@ -11,5 +11,5 @@ cd ~/PEPO
 
 uenv run pytorch/v2.6.0:v1 --view=default -- bash << 'EOF'
 source .venv/bin/activate
-python scripts/train.py L=4 epochs=8 acc_steps=1 batch_size=8
+python scripts/train.py L=4 acc_steps=1 batch_size=8
 EOF
