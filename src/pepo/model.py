@@ -146,6 +146,10 @@ class PEPOModel:
             if not load_from_hub:
                 break
             if not self.hub_manager.model_exists(self._get_submodel_name(model_idx)):
+                if self.logger:
+                    self.logger.info(
+                        f"Submodel {self._get_submodel_name(model_idx)} does not exist on Hub, loading from scratch"
+                    )
                 load_from_hub = False
 
         for model_idx in range(self.num_networks):
@@ -160,7 +164,7 @@ class PEPOModel:
             base_model.config.use_cache = False
             if load_from_hub:
                 repo_id = self.hub_manager.get_repo_id(self._get_submodel_name(model_idx))
-                model = PeftModel.from_pretrained(base_model, repo_id)
+                model = PeftModel.from_pretrained(base_model, repo_id, is_trainable=True)
             else:
                 model = get_peft_model(base_model, self.lora_config)
             models.append(model)
@@ -570,3 +574,118 @@ class PEPOModel:
 
         if self.hub_manager.should_push_to_hub:
             self._push_models()
+
+    def predict(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor = None
+    ) -> torch.Tensor:
+        if len(input_ids.shape) == 1:
+            input_ids = input_ids.unsqueeze(0)
+        if len(input_ids.shape) != 2:
+            raise ValueError("input_ids must be a 2D tensor")
+
+        if attention_mask is None:
+            attention_mask = (input_ids != self.tokenizer.pad_token_id).float()
+
+        log_probs = []
+        threads = []
+
+        def predict_log_probs(model, input_ids, attention_mask):
+            with torch.no_grad():
+                model.eval()
+                input_ids = input_ids.to(model.device)
+                attention_mask = attention_mask.to(model.device)
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                logits = outputs.logits  # (B, T, V)
+                last_logits = logits[:, -1, :]
+                last_logits = last_logits.cpu()
+                log_probs.append(F.log_softmax(last_logits, dim=-1))
+
+        for model_idx in range(self.num_networks):
+            thread = threading.Thread(
+                target=predict_log_probs,
+                args=(
+                    self.models[model_idx],
+                    input_ids,
+                    attention_mask,
+                ),
+            )
+            thread.start()
+            threads.append(thread)
+
+        for thread in threads:
+            thread.join()
+
+        log_probs_tensor: torch.Tensor = torch.stack(log_probs, dim=0)
+        min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
+        return min_log_probs
+
+    def generate(self, prompts: list[str], max_length: int = 1024) -> list[str]:
+        formated_prompts = []
+        for prompt in prompts:
+            formatted_prompt = [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": ""},
+            ]
+            formated_prompt = self.tokenizer.apply_chat_template(
+                formatted_prompt, tokenize=False, add_generation_prompt=True
+            )
+            formated_prompts.append(formated_prompt)
+
+        prev_padding_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = "left"
+
+        inputs = self.tokenizer(
+            formated_prompts,
+            return_tensors="pt",
+            padding=True,
+        )
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+        stop_signal = torch.zeros(input_ids.shape[0], dtype=torch.bool)
+
+        # print prompt 0
+        print(f"prompt 0:\n{formated_prompts[0]}", end="")
+        for i in range(max_length):
+            # print(f"input_ids: \n{input_ids}")
+            # print(f"attention_mask: \n{attention_mask}")
+            min_log_probs = self.predict(input_ids, attention_mask)
+            # print(f"min_log_probs: {min_log_probs}") # (B, V)
+            min_probs = torch.exp(min_log_probs)
+
+            missing_token_id = self.tokenizer.vocab_size
+            missing_probs = 1 - torch.sum(min_probs, dim=-1)
+            min_probs = torch.cat([min_probs, missing_probs.unsqueeze(-1)], dim=-1)
+
+            # TODO(adam): handle top k sampling, temperature sampling, etc.
+
+            # resample where we got missing token until we get a non-missing token
+            missing_mask = torch.ones(input_ids.shape[0], dtype=torch.bool)
+            sampled_token_ids = torch.zeros(input_ids.shape[0], dtype=torch.long)
+            while True:
+                new_sampled_token_ids = torch.multinomial(
+                    min_probs[missing_mask], num_samples=1
+                ).squeeze(-1)
+                sampled_token_ids[missing_mask] = new_sampled_token_ids
+                missing_mask = sampled_token_ids == missing_token_id
+                if not torch.any(missing_mask):
+                    break
+
+            input_ids = torch.cat([input_ids, sampled_token_ids.unsqueeze(-1)], dim=1)
+            attention_mask = torch.cat(
+                [attention_mask, torch.ones_like(sampled_token_ids).unsqueeze(-1)], dim=1
+            )
+
+            stop_signal = stop_signal | (sampled_token_ids == self.tokenizer.eos_token_id)
+
+            # print new input_ids 0
+            print(
+                f"{self.tokenizer.decode(sampled_token_ids[0], skip_special_tokens=True)}",
+                end="",
+                flush=True,
+            )
+            if torch.all(stop_signal):
+                break
+        print()
+
+        self.tokenizer.padding_side = prev_padding_side
+        return input_ids

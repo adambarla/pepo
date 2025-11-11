@@ -1,0 +1,37 @@
+# PEPO Ensemble Training Configuration
+defaults:
+  - model: smollm
+  - _self_
+
+model:
+  num_networks: ${L}
+
+# Device configuration
+device:
+  _target_: pepo.utils.device.DeviceManager
+  gpu_ids: null  # list of GPU IDs (null = auto-detect), e.g. [0, 1, 2, 3]
+
+# HuggingFace Hub configuration
+hub:
+  _target_: pepo.utils.hub.HubManager
+  base_dir: "PessimisticDPO"  # HuggingFace username/organization
+  load: true
+  push: false
+
+# Reproducibility
+seed: 42
+
+# Logging configuration
+logger:
+  _target_: pepo.utils.logger.Logger
+  name: "chat"
+  log_file: null
+  log_dir: "logs"
+  level: ${log_level}
+  format_string: null
+  date_format: null
+
+
+log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
+
+L: 4 # Number of submodels in the ensemble
