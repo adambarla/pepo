@@ -28,9 +28,12 @@ def chat(model: PEPOModel):
     # print("--------------------------------")
     # model.generate_base_model(prompts, max_length=1000)
 
-    input_ids, attention_mask = model.generate(prompts, max_length=1000)
+    input_ids, attention_mask = model.generate(prompts, max_length=100)
     print(f"Input ids: {input_ids}")
     print(f"Attention mask: {attention_mask}")
+    tokenizer = model.get_tokenizer()
+    output = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+    print(f"Generated sequence idx=0:\n{output[0]}")
 
 
 @hydra.main(config_path="../configs", config_name="chat.yaml", version_base="1.1")

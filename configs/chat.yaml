@@ -1,5 +1,6 @@
 # PEPO Ensemble Training Configuration
 defaults:
+  # - model: llama_instruct
   - model: smollm
   - _self_
 
@@ -15,8 +16,9 @@ device:
 hub:
   _target_: pepo.utils.hub.HubManager
   base_dir: "PessimisticDPO"  # HuggingFace username/organization
-  load: true
+  load: false
   push: false
+  # load_epochs: 1 # load the model after 1 epoch
 
 # Reproducibility
 seed: 42

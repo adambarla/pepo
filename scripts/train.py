@@ -1,4 +1,7 @@
 # script to train the pepo model, using a hydra config file, log the training process to wb and save the model to huggingface
+import os
+
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 import logging
 from datetime import datetime
@@ -134,6 +137,7 @@ def main(cfg: DictConfig):
         optimizers=optimizers,
         schedulers=schedulers,
         batch_size=cfg.batch_size,
+        eval_batch_size=cfg.eval_batch_size,
         gradient_accumulation_steps=cfg.acc_steps,
         max_epochs=cfg.max_epochs,
         wandb_handlers=wandb_handlers,

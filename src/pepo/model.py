@@ -1,10 +1,10 @@
 import math
 import threading
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 import torch.nn.functional as F
-from peft import LoraConfig, PeftModel, get_peft_model
+from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -34,6 +34,7 @@ class PEPOModel:
         lora_bias: str = "none",
         lora_task_type: str = "CAUSAL_LM",
         lora_target_modules: str = "all-linear",
+        compile: bool = False,
         logger: Optional[Logger] = None,
     ):
         """
@@ -55,6 +56,7 @@ class PEPOModel:
             lora_task_type: LoRA task type.
             lora_target_modules: LoRA target modules.
             logger: Optional logger instance.
+            compile: Whether to compile the models.
         """
         self.alpha = alpha
         self.beta = beta
@@ -65,6 +67,7 @@ class PEPOModel:
         self.logger = logger
         self.device_manager = device_manager
         self.hub_manager = hub_manager
+        self.compile = compile
 
         self.lora_config = LoraConfig(
             r=lora_r,
@@ -91,13 +94,9 @@ class PEPOModel:
         tokenizer_id = self.tokenizer_id or self.model_id
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
 
-        # if pad token is not set, add a new one
         if tokenizer.pad_token is None:
-            tokenizer.add_special_tokens({"pad_token": "<pad>"})
-            if self.logger:
-                self.logger.info("Added new pad token <pad> to tokenizer")
+            tokenizer.pad_token = tokenizer.eos_token
 
-        # Handle chat template
         if self.chat_template is not None:
             tokenizer.chat_template = self.chat_template
             if self.logger:
@@ -150,28 +149,21 @@ class PEPOModel:
             device_map=device_map,
         )
         base_model.config.use_cache = False
-        base_model.resize_token_embeddings(len(self.tokenizer))
-        base_model.config.vocab_size = len(self.tokenizer)
-        pad_token_id = self.tokenizer.pad_token_id
-        embedding_layer = base_model.get_input_embeddings()
-        embedding_layer.weight.data[pad_token_id].zero_()
 
-        output_embeddings = base_model.get_output_embeddings()
-        output_embeddings.weight.data[pad_token_id].zero_()
-
+        model_name = self._get_submodel_name(model_idx)
         if load_from_hub:
-            repo_id = self.hub_manager.get_repo_id(self._get_submodel_name(model_idx))
-            model = PeftModel.from_pretrained(base_model, repo_id, is_trainable=True)
+            model = self.hub_manager.load_model(base_model, model_name, is_trainable=True)
         else:
             model = get_peft_model(base_model, self.lora_config)
-
-        if self.logger:
-            trainable, total = model.get_nb_trainable_parameters()
-            trainable = trainable / 1000000
-            total = total / 1000000
-            self.logger.info(
-                f"Submodel id:{model_idx} on {device_map} has {trainable:.2f}M trainable parameters out of {total:.2f}M total parameters ({trainable/total*100:.2f}%)"
-            )
+            if self.logger:
+                trainable, total = model.get_nb_trainable_parameters()
+                trainable = trainable / 1000000
+                total = total / 1000000
+                self.logger.info(
+                    f"Model {model_name} has {trainable:.2f}M trainable parameters out of {total:.2f}M total parameters ({trainable/total*100:.2f}%)"
+                )
+        if self.compile:
+            model = torch.compile(model)
         return model
 
     def _load_models(self):
@@ -194,24 +186,37 @@ class PEPOModel:
             models.append(self._load_model(model_idx, load_from_hub))
         return models
 
+    def _push_model(self, model_idx: int, epochs: Optional[int] = None):
+        """
+        Push a single model to Hub.
+
+        Args:
+            model_idx: Index of the model in the ensemble.
+            epochs: Optional number of epochs. If provided, appends "-e{epochs}" to model name.
+                    Use None for final push without epoch suffix.
+        """
+        self.hub_manager.push_model(
+            model_name=self._get_submodel_name(model_idx),
+            model=self.models[model_idx],
+            tokenizer=self.tokenizer,
+            model_idx=model_idx,
+            epochs=epochs,
+        )
+
     def _push_models(self):
         """
-        Push all ensemble models to Hub.
+        Push all ensemble models to Hub without epoch suffix (final version).
         """
         for model_idx in range(self.num_networks):
-            self.hub_manager.push_model(
-                model_name=self._get_submodel_name(model_idx),
-                model=self.models[model_idx],
-                commit_message=f"Upload PEPO ensemble model {model_idx}",
-            )
+            self._push_model(model_idx, epochs=None)
 
-    def _get_log_probs(
+    def _get_lprobs(
         self,
         model: AutoModelForCausalLM,
         device: torch.device,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        prompt_len: torch.Tensor,
+        response_mask: torch.Tensor,
     ) -> torch.Tensor:
         """
         Get the log probabilities of the response tokens.
@@ -228,27 +233,59 @@ class PEPOModel:
 
         logits = logits[:, :-1, :]  # (B, T-1, V); remove the new token
         labels = input_ids[:, 1:]  # (B, T-1); remove the first token
-        attn_mask_shifted = attention_mask[:, 1:]
+        response_mask = response_mask[:, 1:]  # (B, T-1); remove the first token
 
-        log_probs = F.log_softmax(
-            logits, dim=-1
-        )  # (B, T-1, V); log prob over vocab dimension
+        log_probs = F.log_softmax(logits, dim=-1)  # (B, T-1, V); log prob over V dim
         # select only the log probs for the labels, (B, T-1)
         log_probs = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
+        log_probs = log_probs * response_mask.float()  # mask out the response tokens
+        log_probs_sum = log_probs.sum(dim=-1)  # (B,) sum the log probs of response tokens
+        return log_probs_sum  # (B,)
 
-        # mask out the response probs by creating a mask of the response tokens
-        pos = torch.arange(log_probs.shape[1], device=device).view(1, -1)  # (1, T-1)
-        response_mask = (pos >= (prompt_len - 1).unsqueeze(1)).float()
-        response_mask *= attn_mask_shifted.float()
-        response_mask = torch.where(
-            labels == self.tokenizer.pad_token_id, 0, response_mask
+    def _loss_fn(
+        self,
+        batch: Dict[str, torch.Tensor],
+        model: AutoModelForCausalLM,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch = {k: v.to(device) for k, v in batch.items()}
+
+        chosen_ids = batch["chosen_input_ids"]
+        chosen_amask = batch["chosen_attention_mask"]
+        chosen_rmask = batch["chosen_response_mask"]
+        reject_ids = batch["rejected_input_ids"]
+        reject_amask = batch["rejected_attention_mask"]
+        reject_rmask = batch["rejected_response_mask"]
+
+        lprobs_chosen = self._get_lprobs(
+            model, device, chosen_ids, chosen_amask, chosen_rmask
         )
-        log_probs = log_probs * response_mask.float()  # mask
+        lprobs_reject = self._get_lprobs(
+            model, device, reject_ids, reject_amask, reject_rmask
+        )
+        with model.disable_adapter():  # type: ignore[operator]
+            lprobs_chosen_ref = self._get_lprobs(
+                model,
+                device,
+                chosen_ids,
+                chosen_amask,
+                chosen_rmask,
+            )
+            lprobs_reject_ref = self._get_lprobs(
+                model,
+                device,
+                reject_ids,
+                reject_amask,
+                reject_rmask,
+            )
 
-        # use debug_tokens from utils.debug to debug the masks and log probs
-        # debug_tokens(input_ids, self.tokenizer, attn_mask_shifted, response_mask, log_probs, self.logger)
-        log_probs_sum = log_probs.sum(dim=-1)
-        return log_probs_sum
+        pi_log_ratio = lprobs_chosen - lprobs_reject
+        ref_log_ratio = lprobs_chosen_ref - lprobs_reject_ref
+        alpha_offset = math.log(1.0 + self.alpha)
+        argument = self.beta * (pi_log_ratio - ref_log_ratio - alpha_offset)
+        dpo_loss_components = -F.logsigmoid(argument)
+        loss = dpo_loss_components.mean()
+        return loss, lprobs_chosen, lprobs_reject
 
     def _eval_model(
         self,
@@ -277,114 +314,50 @@ class PEPOModel:
         Returns:
             Average evaluation loss.
         """
+        n_batches = len(eval_loader)
+        if n_batches == 0:
+            raise ValueError("Evaluation loader is empty")
         model.eval()
-        eval_loss = 0.0
-        num_eval_batches = 0
-        total_eval_batches = len(eval_loader)
-        eval_prob_chosen_sum = 0.0
-        eval_prob_rejected_sum = 0.0
+        loss = 0.0
+        b = 0
+        lprob_chosen_sum = 0.0
+        lprob_reject_sum = 0.0
+        margin_sum = 0.0
 
         with torch.no_grad():
-            for eval_step, eval_batch in enumerate(eval_loader):
-                eval_batch = {k: v.to(device) for k, v in eval_batch.items()}
+            for batch in eval_loader:
+                batch_loss, lprobs_ch, lprobs_re = self._loss_fn(batch, model, device)
 
-                log_probs_chosen = self._get_log_probs(
-                    model,
-                    device,
-                    eval_batch["chosen_input_ids"],
-                    eval_batch["chosen_attention_mask"],
-                    eval_batch["prompt_len"],
-                )
-                log_probs_rejected = self._get_log_probs(
-                    model,
-                    device,
-                    eval_batch["rejected_input_ids"],
-                    eval_batch["rejected_attention_mask"],
-                    eval_batch["prompt_len"],
-                )
-                with model.disable_adapter():  # type: ignore[operator]
-                    log_probs_chosen_ref = self._get_log_probs(
-                        model,
-                        device,
-                        eval_batch["chosen_input_ids"],
-                        eval_batch["chosen_attention_mask"],
-                        eval_batch["prompt_len"],
-                    )
-                    log_probs_rejected_ref = self._get_log_probs(
-                        model,
-                        device,
-                        eval_batch["rejected_input_ids"],
-                        eval_batch["rejected_attention_mask"],
-                        eval_batch["prompt_len"],
-                    )
+                loss += batch_loss.item()
+                b += 1
 
-                pi_log_ratio = log_probs_chosen - log_probs_rejected
-                ref_log_ratio = log_probs_chosen_ref - log_probs_rejected_ref
-                alpha_offset = math.log(1.0 + self.alpha)
-                argument = self.beta * (pi_log_ratio - ref_log_ratio - alpha_offset)
-                dpo_loss_components = -F.logsigmoid(argument)
-                batch_eval_loss = dpo_loss_components.mean().item()
-                eval_loss += batch_eval_loss
-                num_eval_batches += 1
+                lprob_chosen_sum += lprobs_ch.mean().item()
+                lprob_reject_sum += lprobs_re.mean().item()
+                margin_sum += (lprobs_ch - lprobs_re).mean().item()
 
-                prob_chosen = torch.exp(log_probs_chosen).mean().item()
-                prob_rejected = torch.exp(log_probs_rejected).mean().item()
-                eval_prob_chosen_sum += prob_chosen
-                eval_prob_rejected_sum += prob_rejected
-
-                if (
-                    self.logger
-                    and (eval_step + 1) % max(1, total_eval_batches // 10) == 0
-                ):
-                    current_avg_loss = eval_loss / num_eval_batches
+                if self.logger and b % max(1, n_batches // 10) == 0:
+                    current_avg_loss = loss / b
+                    e_str_len = len(str(n_epochs))
+                    b_str_len = len(str(n_batches))
                     self.logger.info(
-                        f"Model {model_idx} - Epoch {epoch}/{n_epochs} - Eval Step {eval_step + 1}/{total_eval_batches} - "
-                        f"Current Avg Loss: {current_avg_loss:.4f}"
+                        f"Model {model_idx} - Eval. Epoch {epoch:>{e_str_len}}/{n_epochs} - Step {b:>{b_str_len}}/{n_batches} - "
+                        f"Avg Loss: {current_avg_loss:.4f} - "
+                        f"Avg Margin: {margin_sum / b:.4f}"
                     )
-
-                if (
-                    wandb_handler is not None
-                    and (eval_step + 1) % max(1, total_eval_batches // 10) == 0
-                ):
-                    current_avg_prob_chosen = eval_prob_chosen_sum / num_eval_batches
-                    current_avg_prob_rejected = eval_prob_rejected_sum / num_eval_batches
-                    wandb_handler.log(
-                        {
-                            "eval/prob_chosen": prob_chosen,
-                            "eval/prob_rejected": prob_rejected,
-                            "eval/avg_prob_chosen": current_avg_prob_chosen,
-                            "eval/avg_prob_rejected": current_avg_prob_rejected,
-                            "train/epoch": epoch,
-                        },
-                        step=global_step,
-                    )
-
-        avg_eval_loss = eval_loss / num_eval_batches if num_eval_batches > 0 else 0.0
-        avg_eval_prob_chosen = (
-            eval_prob_chosen_sum / num_eval_batches if num_eval_batches > 0 else 0.0
-        )
-        avg_eval_prob_rejected = (
-            eval_prob_rejected_sum / num_eval_batches if num_eval_batches > 0 else 0.0
-        )
-
-        if self.logger:
-            self.logger.info(
-                f"Model {model_idx} - Epoch {epoch}/{n_epochs} - "
-                f"Average Eval Loss: {avg_eval_loss:.4f}"
-            )
 
         if wandb_handler is not None:
             wandb_handler.log(
                 {
-                    "eval/loss": avg_eval_loss,
-                    "eval/avg_prob_chosen": avg_eval_prob_chosen,
-                    "eval/avg_prob_rejected": avg_eval_prob_rejected,
-                    "train/epoch": epoch,
+                    "eval/loss": loss / b,
+                    "eval/avg_lprobs_chosen": lprob_chosen_sum / b,
+                    "eval/avg_lprobs_reject": lprob_reject_sum / b,
+                    "eval/avg_margin": margin_sum / b,
+                    "eval/epoch": epoch,
                 },
                 step=global_step,
             )
 
-        return avg_eval_loss
+        return loss / b
 
     def _train_model(
         self,
@@ -394,10 +367,10 @@ class PEPOModel:
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler._LRScheduler,
         n_epochs: int = 1,
-        gradient_accumulation_steps: int = 1,
+        grad_acc_steps: int = 1,
         wandb_handler: Optional[WandbHandler] = None,
-        early_stopping_patience: Optional[int] = None,
-        early_stopping_min_delta: float = 0.0,
+        es_patience: Optional[int] = None,
+        es_min_delta: float = 0.0,
     ):
         """
         Train a single model in a thread. Each thread sets its CUDA device context
@@ -421,10 +394,6 @@ class PEPOModel:
 
         if wandb_handler is not None and wandb_handler.enabled:
             wandb_handler.init_run()
-
-        # Custom initialization for testing - set LoRA weights to small fixed values
-        # debug the ref and model log prop computation by setting the LoRA weights to small fixed values
-        # initialize_lora_for_testing(model, std=0.1, logger=self.logger)
 
         if self.logger:
             train_size = len(train_loader.dataset)  # type: ignore[arg-type]
@@ -451,134 +420,75 @@ class PEPOModel:
 
         best_eval_loss = initial_eval_loss
         patience_counter = 0
-        early_stopping_enabled = early_stopping_patience is not None
+        es_enabled = es_patience is not None
 
-        if early_stopping_enabled and self.logger:
-            self.logger.info(
-                f"Model {model_idx} - Early stopping enabled with patience={early_stopping_patience}, "
-                f"min_delta={early_stopping_min_delta}"
-            )
-
+        n_batches = len(train_loader)
+        n_ebatches = n_batches // grad_acc_steps
         for epoch in range(n_epochs):
             if self.logger:
                 self.logger.info(f"Model {model_idx} - Starting training epoch {epoch+1}")
 
             model.train()
             optimizer.zero_grad()
-            epoch_train_loss = 0.0
-            num_train_batches = 0
-            steps_per_epoch = len(train_loader) // gradient_accumulation_steps
-            epoch_prob_chosen_sum = 0.0
-            epoch_prob_rejected_sum = 0.0
+            loss = 0.0
+            lprob_chosen_sum = 0.0
+            lprob_reject_sum = 0.0
+            margin_sum = 0.0
+            ebatch = 0  # effective batch count
 
             for step, batch in enumerate(train_loader):
-                batch = {k: v.to(device) for k, v in batch.items()}
-
-                log_probs_chosen = self._get_log_probs(
-                    model,
-                    device,
-                    batch["chosen_input_ids"],
-                    batch["chosen_attention_mask"],
-                    batch["prompt_len"],
-                )
-                log_probs_rejected = self._get_log_probs(
-                    model,
-                    device,
-                    batch["rejected_input_ids"],
-                    batch["rejected_attention_mask"],
-                    batch["prompt_len"],
-                )
-                with torch.no_grad():
-                    with model.disable_adapter():  # type: ignore[operator]
-                        log_probs_chosen_ref = self._get_log_probs(
-                            model,
-                            device,
-                            batch["chosen_input_ids"],
-                            batch["chosen_attention_mask"],
-                            batch["prompt_len"],
+                if n_batches - step < grad_acc_steps:
+                    if self.logger:
+                        self.logger.info(
+                            f"Model {model_idx} - Epoch {epoch+1} - "
+                            f"Not enough batches to accumulate gradients, skipping remaining {n_batches - step} batches out of {n_batches}"
                         )
-                        log_probs_rejected_ref = self._get_log_probs(
-                            model,
-                            device,
-                            batch["rejected_input_ids"],
-                            batch["rejected_attention_mask"],
-                            batch["prompt_len"],
-                        )
+                    break
+                batch_loss, lprobs_ch, lprobs_re = self._loss_fn(batch, model, device)
 
-                pi_log_ratio = log_probs_chosen - log_probs_rejected
-                ref_log_ratio = log_probs_chosen_ref - log_probs_rejected_ref
-                alpha_offset = math.log(1.0 + self.alpha)
-                argument = self.beta * (pi_log_ratio - ref_log_ratio - alpha_offset)
-                dpo_loss_components = -F.logsigmoid(argument)
-                loss = dpo_loss_components.mean()
+                loss += batch_loss.item()
+                lprob_chosen_sum += lprobs_ch.mean().item()
+                lprob_reject_sum += lprobs_re.mean().item()
+                margin_sum += (lprobs_ch - lprobs_re).mean().item()
 
-                loss = loss / gradient_accumulation_steps
-                loss.backward()
+                batch_loss = batch_loss / grad_acc_steps
+                batch_loss.backward()
 
-                if (step + 1) % gradient_accumulation_steps == 0:
+                if (step + 1) % grad_acc_steps == 0:
                     optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad()
                     global_step += 1
+                    ebatch += 1
 
-                    loss_value = loss.item() * gradient_accumulation_steps
-                    epoch_train_loss += loss_value
-                    num_train_batches += 1
                     current_lr = scheduler.get_last_lr()[0]
 
-                    prob_chosen = torch.exp(log_probs_chosen).mean().item()
-                    prob_rejected = torch.exp(log_probs_rejected).mean().item()
-                    epoch_prob_chosen_sum += prob_chosen
-                    epoch_prob_rejected_sum += prob_rejected
-
-                    if self.logger and global_step % max(1, steps_per_epoch // 10) == 0:
-                        epoch_string_length = len(str(n_epochs))
-                        step_string_length = len(str(steps_per_epoch))
+                    if self.logger and ebatch % max(1, n_ebatches // 100) == 0:
+                        e_str_len = len(str(n_epochs))
+                        eb_str_len = len(str(n_ebatches))
                         self.logger.info(
-                            f"Model {model_idx} - Epoch {epoch+1:>{epoch_string_length}}/{n_epochs} - Train Step {global_step:>{step_string_length}}/{steps_per_epoch} - "
-                            f"Loss: {loss_value:.4f} - "
-                            f"Avg_loss: {epoch_train_loss / num_train_batches:.4f}"
+                            f"Model {model_idx} - Train Epoch {epoch+1:>{e_str_len}}/{n_epochs} - Step {ebatch:>{eb_str_len}}/{n_ebatches} - "
+                            f"Avg Loss: {loss / ebatch:.4f} - Avg Margin: {margin_sum / ebatch:.4f}"
                         )
 
-                    if wandb_handler is not None:
-                        wandb_handler.log(
-                            {
-                                "train/loss": loss_value,
-                                "train/learning_rate": current_lr,
-                                "train/epoch": epoch + 1,
-                                "train/step": global_step,
-                                "train/prob_chosen": prob_chosen,
-                                "train/prob_rejected": prob_rejected,
-                            },
-                            step=global_step,
-                        )
-
-            avg_train_loss = (
-                epoch_train_loss / num_train_batches if num_train_batches > 0 else 0.0
-            )
-            avg_prob_chosen = (
-                epoch_prob_chosen_sum / num_train_batches
-                if num_train_batches > 0
-                else 0.0
-            )
-            avg_prob_rejected = (
-                epoch_prob_rejected_sum / num_train_batches
-                if num_train_batches > 0
-                else 0.0
-            )
-
-            if self.logger:
-                self.logger.info(
-                    f"Model {model_idx} - Epoch {epoch+1}/{n_epochs} - "
-                    f"Average Train Loss: {avg_train_loss:.4f}"
-                )
+                    if wandb_handler is None:
+                        continue
+                    wandb_handler.log(
+                        {
+                            "train/learning_rate": current_lr,
+                            "train/step": global_step,
+                            "train/curr_avg_loss": loss / ebatch,
+                            "train/curr_avg_margin": margin_sum / ebatch,
+                        },
+                        step=global_step,
+                    )
 
             if wandb_handler is not None:
                 wandb_handler.log(
                     {
-                        "train/avg_loss": avg_train_loss,
-                        "train/avg_prob_chosen": avg_prob_chosen,
-                        "train/avg_prob_rejected": avg_prob_rejected,
+                        "train/avg_lprobs_chosen": lprob_chosen_sum / ebatch,
+                        "train/avg_lprobs_reject": lprob_reject_sum / ebatch,
+                        "train/avg_margin": margin_sum / ebatch,
                         "train/epoch": epoch + 1,
                     },
                     step=global_step,
@@ -595,14 +505,16 @@ class PEPOModel:
                 wandb_handler=wandb_handler,
             )
 
-            if early_stopping_enabled:
-                if eval_loss < best_eval_loss - early_stopping_min_delta:
+            self._push_model(model_idx, epochs=epoch + 1)  # push with epoch suffix
+
+            if es_enabled:
+                if eval_loss < best_eval_loss - es_min_delta:
                     best_eval_loss = eval_loss
                     patience_counter = 0
                 else:
                     patience_counter += 1
 
-                if patience_counter >= early_stopping_patience:
+                if patience_counter >= es_patience:
                     if self.logger:
                         self.logger.info(
                             f"Model {model_idx} - Early stopping triggered after {epoch + 1} epochs. "
@@ -616,6 +528,7 @@ class PEPOModel:
         optimizers: list[torch.optim.Optimizer],
         schedulers: list[torch.optim.lr_scheduler._LRScheduler],
         batch_size: int,
+        eval_batch_size: Optional[int] = None,
         gradient_accumulation_steps: int = 1,
         max_epochs: int = 1,
         wandb_handlers: Optional[list[WandbHandler]] = None,
@@ -660,10 +573,11 @@ class PEPOModel:
                 partition="train",
                 batch_size=batch_size,
             )
+            eval_bs = eval_batch_size if eval_batch_size is not None else 4 * batch_size
             eval_loader = data_manager.get_dataloader(
                 model_idx=model_idx,
                 partition="eval",
-                batch_size=batch_size,
+                batch_size=eval_bs,
             )
 
             thread = threading.Thread(
@@ -691,8 +605,7 @@ class PEPOModel:
             for wandb_handler in wandb_handlers:
                 wandb_handler.finish()
 
-        if self.hub_manager.should_push_to_hub:
-            self._push_models()
+        self._push_models()
 
     def _predict(
         self,
@@ -719,19 +632,20 @@ class PEPOModel:
         if attention_mask is None:
             attention_mask = (input_ids != self.tokenizer.pad_token_id).float()
 
-        log_probs_ensemble = []
+        log_probs_ensemble: list[Optional[torch.Tensor]] = [None] * self.num_networks
 
-        def predict_log_probs(model, input_ids, attention_mask):
+        def predict_log_probs(model_idx, model, input_ids, attention_mask):
             with torch.no_grad():
                 model.eval()
                 log_probs = self._predict(model, input_ids, attention_mask)
-                log_probs_ensemble.append(log_probs.cpu())
+                log_probs_ensemble[model_idx] = log_probs.cpu()
 
         threads = []
         for model_idx in range(self.num_networks):
             thread = threading.Thread(
                 target=predict_log_probs,
                 args=(
+                    model_idx,
                     self.models[model_idx],
                     input_ids,
                     attention_mask,
@@ -743,9 +657,15 @@ class PEPOModel:
         for thread in threads:
             thread.join()
 
-        log_probs_tensor: torch.Tensor = torch.stack(
-            log_probs_ensemble, dim=0
-        )  # (L, B, V)
+        log_probs_list: list[torch.Tensor] = [
+            lp for lp in log_probs_ensemble if lp is not None
+        ]
+        if len(log_probs_list) != self.num_networks:
+            raise RuntimeError(
+                f"Expected {self.num_networks} log prob tensors, got {len(log_probs_list)}"
+            )
+
+        log_probs_tensor: torch.Tensor = torch.stack(log_probs_list, dim=0)  # (L, B, V)
 
         # eos_probs = log_probs_tensor[:, 0, self.tokenizer.eos_token_id]
         # eos_probs = torch.exp(eos_probs)
@@ -775,14 +695,49 @@ class PEPOModel:
         # print(f"EOS token prob: min={eos_probs.min().item():.2f}, max={eos_probs.max().item():.2f}, mean={eos_probs.mean().item():.2f}, std={eos_probs.std().item():.2f}")
         return log_probs
 
+    def _top_p_sampling(self, logits, top_p=0.9, temperature=1.0):
+        """
+        Perform top-p (nucleus) sampling on the given logits.
+
+        Args:
+            logits (torch.Tensor): The logits from the model of shape (batch_size, vocab_size).
+            top_p (float): The cumulative probability threshold for nucleus sampling.
+            temperature (float): The temperature for scaling logits.
+        Returns:
+            torch.Tensor: The sampled token indices of shape (batch_size,).
+        """
+        scaled_logits = logits / temperature
+        probs = F.softmax(scaled_logits, dim=-1)
+
+        sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+
+        indices_to_remove = sorted_indices_to_remove.scatter(
+            1, sorted_indices, sorted_indices_to_remove
+        )
+        logits[indices_to_remove] = float("-inf")
+        filtered_probs = F.softmax(logits, dim=-1)
+        sampled_indices = torch.multinomial(filtered_probs, num_samples=1).squeeze(-1)
+        return sampled_indices
+
     def generate(
         self,
         prompts: list[str],
         max_length: int = 1024,
         use_ensamble: bool = True,
         apply_chat_template: bool = True,
+        sample_missing_token: bool = False,
+        greedy_sampling: bool = False,
+        top_p_sampling: bool = True,
+        temperature: float = 1.0,
+        top_p: float = 0.9,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-
+        if greedy_sampling and top_p_sampling:
+            raise ValueError("Greedy sampling and top-p sampling cannot be used together")
         if self.logger:
             self.logger.info(
                 f"Generating ensemble={use_ensamble}, template={apply_chat_template}"
@@ -821,24 +776,36 @@ class PEPOModel:
                 log_probs = self.predict_base_model(input_ids, attention_mask)
             min_probs = torch.exp(log_probs)
 
-            missing_token_id = len(self.tokenizer)
-            missing_probs = torch.clamp(1 - torch.sum(min_probs, dim=-1), min=0.0)
-            min_probs = torch.cat([min_probs, missing_probs.unsqueeze(-1)], dim=-1)
-
             # TODO(adam): handle top k sampling, temperature sampling, etc.
             # TODO(adam): handle resampling max attempts
 
             # resample where we got missing token until we get a non-missing token
-            missing_mask = torch.ones(input_ids.shape[0], dtype=torch.bool)
-            sampled_token_ids = torch.zeros(input_ids.shape[0], dtype=torch.long)
-            while True:
-                new_sampled_token_ids = torch.multinomial(
-                    min_probs[missing_mask], num_samples=1
-                ).squeeze(-1)
-                sampled_token_ids[missing_mask] = new_sampled_token_ids
-                missing_mask = sampled_token_ids == missing_token_id
-                if not torch.any(missing_mask):
-                    break
+            if sample_missing_token:
+                missing_token_id = len(self.tokenizer)
+                missing_probs = torch.clamp(1 - torch.sum(min_probs, dim=-1), min=0.0)
+                min_probs = torch.cat([min_probs, missing_probs.unsqueeze(-1)], dim=-1)
+                missing_mask = torch.ones(input_ids.shape[0], dtype=torch.bool)
+                sampled_token_ids = torch.zeros(input_ids.shape[0], dtype=torch.long)
+                while True:
+                    new_sampled_token_ids = torch.multinomial(
+                        min_probs[missing_mask], num_samples=1
+                    ).squeeze(-1)
+                    sampled_token_ids[missing_mask] = new_sampled_token_ids
+                    missing_mask = sampled_token_ids == missing_token_id
+                    if not torch.any(missing_mask):
+                        break
+            else:
+                if greedy_sampling:
+                    sampled_token_ids = torch.argmax(min_probs, dim=-1)
+                elif top_p_sampling:
+                    sampled_token_ids = self._top_p_sampling(
+                        log_probs,
+                        top_p=top_p,
+                        temperature=temperature,
+                    )
+                else:
+                    min_probs = min_probs / torch.sum(min_probs, dim=-1, keepdim=True)
+                    sampled_token_ids = torch.multinomial(min_probs, num_samples=1)
 
             input_ids = torch.cat([input_ids, sampled_token_ids.unsqueeze(-1)], dim=1)
             attention_mask = torch.cat(

@@ -30,7 +30,7 @@ class DataCollator:
     def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
         prompt_texts = [f["prompt_text"] for f in features]
         chosen_texts = [f["chosen_text"] for f in features]
-        rejected_texts = [f["rejected_text"] for f in features]
+        reject_texts = [f["rejected_text"] for f in features]
 
         prompt_encoded = self.tokenizer(
             prompt_texts,
@@ -46,24 +46,37 @@ class DataCollator:
             max_length=self.max_length,
             return_tensors="pt",
         )
-        rejected_encoded = self.tokenizer(
-            rejected_texts,
+        reject_encoded = self.tokenizer(
+            reject_texts,
             padding=True,
             truncation=self.max_length is not None,
             max_length=self.max_length,
             return_tensors="pt",
         )
+        # response mask is the XOR of extended prompt_mask and chosen_att_mask
+        # extend the prompt_attention_mask by 0s to chosen / rejected size
+        prompt_mask = prompt_encoded["attention_mask"]  # B, T_p
+        chosen_att_mask = chosen_encoded["attention_mask"]  # B, T_c
+        reject_att_mask = reject_encoded["attention_mask"]  # B, T_r
+
+        B, T_p = prompt_mask.shape  # B, T_p
+
+        chosen_zero_mask = torch.zeros_like(chosen_att_mask[:, T_p:])  # B, T_c - T_p
+        reject_zero_mask = torch.zeros_like(reject_att_mask[:, T_p:])  # B, T_r - T_p
+        chosen_resp_mask = torch.cat([prompt_mask, chosen_zero_mask], dim=-1)  # B, T_c
+        chosen_resp_mask ^= chosen_att_mask
+        reject_resp_mask = torch.cat([prompt_mask, reject_zero_mask], dim=-1)  # B, T_r
+        reject_resp_mask ^= reject_att_mask
 
         return {
             "prompt_input_ids": prompt_encoded["input_ids"],
             "chosen_input_ids": chosen_encoded["input_ids"],
-            "rejected_input_ids": rejected_encoded["input_ids"],
+            "rejected_input_ids": reject_encoded["input_ids"],
             "prompt_attention_mask": prompt_encoded["attention_mask"],
             "chosen_attention_mask": chosen_encoded["attention_mask"],
-            "rejected_attention_mask": rejected_encoded["attention_mask"],
-            "prompt_len": torch.tensor(
-                [f["prompt_len"] for f in features], dtype=torch.long
-            ),
+            "rejected_attention_mask": reject_encoded["attention_mask"],
+            "chosen_response_mask": chosen_resp_mask,
+            "rejected_response_mask": reject_resp_mask,
         }
 
 
@@ -225,6 +238,34 @@ class DataManager:
         else:
             return None
 
+    def _is_valid_length(self, prompt_str: str, chosen_str: str, reject_str: str) -> bool:
+        """
+        Checks the lenght of tokenized example to see if it's under the length limits.
+        Tokenizes with add_special_tokens=True and truncation=False
+        to get accurate length (matches actual tokenization)
+        Returns:
+            True if the example is under the length limits, False otherwise.
+        """
+        if self.max_prompt_length is None and self.max_length is None:
+            return True
+
+        if self.max_prompt_length is not None:
+            prompt_tokens = self.tokenizer(prompt_str, truncation=False)
+            prompt_len = len(prompt_tokens["input_ids"])
+            if prompt_len > self.max_prompt_length:
+                return False
+
+        if self.max_length is not None:
+            chosen_tokens = self.tokenizer(chosen_str, truncation=False)
+            chosen_len = len(chosen_tokens["input_ids"])
+            if chosen_len > self.max_length:
+                return False
+            reject_tokens = self.tokenizer(reject_str, truncation=False)
+            reject_len = len(reject_tokens["input_ids"])
+            if reject_len > self.max_length:
+                return False
+        return True
+
     def _process_helper(self, examples):
         """
         Apply chat templates and filter invalid/long examples.
@@ -235,79 +276,38 @@ class DataManager:
             "prompt_text": [],
             "chosen_text": [],
             "rejected_text": [],
-            "prompt_len": [],
         }
 
         for i in range(len(examples["prompt"])):
-            current_prompt_messages = examples["prompt"][i]
-            current_chosen_messages = examples["chosen"][i]
-            current_rejected_messages = examples["rejected"][i]
+            curr_prompt = examples["prompt"][i]
+            curr_chosen = examples["chosen"][i]
+            curr_reject = examples["rejected"][i]
 
-            current_prompt_messages = self._ensure_message_list(
-                current_prompt_messages, is_prompt=True
-            )
-            current_chosen_messages = self._ensure_message_list(current_chosen_messages)
-            current_rejected_messages = self._ensure_message_list(
-                current_rejected_messages
-            )
+            curr_prompt = self._ensure_message_list(curr_prompt, is_prompt=True)
+            curr_chosen = self._ensure_message_list(curr_chosen)
+            curr_reject = self._ensure_message_list(curr_reject)
 
-            if (
-                current_prompt_messages is None
-                or current_chosen_messages is None
-                or current_rejected_messages is None
-            ):
+            if curr_prompt is None or curr_chosen is None or curr_reject is None:
                 continue
-
-            prompt_with_assistant_turn = current_prompt_messages + [
-                {"role": "assistant", "content": ""}
-            ]
 
             prompt_str = self.tokenizer.apply_chat_template(
-                prompt_with_assistant_turn, tokenize=False, add_generation_prompt=True
+                curr_prompt, tokenize=False, add_generation_prompt=True
+            )
+            chosen_str = (
+                self.tokenizer.apply_chat_template(curr_chosen, tokenize=False)
+                + self.tokenizer.eos_token
+            )
+            reject_str = (
+                self.tokenizer.apply_chat_template(curr_reject, tokenize=False)
+                + self.tokenizer.eos_token
             )
 
-            chosen_str = self.tokenizer.apply_chat_template(
-                current_chosen_messages, tokenize=False
-            )
-            rejected_str = self.tokenizer.apply_chat_template(
-                current_rejected_messages, tokenize=False
-            )
-
-            # Tokenize just to check length for filtering
-            # Use add_special_tokens=True to get accurate length (matches actual tokenization)
-            prompt_encoded = self.tokenizer(
-                prompt_str,
-                truncation=False,
-            )
-            chosen_encoded = self.tokenizer(
-                chosen_str,
-                truncation=False,
-            )
-            rejected_encoded = self.tokenizer(
-                rejected_str,
-                truncation=False,
-            )
-
-            if (
-                (
-                    self.max_prompt_length is not None
-                    and len(prompt_encoded["input_ids"]) > self.max_prompt_length
-                )
-                or (
-                    self.max_length is not None
-                    and len(chosen_encoded["input_ids"]) > self.max_length
-                )
-                or (
-                    self.max_length is not None
-                    and len(rejected_encoded["input_ids"]) > self.max_length
-                )
-            ):
-                continue
+            if not self._is_valid_length(prompt_str, chosen_str, reject_str):
+                continue  # Skip this example if it's too long
 
             processed["prompt_text"].append(prompt_str)
             processed["chosen_text"].append(chosen_str)
-            processed["rejected_text"].append(rejected_str)
-            processed["prompt_len"].append(len(prompt_encoded["input_ids"]))
+            processed["rejected_text"].append(reject_str)
 
         return processed
 

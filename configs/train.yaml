@@ -1,11 +1,13 @@
 # PEPO Ensemble Training Configuration
 defaults:
-  - model: smollm
+  - model: llama_instruct
   - dataset: ultrafeedback
   - _self_
 
 model:
   num_networks: ${L}
+  compile: false
+
 dataset:
   n_splits: ${model.num_networks}
   train_split: 0.99
@@ -64,12 +66,13 @@ log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (c
 
 L: 4 # Number of submodels in the ensemble
 max_epochs: 8
-acc_steps: 1 # acc_steps * batch_size should stay constant
-batch_size: 8
+acc_steps: 2 # acc_steps * batch_size should stay constant
+batch_size: 4
+eval_batch_size: null # if null will be set to 4x batch_size
 
 # Early stopping configuration
 early_stopping:
-  patience: 1  # Number of epochs to wait before stopping if no improvement. null = disabled
+  patience: null  # Number of epochs to wait before stopping if no improvement. null = disabled
   min_delta: 0.001  # Minimum change to qualify as an improvement
 
 # note: if L>gpus, decrease batch_size to batch_size/(ceil(L/gpus)) and increase acc_steps to ceil(L/gpus)
