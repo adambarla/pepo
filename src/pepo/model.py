@@ -75,8 +75,8 @@ class PEPOModel:
             target_modules=lora_target_modules,
         )
 
-        self.models = self._load_models()
         self.tokenizer = self._init_tokenizer()
+        self.models = self._load_models()
 
         if self.logger:
             self.logger.info(
@@ -90,11 +90,10 @@ class PEPOModel:
         """
         tokenizer_id = self.tokenizer_id or self.model_id
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
+
         # if pad token is not set, add a new one
         if tokenizer.pad_token is None:
             tokenizer.add_special_tokens({"pad_token": "<pad>"})
-            for model in self.models:
-                model.resize_token_embeddings(len(tokenizer))
             if self.logger:
                 self.logger.info("Added new pad token <pad> to tokenizer")
 
@@ -151,6 +150,15 @@ class PEPOModel:
             device_map=device_map,
         )
         base_model.config.use_cache = False
+        base_model.resize_token_embeddings(len(self.tokenizer))
+        base_model.config.vocab_size = len(self.tokenizer)
+        pad_token_id = self.tokenizer.pad_token_id
+        embedding_layer = base_model.get_input_embeddings()
+        embedding_layer.weight.data[pad_token_id].zero_()
+
+        output_embeddings = base_model.get_output_embeddings()
+        output_embeddings.weight.data[pad_token_id].zero_()
+
         if load_from_hub:
             repo_id = self.hub_manager.get_repo_id(self._get_submodel_name(model_idx))
             model = PeftModel.from_pretrained(base_model, repo_id, is_trainable=True)
@@ -273,6 +281,8 @@ class PEPOModel:
         eval_loss = 0.0
         num_eval_batches = 0
         total_eval_batches = len(eval_loader)
+        eval_prob_chosen_sum = 0.0
+        eval_prob_rejected_sum = 0.0
 
         with torch.no_grad():
             for eval_step, eval_batch in enumerate(eval_loader):
@@ -317,6 +327,11 @@ class PEPOModel:
                 eval_loss += batch_eval_loss
                 num_eval_batches += 1
 
+                prob_chosen = torch.exp(log_probs_chosen).mean().item()
+                prob_rejected = torch.exp(log_probs_rejected).mean().item()
+                eval_prob_chosen_sum += prob_chosen
+                eval_prob_rejected_sum += prob_rejected
+
                 if (
                     self.logger
                     and (eval_step + 1) % max(1, total_eval_batches // 10) == 0
@@ -327,7 +342,30 @@ class PEPOModel:
                         f"Current Avg Loss: {current_avg_loss:.4f}"
                     )
 
+                if (
+                    wandb_handler is not None
+                    and (eval_step + 1) % max(1, total_eval_batches // 10) == 0
+                ):
+                    current_avg_prob_chosen = eval_prob_chosen_sum / num_eval_batches
+                    current_avg_prob_rejected = eval_prob_rejected_sum / num_eval_batches
+                    wandb_handler.log(
+                        {
+                            "eval/prob_chosen": prob_chosen,
+                            "eval/prob_rejected": prob_rejected,
+                            "eval/avg_prob_chosen": current_avg_prob_chosen,
+                            "eval/avg_prob_rejected": current_avg_prob_rejected,
+                            "train/epoch": epoch,
+                        },
+                        step=global_step,
+                    )
+
         avg_eval_loss = eval_loss / num_eval_batches if num_eval_batches > 0 else 0.0
+        avg_eval_prob_chosen = (
+            eval_prob_chosen_sum / num_eval_batches if num_eval_batches > 0 else 0.0
+        )
+        avg_eval_prob_rejected = (
+            eval_prob_rejected_sum / num_eval_batches if num_eval_batches > 0 else 0.0
+        )
 
         if self.logger:
             self.logger.info(
@@ -339,6 +377,8 @@ class PEPOModel:
             wandb_handler.log(
                 {
                     "eval/loss": avg_eval_loss,
+                    "eval/avg_prob_chosen": avg_eval_prob_chosen,
+                    "eval/avg_prob_rejected": avg_eval_prob_rejected,
                     "train/epoch": epoch,
                 },
                 step=global_step,
@@ -428,6 +468,8 @@ class PEPOModel:
             epoch_train_loss = 0.0
             num_train_batches = 0
             steps_per_epoch = len(train_loader) // gradient_accumulation_steps
+            epoch_prob_chosen_sum = 0.0
+            epoch_prob_rejected_sum = 0.0
 
             for step, batch in enumerate(train_loader):
                 batch = {k: v.to(device) for k, v in batch.items()}
@@ -484,6 +526,11 @@ class PEPOModel:
                     num_train_batches += 1
                     current_lr = scheduler.get_last_lr()[0]
 
+                    prob_chosen = torch.exp(log_probs_chosen).mean().item()
+                    prob_rejected = torch.exp(log_probs_rejected).mean().item()
+                    epoch_prob_chosen_sum += prob_chosen
+                    epoch_prob_rejected_sum += prob_rejected
+
                     if self.logger and global_step % max(1, steps_per_epoch // 10) == 0:
                         epoch_string_length = len(str(n_epochs))
                         step_string_length = len(str(steps_per_epoch))
@@ -500,12 +547,24 @@ class PEPOModel:
                                 "train/learning_rate": current_lr,
                                 "train/epoch": epoch + 1,
                                 "train/step": global_step,
+                                "train/prob_chosen": prob_chosen,
+                                "train/prob_rejected": prob_rejected,
                             },
                             step=global_step,
                         )
 
             avg_train_loss = (
                 epoch_train_loss / num_train_batches if num_train_batches > 0 else 0.0
+            )
+            avg_prob_chosen = (
+                epoch_prob_chosen_sum / num_train_batches
+                if num_train_batches > 0
+                else 0.0
+            )
+            avg_prob_rejected = (
+                epoch_prob_rejected_sum / num_train_batches
+                if num_train_batches > 0
+                else 0.0
             )
 
             if self.logger:
@@ -518,6 +577,8 @@ class PEPOModel:
                 wandb_handler.log(
                     {
                         "train/avg_loss": avg_train_loss,
+                        "train/avg_prob_chosen": avg_prob_chosen,
+                        "train/avg_prob_rejected": avg_prob_rejected,
                         "train/epoch": epoch + 1,
                     },
                     step=global_step,
@@ -720,7 +781,7 @@ class PEPOModel:
         max_length: int = 1024,
         use_ensamble: bool = True,
         apply_chat_template: bool = True,
-    ) -> list[str]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
 
         if self.logger:
             self.logger.info(
@@ -760,7 +821,7 @@ class PEPOModel:
                 log_probs = self.predict_base_model(input_ids, attention_mask)
             min_probs = torch.exp(log_probs)
 
-            missing_token_id = self.tokenizer.vocab_size
+            missing_token_id = len(self.tokenizer)
             missing_probs = torch.clamp(1 - torch.sum(min_probs, dim=-1), min=0.0)
             min_probs = torch.cat([min_probs, missing_probs.unsqueeze(-1)], dim=-1)
 
@@ -796,11 +857,11 @@ class PEPOModel:
             )
 
         self.tokenizer.padding_side = prev_padding_side
-        return input_ids
+        return input_ids, attention_mask
 
     def generate_base_model(
         self, prompts: list[str], max_length: int = 1024, apply_chat_template: bool = True
-    ) -> list[str]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.generate(
             prompts,
             max_length,

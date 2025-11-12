@@ -19,10 +19,18 @@ OmegaConf.register_new_resolver(
 
 def chat(model: PEPOModel):
     # prompts = ["Hello, how are you?", "What is the capital of France?"]
-    prompts = ["Hello, how are you?"]
-    model.generate_base_model(prompts, max_length=200)
-    model.generate_base_model(prompts, max_length=200, apply_chat_template=False)
-    model.generate(prompts, max_length=200)
+    prompts = ["Hello, how are you? I am Adam. What is your name?"]
+    # model.generate_base_model(prompts, max_length=200)
+    # model.generate_base_model(prompts, max_length=200, apply_chat_template=False)
+    # model.generate(prompts, max_length=200)
+    # model.generate(prompts, max_length=200, apply_chat_template=False)
+    #
+    # print("--------------------------------")
+    # model.generate_base_model(prompts, max_length=1000)
+
+    input_ids, attention_mask = model.generate(prompts, max_length=1000)
+    print(f"Input ids: {input_ids}")
+    print(f"Attention mask: {attention_mask}")
 
 
 @hydra.main(config_path="../configs", config_name="chat.yaml", version_base="1.1")
