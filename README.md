@@ -13,44 +13,31 @@ chmod +x dev_setup.sh
 
 ### CSCS Cluster (Clariden)
 
-Clariden nodes have `aarch64` architecture, which makes it difficult to install PyTorch with CUDA support. Follow the instructions below to install the dependencies.
+Connect to `clariden.cscs.ch` (may require proxy via `ela.cscs.ch`).
 
-#### Prerequisites
+**Get interactive session:**
+```bash
+./scripts/slurm/get_interactive.sh  # Requests 4 GPUs for 12 hours
+./scripts/activate.sh                # Activates uenv and venv
+```
 
-Connect to Clariden: SSH to `clariden.cscs.ch` (may require proxy via `ela.cscs.ch`)
-Request an interactive session with GPUs:
+**Additional shells on same node:**
+```bash
+./scripts/slurm/connect_to_node.sh  # Shows menu of active sessions
+```
+
+**First-time setup:**
 ```bash
 ./scripts/slurm/get_interactive.sh
-```
-This script requests 4 GPUs for 1 hour. Adjust the script if you need different resources.
-
-#### Installation Steps
-
-Start the PyTorch user environment (uenv) and create a virtual environment with system site packages.
-```bash
-uenv image pull pytorch/v2.6.0:v1
-uenv start pytorch/v2.6.0:v1 --view=default
-rm -rf .venv # remove existing virtual environment if present
+./scripts/activate.sh
+rm -rf .venv
 uv venv -p $(which python) --system-site-packages .venv
-```
-Using `--system-site-packages` allows access to PyTorch from the uenv environment.
-This provides PyTorch 2.6.0 with CUDA support (Python 3.13) pre-installed.
-
-Activate the virtual environment and install the project dependencies:
-```bash
 source .venv/bin/activate
 uv pip install -e .
-```
-Verify installation:
-```bash
 python -c "import torch; print(f'Torch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
 ```
-You should see `Torch: 2.6.0` and `CUDA: True`.
 
-#### Notes
-
-- The uenv environment must be active before creating the virtual environment to ensure the correct Python interpreter is used.
-- The uenv provides PyTorch with CUDA 12.6 support for the GH200 GPUs on Clariden.
+The uenv provides PyTorch 2.6.0 with CUDA 12.6 support for GH200 GPUs.
 
 ### Other Machines
 
