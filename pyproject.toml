@@ -25,6 +25,7 @@ url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [tool.uv.sources]
+torch = { index = "pytorch" }
 
 [dependency-groups]
 dev = [
@@ -35,4 +36,3 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-torch = { index = "pytorch" }
