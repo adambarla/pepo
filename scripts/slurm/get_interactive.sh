@@ -17,8 +17,7 @@ srun --account=infra01 --nodes=1 --time=12:00:00 --gpus=4 --job-name="pepo_inter
   echo \"Or manually with:\" >&2
   echo \"  srun --jobid=\$SLURM_JOB_ID --overlap --pty bash\" >&2
   echo \"\" >&2
-  echo \"To activate uenv and venv, run:\" >&2
-  echo \"  ./scripts/activate.sh\" >&2
+  echo \"Use 'uv run' to execute scripts directly.\" >&2
   echo \"\" >&2
 
   # Start interactive bash

@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .utils import DataManager, DeviceManager, HubManager, Logger, WandbHandler
@@ -77,6 +78,7 @@ class PEPOModel:
             task_type=lora_task_type,
             target_modules=lora_target_modules,
         )
+        self.epochs_per_network = [0.0] * self.num_networks
 
         self.tokenizer = self._init_tokenizer()
         self.models = self._load_models()
@@ -115,6 +117,17 @@ class PEPOModel:
     def get_tokenizer(self):
         return self.tokenizer
 
+    def get_min_epochs(self) -> float:
+        """
+        Get the minimum number of epochs across all networks in the ensemble.
+
+        Returns:
+            Minimum epochs. Returns inf if any network has unknown epochs, 0 if all are newly instantiated.
+        """
+        if not self.epochs_per_network:
+            return 0.0
+        return min(self.epochs_per_network)
+
     def _get_model_name(self) -> str:
         """
         Generate model-specific repository name for the ensemble.
@@ -152,9 +165,14 @@ class PEPOModel:
 
         model_name = self._get_submodel_name(model_idx)
         if load_from_hub:
-            model = self.hub_manager.load_model(base_model, model_name, is_trainable=True)
+            model = self.hub_manager.load_model(base_model, model_name)
+            if self.hub_manager.load_epochs is not None:
+                self.epochs_per_network[model_idx] = float(self.hub_manager.load_epochs)
+            else:
+                self.epochs_per_network[model_idx] = float("inf")
         else:
             model = get_peft_model(base_model, self.lora_config)
+            self.epochs_per_network[model_idx] = 0.0
             if self.logger:
                 trainable, total = model.get_nb_trainable_parameters()
                 trainable = trainable / 1000000
@@ -172,15 +190,6 @@ class PEPOModel:
         """
         models = []
         load_from_hub = self.hub_manager.should_load_from_hub
-        for model_idx in range(self.num_networks):
-            if not load_from_hub:
-                break
-            if not self.hub_manager.model_exists(self._get_submodel_name(model_idx)):
-                if self.logger:
-                    self.logger.info(
-                        f"Submodel {self._get_submodel_name(model_idx)} does not exist on Hub, loading from scratch"
-                    )
-                load_from_hub = False
 
         for model_idx in range(self.num_networks):
             models.append(self._load_model(model_idx, load_from_hub))
@@ -494,6 +503,11 @@ class PEPOModel:
                     step=global_step,
                 )
 
+            self.epochs_per_network[model_idx] += 1
+            self._push_model(
+                model_idx, epochs=int(self.epochs_per_network[model_idx])
+            )  # push with epoch suffix
+
             eval_loss = self._eval_model(
                 model_idx=model_idx,
                 model=model,
@@ -504,8 +518,6 @@ class PEPOModel:
                 global_step=global_step,
                 wandb_handler=wandb_handler,
             )
-
-            self._push_model(model_idx, epochs=epoch + 1)  # push with epoch suffix
 
             if es_enabled:
                 if eval_loss < best_eval_loss - es_min_delta:
@@ -607,14 +619,16 @@ class PEPOModel:
 
         self._push_models()
 
-    def _predict(
+    def _predict_submodel(
         self,
         model: AutoModelForCausalLM,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        input_ids = input_ids.to(model.device)
-        attention_mask = attention_mask.to(model.device)
+        """
+        Predict log probabilities assuming input_ids and attention_mask are already on model.device.
+        This avoids unnecessary device transfers during generation.
+        """
         outputs = model(input_ids=input_ids, attention_mask=attention_mask)
         logits = outputs.logits  # (B, T, V)
         last_logits = logits[:, -1, :]
@@ -622,23 +636,28 @@ class PEPOModel:
         return log_probs
 
     def predict(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor = None
+        self,
+        device_input_ids: list[torch.Tensor],
+        device_attention_masks: list[torch.Tensor],
     ) -> torch.Tensor:
-        if len(input_ids.shape) == 1:
-            input_ids = input_ids.unsqueeze(0)
-        if len(input_ids.shape) != 2:
-            raise ValueError("input_ids must be a 2D tensor")
+        """
+        Predict using device-resident tensors. Each model uses its own input_ids tensor
+        that stays on its device throughout generation, avoiding repeated CPU-GPU transfers.
 
-        if attention_mask is None:
-            attention_mask = (input_ids != self.tokenizer.pad_token_id).float()
+        Args:
+            device_input_ids: List of input_ids tensors, one per model, each on its model's device
+            device_attention_masks: List of attention_mask tensors, one per model, each on its model's device
 
+        Returns:
+            Minimum log probabilities across ensemble (on CPU)
+        """
         log_probs_ensemble: list[Optional[torch.Tensor]] = [None] * self.num_networks
 
         def predict_log_probs(model_idx, model, input_ids, attention_mask):
             with torch.no_grad():
                 model.eval()
-                log_probs = self._predict(model, input_ids, attention_mask)
-                log_probs_ensemble[model_idx] = log_probs.cpu()
+                log_probs = self._predict_submodel(model, input_ids, attention_mask)
+                log_probs_ensemble[model_idx] = log_probs
 
         threads = []
         for model_idx in range(self.num_networks):
@@ -647,8 +666,8 @@ class PEPOModel:
                 args=(
                     model_idx,
                     self.models[model_idx],
-                    input_ids,
-                    attention_mask,
+                    device_input_ids[model_idx],
+                    device_attention_masks[model_idx],
                 ),
             )
             thread.start()
@@ -657,19 +676,17 @@ class PEPOModel:
         for thread in threads:
             thread.join()
 
-        log_probs_list: list[torch.Tensor] = [
-            lp for lp in log_probs_ensemble if lp is not None
-        ]
-        if len(log_probs_list) != self.num_networks:
+        if len(log_probs_ensemble) != self.num_networks:
             raise RuntimeError(
-                f"Expected {self.num_networks} log prob tensors, got {len(log_probs_list)}"
+                f"Expected {self.num_networks} log prob tensors, got {len(log_probs_ensemble)}"
             )
+        if len(log_probs_ensemble) == 1:
+            return log_probs_ensemble[0]
 
-        log_probs_tensor: torch.Tensor = torch.stack(log_probs_list, dim=0)  # (L, B, V)
-
-        # eos_probs = log_probs_tensor[:, 0, self.tokenizer.eos_token_id]
-        # eos_probs = torch.exp(eos_probs)
-        # print(f"\nEOS token prob: min={eos_probs.min().item():.2f}, max={eos_probs.max().item():.2f}, mean={eos_probs.mean().item():.2f}, std={eos_probs.std().item():.2f}")
+        log_probs_ensemble = [log_probs.cpu() for log_probs in log_probs_ensemble]
+        log_probs_tensor: torch.Tensor = torch.stack(
+            log_probs_ensemble, dim=0
+        )  # (L, B, V)
         min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
         return min_log_probs
 
@@ -685,15 +702,17 @@ class PEPOModel:
             attention_mask = (input_ids != self.tokenizer.pad_token_id).float()
 
         model = self.models[0]
+        device = torch.device(self.device_manager.get_device_for_model(0))
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
         # disable adapter
         with torch.no_grad():
             with model.disable_adapter():
                 model.eval()
-                log_probs = self._predict(model, input_ids, attention_mask)  # (B, V)
-        # eos_probs = log_probs[0, self.tokenizer.eos_token_id]
-        # eos_probs = torch.exp(eos_probs)
-        # print(f"EOS token prob: min={eos_probs.min().item():.2f}, max={eos_probs.max().item():.2f}, mean={eos_probs.mean().item():.2f}, std={eos_probs.std().item():.2f}")
-        return log_probs
+                log_probs = self._predict_submodel(
+                    model, input_ids, attention_mask
+                )  # (B, V)
+        return log_probs.cpu()
 
     def _top_p_sampling(self, logits, top_p=0.9, temperature=1.0):
         """
@@ -726,10 +745,10 @@ class PEPOModel:
 
     def generate(
         self,
-        prompts: list[str],
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
         max_length: int = 1024,
         use_ensamble: bool = True,
-        apply_chat_template: bool = True,
         sample_missing_token: bool = False,
         greedy_sampling: bool = False,
         top_p_sampling: bool = True,
@@ -738,42 +757,36 @@ class PEPOModel:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if greedy_sampling and top_p_sampling:
             raise ValueError("Greedy sampling and top-p sampling cannot be used together")
-        if self.logger:
-            self.logger.info(
-                f"Generating ensemble={use_ensamble}, template={apply_chat_template}"
-            )
+        if attention_mask is None:
+            attention_mask = (input_ids != self.tokenizer.pad_token_id).float()
 
-        if apply_chat_template:
-            formated_prompts = []
-            for prompt in prompts:
-                formatted_prompt = [
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": ""},
-                ]
-                formated_prompt = self.tokenizer.apply_chat_template(
-                    formatted_prompt, tokenize=False, add_generation_prompt=True
-                )
-                formated_prompts.append(formated_prompt)
-        else:
-            formated_prompts = prompts
+        batch_size = input_ids.shape[0]
 
-        prev_padding_side = self.tokenizer.padding_side
-        self.tokenizer.padding_side = "left"
+        # Initialize device-resident tensors once at the start
+        # This avoids repeated CPU-GPU transfers as sequences grow
+        device_input_ids = []
+        device_attention_masks = []
+        for model_idx in range(self.num_networks):
+            device = torch.device(self.device_manager.get_device_for_model(model_idx))
+            device_input_ids.append(input_ids.to(device))
+            device_attention_masks.append(attention_mask.to(device))
 
-        inputs = self.tokenizer(
-            formated_prompts,
-            return_tensors="pt",
-            padding=True,
-        )
-        input_ids = inputs["input_ids"]
-        attention_mask = inputs["attention_mask"]
-        stop_signal = torch.zeros(input_ids.shape[0], dtype=torch.bool)
+        stop_signal = torch.zeros(batch_size, dtype=torch.bool).cpu()
 
-        for i in range(max_length):
+        pbar = tqdm(range(max_length - input_ids.shape[1]))
+        for i in pbar:
             if use_ensamble:
-                log_probs = self.predict(input_ids, attention_mask)
+                log_probs = self.predict(device_input_ids, device_attention_masks)
             else:
-                log_probs = self.predict_base_model(input_ids, attention_mask)
+                # For base model, use the first device's tensors
+                model = self.models[0]
+                with torch.no_grad():
+                    with model.disable_adapter():
+                        model.eval()
+                        log_probs = self._predict_submodel(
+                            model, device_input_ids[0], device_attention_masks[0]
+                        )
+                log_probs = log_probs
             min_probs = torch.exp(log_probs)
 
             # TODO(adam): handle top k sampling, temperature sampling, etc.
@@ -784,8 +797,12 @@ class PEPOModel:
                 missing_token_id = len(self.tokenizer)
                 missing_probs = torch.clamp(1 - torch.sum(min_probs, dim=-1), min=0.0)
                 min_probs = torch.cat([min_probs, missing_probs.unsqueeze(-1)], dim=-1)
-                missing_mask = torch.ones(input_ids.shape[0], dtype=torch.bool)
-                sampled_token_ids = torch.zeros(input_ids.shape[0], dtype=torch.long)
+                missing_mask = torch.ones(
+                    batch_size, dtype=torch.bool, device=min_probs.device
+                )
+                sampled_token_ids = torch.zeros(
+                    batch_size, dtype=torch.long, device=min_probs.device
+                )
                 while True:
                     new_sampled_token_ids = torch.multinomial(
                         min_probs[missing_mask], num_samples=1
@@ -807,11 +824,27 @@ class PEPOModel:
                     min_probs = min_probs / torch.sum(min_probs, dim=-1, keepdim=True)
                     sampled_token_ids = torch.multinomial(min_probs, num_samples=1)
 
-            input_ids = torch.cat([input_ids, sampled_token_ids.unsqueeze(-1)], dim=1)
-            attention_mask = torch.cat(
-                [attention_mask, torch.ones_like(sampled_token_ids).unsqueeze(-1)], dim=1
+            stop_signal = stop_signal.to(device=sampled_token_ids.device) | (
+                sampled_token_ids == self.tokenizer.eos_token_id
             )
-            stop_signal = stop_signal | (sampled_token_ids == self.tokenizer.eos_token_id)
+            # Append new tokens directly on each device to avoid CPU-GPU transfers
+            for model_idx in range(self.num_networks):
+                device = torch.device(self.device_manager.get_device_for_model(model_idx))
+                new_token_tensor = sampled_token_ids.to(device).unsqueeze(-1)
+                device_input_ids[model_idx] = torch.cat(
+                    [device_input_ids[model_idx], new_token_tensor], dim=1
+                )
+                # new maxk should be inverse stop signal
+                device_attention_masks[model_idx] = torch.cat(
+                    [
+                        device_attention_masks[model_idx],
+                        ~stop_signal.unsqueeze(-1).to(device),
+                    ],
+                    dim=1,
+                )
+
+            pbar.set_postfix({"stopped": f"{stop_signal.sum().item()}/{batch_size}"})
+            pbar.update(1)
 
             if sampled_token_ids[0] == self.tokenizer.eos_token_id:
                 if self.logger:
@@ -820,18 +853,21 @@ class PEPOModel:
                 break
         if self.logger:
             self.logger.debug(
-                f"Generated sequence idx=0:\n{self.tokenizer.decode(input_ids[0], skip_special_tokens=True)}"
+                f"Generated sequence idx=0:\n{self.tokenizer.decode(device_input_ids[0].cpu()[0], skip_special_tokens=True)}"
             )
 
-        self.tokenizer.padding_side = prev_padding_side
-        return input_ids, attention_mask
+        # Return the first device's tensors (move to CPU for consistency with original API)
+        return device_input_ids[0].cpu(), device_attention_masks[0].cpu()
 
     def generate_base_model(
-        self, prompts: list[str], max_length: int = 1024, apply_chat_template: bool = True
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        max_length: int = 1024,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.generate(
-            prompts,
-            max_length,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_length=max_length,
             use_ensamble=False,
-            apply_chat_template=apply_chat_template,
         )

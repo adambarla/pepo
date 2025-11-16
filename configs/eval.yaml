@@ -1,0 +1,50 @@
+# General Evaluation Configuration
+defaults:
+  - model: llama_instruct
+  - evaluator: alpaca
+  - logger: default
+  - _self_
+
+model:
+  num_networks: ${L}
+
+# Device configuration
+device:
+  _target_: pepo.utils.device.DeviceManager
+  gpu_ids: null  # list of GPU IDs (null = auto-detect), e.g. [0, 1, 2, 3]
+
+# HuggingFace Hub configuration
+hub:
+  _target_: pepo.utils.hub.HubManager
+  base_dir: "PessimisticDPO"  # HuggingFace username/organization
+  load: true  # Load models from hub for inference
+  push: false
+  load_epochs: 2 # load the model after 1 epoch
+  load_trainable: false # load the model with trainable parameters
+
+evaluator:
+  num_samples: ${num_samples}
+  output_dir: ${output_dir}
+  generator:
+    max_new_tokens: ${max_new_tokens}
+    batch_size: ${batch_size}
+
+# Logger configuration (can override defaults from logger/default.yaml)
+logger:
+  name: "eval"
+
+log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
+
+L: 1 # Number of submodels in the ensemble
+
+# Generator configuration can be overridden in evaluator config (evaluator/alpaca.yaml)
+# or via command line: evaluator.generator.max_new_tokens=10
+
+# Output directory for saving generations (relative to project root)
+output_dir: "eval_outputs"  # Directory to save generated responses (relative to project root)
+force_generate: false  # If true, regenerate responses even if they exist
+num_samples: null # null = use full dataset
+max_new_tokens: 1000
+batch_size: 100
+
+seed: 42

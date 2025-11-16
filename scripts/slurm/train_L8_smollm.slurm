@@ -12,7 +12,4 @@ cd ~/PEPO
 ALPHA=${1:-0.1}
 BETA=${2:-0.1}
 
-uenv run pytorch/v2.6.0:v1 --view=default -- bash << EOF
-source .venv/bin/activate
-python scripts/train.py L=8 acc_steps=2 batch_size=4 model=smollm model.alpha=${ALPHA} model.beta=${BETA}
-EOF
+uv run scripts/train.py L=8 acc_steps=2 batch_size=4 model=smollm model.alpha=${ALPHA} model.beta=${BETA}

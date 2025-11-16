@@ -23,6 +23,7 @@ class HubManager:
         load: bool = False,
         push: bool = True,
         load_epochs: Optional[int] = None,
+        load_trainable: bool = True,
         logger: Optional[Logger] = None,
         hf_token: Optional[str] = None,
     ):
@@ -41,6 +42,7 @@ class HubManager:
         self.should_load = load
         self.should_push = push
         self.load_epochs = load_epochs
+        self.load_trainable = load_trainable
         self.logger = logger
         self.api = HfApi()
         self._authenticate(hf_token)
@@ -79,28 +81,32 @@ class HubManager:
                 self.logger.warning(f"Model {model_name} not found in hub: {e}")
             return False
 
-    def get_repo_id(
-        self, model_name: str, epochs: Optional[int] = None, is_trainable: bool = True
-    ) -> str:
+    def get_repo_id(self, model_name: str, epochs: Optional[int] = None) -> str:
         if epochs is not None:
             return f"{self.base_dir}/{model_name}-e{epochs}"
         else:
             return f"{self.base_dir}/{model_name}"
 
     def load_model(
-        self, base_model: AutoModelForCausalLM, model_name: str, is_trainable: bool = True
+        self, base_model: AutoModelForCausalLM, model_name: str
     ) -> AutoModelForCausalLM:
         if not self.model_exists(model_name, self.load_epochs):
             raise ValueError(f"Model {model_name} not found in hub")
         repo_id = self.get_repo_id(model_name, self.load_epochs)
-        model = PeftModel.from_pretrained(base_model, repo_id, is_trainable=is_trainable)
+        model = PeftModel.from_pretrained(
+            base_model, repo_id, is_trainable=self.load_trainable
+        )
 
-        if self.logger:
+        if self.logger and self.load_trainable:
             trainable, total = model.get_nb_trainable_parameters()
             trainable = trainable / 1000000
             total = total / 1000000
             self.logger.info(
                 f"Loaded model from {repo_id} with {trainable:.2f}M trainable parameters out of {total:.2f}M total parameters ({trainable/total*100:.2f}%)"
+            )
+        elif self.logger:
+            self.logger.info(
+                f"Loaded model from {repo_id} without trainable parameters (set hub.load_trainable=true to load trainable parameters)"
             )
         return model
 

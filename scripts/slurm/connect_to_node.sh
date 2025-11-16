@@ -73,7 +73,6 @@ fi
 
 # Get a new shell on the allocated node
 echo ""
-echo "To activate uenv and venv, run:"
-echo "  ./scripts/activate.sh"
+echo "Use 'uv run' to execute scripts directly."
 echo ""
 srun --jobid="$JOB_ID" --overlap --pty bash

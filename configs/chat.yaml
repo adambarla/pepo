@@ -1,7 +1,8 @@
 # PEPO Ensemble Training Configuration
 defaults:
-  # - model: llama_instruct
-  - model: smollm
+  - model: llama_instruct
+  # - model: smollm
+  - logger: default
   - _self_
 
 model:
@@ -23,16 +24,9 @@ hub:
 # Reproducibility
 seed: 42
 
-# Logging configuration
+# Logger configuration (can override defaults from logger/default.yaml)
 logger:
-  _target_: pepo.utils.logger.Logger
   name: "chat"
-  log_file: null
-  log_dir: "logs"
-  level: ${log_level}
-  format_string: null
-  date_format: null
-
 
 log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
 

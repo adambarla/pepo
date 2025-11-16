@@ -2,6 +2,7 @@
 defaults:
   - model: llama_instruct
   - dataset: ultrafeedback
+  - logger: default
   - _self_
 
 model:
@@ -41,15 +42,9 @@ hub:
 # Reproducibility
 seed: 42
 
-# Logging configuration
+# Logger configuration (can override defaults from logger/default.yaml)
 logger:
-  _target_: pepo.utils.logger.Logger
   name: "train"
-  log_file: null
-  log_dir: "logs"
-  level: ${log_level}
-  format_string: null
-  date_format: null
 
 # Weights & Biases configuration
 wandb:

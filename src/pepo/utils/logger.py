@@ -152,7 +152,10 @@ class WandbHandler:
         self._lazy_init = _lazy_init
         self.logger = logger
 
-        self.run_id = wandb.util.generate_id()
+        if wandb is not None:
+            self.run_id: Optional[str] = wandb.util.generate_id()  # type: ignore[attr-defined]
+        else:
+            self.run_id = None
 
         if enabled and not _lazy_init:
             self.init_run()
@@ -174,6 +177,11 @@ class WandbHandler:
         if self.wandb is None:
             if self.logger is not None:
                 self.logger.error("Wandb is not installed, skipping init_run")
+            return
+
+        if self.run_id is None:
+            if self.logger is not None:
+                self.logger.error("Wandb run_id is None, skipping init_run")
             return
 
         init_kwargs: Dict[str, Any] = {

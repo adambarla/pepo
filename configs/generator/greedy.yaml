@@ -1,0 +1,8 @@
+# Greedy Sampling Generator Configuration
+_target_: pepo.generate.Generator
+
+max_new_tokens: 512
+use_ensamble: true
+batch_size: 10
+greedy_sampling: true
+top_p_sampling: false

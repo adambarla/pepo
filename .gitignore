@@ -2,12 +2,17 @@ out/*
 logs/*
 outputs/
 outputs
+out/
+logs/
+**/*outputs/
 .venv/
 .venv
 arena-hard-auto/logs/*
 
 .ipynb_checkpoints/
 __pycache__/
+.mypy_cache/
+.ruff_cache/
 
 .DS_Store
 

@@ -1,0 +1,17 @@
+# AlpacaEval Evaluator Configuration
+_target_: pepo.evaluator.alpaca.AlpacaEvalEvaluator
+
+defaults:
+  - /generator/greedy
+
+# Dataset configuration
+dataset_id: "tatsu-lab/alpaca_eval"
+dataset_name: "alpaca_eval"  # Dataset configuration name
+dataset_split: "eval"
+instruction_key: "instruction"  # Key to extract instruction from dataset items
+
+# Output configuration
+output_dir: "outputs"
+
+# Optional configuration
+num_samples: null  # null = use full dataset
