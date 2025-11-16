@@ -66,6 +66,14 @@ Or run the training script:
 uv run scripts/train.py
 ```
 
+### SLURM Scripts
+
+For running on SLURM clusters, use the scripts in `scripts/slurm/`:
+
+- **`get_interactive.sh`**: Allocates an interactive node with 4 GPUs for 12 hours. Use this to get a shell on a compute node for development and testing.
+- **`*.slurm`**: Batch job scripts for training and evaluation (e.g., `train.slurm`, `eval.slurm`).
+- **`connect_to_node.sh`**: Connects to an existing interactive job. Shows a menu of all active jobs with details (job name, node, start time, time remaining) to help you choose which node to connect to. (can connect to batch jobs too)
+
 ### Configuration Management
 
 This project uses [Hydra](https://hydra.cc/) for configuration management. Configuration files are stored in the `configs` directory, with `configs/train.yaml` as the default (specified in `scripts/train.py`).
