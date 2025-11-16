@@ -844,7 +844,6 @@ class PEPOModel:
                 )
 
             pbar.set_postfix({"stopped": f"{stop_signal.sum().item()}/{batch_size}"})
-            pbar.update(1)
 
             if sampled_token_ids[0] == self.tokenizer.eos_token_id:
                 if self.logger:
