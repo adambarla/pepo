@@ -4,56 +4,33 @@ A project for preference alignment of language models using techniques like DPO 
 
 ## Installation
 
-**Important**: Before proceeding with the installation steps below, make sure to run the development setup script first:
+The installation process is simplified and works across all platforms:
+
+1. **Edit `pyproject.toml`** to set the correct CUDA version for your system:
+   - Open `pyproject.toml`
+   - Update the `url` in the `[tool.uv.index]` section to match your CUDA version:
+     ```toml
+     [[tool.uv.index]]
+     name = "pytorch"
+     url = "https://download.pytorch.org/whl/cu126"  # Change cu126 to your CUDA version (e.g., cu118, cu121)
+     ```
+
+2. **Install dependencies:**
+   ```bash
+   uv sync
+   ```
+
+   This will create a virtual environment and install all required packages, including PyTorch with the specified CUDA version.
+
+### Adding Dependencies
+
+To add new dependencies to the project, use `uv add`:
 
 ```bash
-chmod +x dev_setup.sh
-./dev_setup.sh
+uv add package-name
 ```
 
-### CSCS Cluster (Clariden)
-
-Connect to `clariden.cscs.ch` (may require proxy via `ela.cscs.ch`).
-
-**Get interactive session:**
-```bash
-./scripts/slurm/get_interactive.sh  # Requests 4 GPUs for 12 hours
-./scripts/activate.sh                # Activates uenv and venv
-```
-
-**Additional shells on same node:**
-```bash
-./scripts/slurm/connect_to_node.sh  # Shows menu of active sessions
-```
-
-**First-time setup:**
-```bash
-./scripts/slurm/get_interactive.sh
-./scripts/activate.sh
-rm -rf .venv
-uv venv -p $(which python) --system-site-packages .venv
-source .venv/bin/activate
-uv pip install -e .
-python -c "import torch; print(f'Torch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
-```
-
-The uenv provides PyTorch 2.6.0 with CUDA 12.6 support for GH200 GPUs.
-
-### Other Machines
-
-Create a virtual environment with Python 3.13 and install dependencies:
-
-```bash
-uv venv --python 3.13 .venv
-source .venv/bin/activate
-uv pip install torch --index-url https://download.pytorch.org/whl/cuXXX # replace XXX with the correct CUDA version
-uv pip install -e .
-```
-
-Verify installation:
-```bash
-python -c "import torch; print(f'Torch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
-```
+This will automatically update `pyproject.toml` and `uv.lock` with the new dependency.
 
 ## Environment Variables
 
@@ -77,11 +54,16 @@ Get your token from: https://huggingface.co/settings/tokens
 
 ### Basic Usage
 
-Run the training script with the default configuration:
+Run scripts using `uv run`:
 
 ```bash
-source .venv/bin/activate
-python scripts/train.py
+uv run scripts/eval.py
+```
+
+Or run the training script:
+
+```bash
+uv run scripts/train.py
 ```
 
 ### Configuration Management
