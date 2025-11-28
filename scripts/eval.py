@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import hydra
+from dotenv import load_dotenv
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
@@ -12,6 +13,8 @@ OmegaConf.register_new_resolver(
     "pepo.constants",
     lambda name: getattr(constants, name),
 )
+
+load_dotenv()
 
 
 @hydra.main(config_path="../configs", config_name="eval.yaml", version_base="1.1")
@@ -35,7 +38,7 @@ def main(cfg: DictConfig):
 
     resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
     logger.info("PEPO Evaluation - Starting")
-    logger.info(f"Configuration:\n{OmegaConf.to_yaml(resolved_cfg)}")
+    logger.debug(f"Configuration:\n{OmegaConf.to_yaml(resolved_cfg)}")
 
     set_seed(cfg.seed)
     logger.info(f"Random seed set to: {cfg.seed}")

@@ -15,6 +15,7 @@ dependencies = [
     "numpy", # To fix that warning
     "jupyter>=1.1.1",
     "wandb>=0.23.0",
+    "alpaca-eval[vllm]>=0.6.6",
 ]
 
 [tool.uv]
@@ -32,6 +33,7 @@ torch = { index = "pytorch" }
 dev = [
     "detect-secrets",
     "pre-commit",
+    "types-pyyaml>=6.0.12.20250915",
 ]
 
 [build-system]
