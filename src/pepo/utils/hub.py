@@ -116,7 +116,7 @@ class HubManager:
         model,
         tokenizer,
         model_idx: int,
-        private: bool = True,
+        private: bool = False,
         epochs: Optional[int] = None,
     ):
         """

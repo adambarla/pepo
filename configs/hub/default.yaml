@@ -1,0 +1,14 @@
+# Default Hub Manager Configuration
+_target_: pepo.utils.hub.HubManager
+
+base_dir: "PessimisticDPO"  # HuggingFace username/organization
+load: false
+push: false
+load_epochs: null
+load_trainable: true
+
+logger:
+  defaults:
+    - /logger: default
+    - _self_
+  name: "HubManager"

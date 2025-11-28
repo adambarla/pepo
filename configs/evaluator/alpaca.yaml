@@ -15,3 +15,13 @@ output_dir: "outputs"
 
 # Optional configuration
 num_samples: null  # null = use full dataset
+
+# Logger configuration
+logger:
+  _target_: pepo.utils.logger.Logger
+  name: "Evaluator"
+  log_file: null
+  log_dir: "logs"
+  level: "INFO"
+  format_string: null
+  date_format: null

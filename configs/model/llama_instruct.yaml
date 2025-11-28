@@ -1,4 +1,4 @@
-# SmolLM2 Model Configuration for PEPO
+# Llama Model Configuration for PEPO
 _target_: pepo.model.PEPOModel
 alpha: 0.1
 beta: 0.1
@@ -12,6 +12,15 @@ lora_dropout: 0.05
 lora_bias: "none"
 lora_task_type: "CAUSAL_LM"
 lora_target_modules: "all-linear"
+compile: false
+logger:
+  _target_: pepo.utils.logger.Logger
+  name: "PEPOModel"
+  log_file: ${log_file}
+  log_dir: ${log_dir}
+  level: ${log_level}
+  format_string: null
+  date_format: null
 
 #TODO(adam): how do we know that the model has this chat template?
 #            added a bos_token to what was in pepo_launcher.py template because it was messing up the generation

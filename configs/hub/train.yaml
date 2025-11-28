@@ -1,0 +1,16 @@
+# Hub Manager Configuration for Training
+_target_: pepo.utils.hub.HubManager
+
+base_dir: "PessimisticDPO"
+load: false
+push: true
+load_epochs: null
+load_trainable: true
+logger:
+  _target_: pepo.utils.logger.Logger
+  name: "HubManager"
+  log_file: null
+  log_dir: "logs"
+  level: ${log_level}
+  format_string: null
+  date_format: null

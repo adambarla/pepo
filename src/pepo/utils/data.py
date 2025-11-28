@@ -97,7 +97,7 @@ class DataManager:
         num_proc: Optional[int] = None,
         cache_dir: Optional[str] = None,
         force_recompute: bool = False,
-        dataloader_num_workers: int = 0,
+        dataloader_num_workers: Optional[int] = 0,
         dataloader_pin_memory: bool = False,
         dataloader_persistent_workers: bool = False,
         logger: Optional[Logger] = None,
@@ -139,7 +139,9 @@ class DataManager:
         self.cache_dir = cache_dir
         self.force_recompute = force_recompute
 
-        self.dataloader_num_workers = dataloader_num_workers
+        self.dataloader_num_workers = (
+            dataloader_num_workers if dataloader_num_workers is not None else 0
+        )
         self.dataloader_pin_memory = dataloader_pin_memory
         self.dataloader_persistent_workers = dataloader_persistent_workers
 

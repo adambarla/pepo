@@ -1,4 +1,3 @@
-import logging
 import os
 from pathlib import Path
 
@@ -20,14 +19,19 @@ def main(cfg: DictConfig):
     hydra_cfg = HydraConfig.get()
     original_work_dir = Path(hydra_cfg.runtime.cwd)
 
-    log_level_str = cfg.get("log_level", "INFO").upper()
-    log_level = getattr(logging, log_level_str, logging.INFO)
+    # Convert log_dir to absolute path
+    log_dir = cfg.get("log_dir", "logs")
+    if not Path(log_dir).is_absolute():
+        cfg.log_dir = str(original_work_dir / log_dir)
 
-    logger = instantiate(
-        cfg.logger,
-        log_dir=str(original_work_dir / "logs"),
-        level=log_level,
-    )
+    # Generate log_file name if not specified, so all loggers use the same file
+    if cfg.get("log_file") is None:
+        from datetime import datetime
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        cfg.log_file = f"eval_{timestamp}.log"
+
+    logger = instantiate(cfg.logger)
 
     resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
     logger.info("PEPO Evaluation - Starting")
@@ -41,14 +45,13 @@ def main(cfg: DictConfig):
             "HF_TOKEN environment variable not set. Model loading may fail if models are private."
         )
 
-    # Instantiate managers
-    device_manager = instantiate(cfg.device, logger=logger)
-    hub_manager = instantiate(cfg.hub, logger=logger)
+    # All loggers will be instantiated recursively by Hydra from config
+    device_manager = instantiate(cfg.device)
+    hub_manager = instantiate(cfg.hub)
 
-    # Instantiate model (same as chat.py)
+    # Model needs device_manager and hub_manager passed explicitly
     model = instantiate(
         cfg.model,
-        logger=logger,
         device_manager=device_manager,
         hub_manager=hub_manager,
     )
@@ -60,8 +63,8 @@ def main(cfg: DictConfig):
         cfg.evaluator.output_dir = str(output_dir_path)
         logger.info(f"Output directory set to: {output_dir_path}")
 
-    # Instantiate evaluator (generator is automatically instantiated via config)
-    evaluator = instantiate(cfg.evaluator, model=model, logger=logger)
+    # Evaluator needs model passed explicitly, generator is instantiated recursively
+    evaluator = instantiate(cfg.evaluator, model=model)
     logger.info("Evaluator and generator instantiated from config")
 
     # Check if responses exist

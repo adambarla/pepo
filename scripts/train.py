@@ -4,16 +4,15 @@ import os
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 import logging
-from datetime import datetime
 from pathlib import Path
 
 import hydra
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
-from transformers import get_scheduler
 
-from pepo.utils import WandbHandler, constants, set_seed
+from pepo.trainer import Trainer
+from pepo.utils import constants, set_seed
 
 OmegaConf.register_new_resolver(
     "pepo.constants",
@@ -73,77 +72,22 @@ def main(cfg: DictConfig):
         logger=logger,
     )
 
-    if wandb_config.enabled and resolved_cfg_plain is not None:
-        dataset_path = data_manager._get_cache_path()
-        dataset_hash = dataset_path.split("/")[-1]
-        resolved_cfg_plain["dataset"]["hash"] = dataset_hash
-
-    num_networks = model.num_networks
-    optimizers = []
-    schedulers = []
-
-    for model_idx in range(num_networks):
-        model_params = model.models[model_idx].parameters()
-
-        optimizer = instantiate(
-            cfg.optimizer,
-            params=model_params,
-        )
-        optimizers.append(optimizer)
-
-        train_loader = data_manager.get_dataloader(
-            model_idx=model_idx,
-            partition="train",
-            batch_size=cfg.batch_size,
-        )
-        num_training_steps = (len(train_loader) // cfg.acc_steps) * cfg.max_epochs
-
-        scheduler = get_scheduler(
-            name=cfg.scheduler.name,
-            optimizer=optimizer,
-            num_warmup_steps=cfg.scheduler.num_warmup_steps,
-            num_training_steps=num_training_steps,
-        )
-        schedulers.append(scheduler)
-
-        logger.info(
-            f"Created optimizer and scheduler for model {model_idx}. "
-            f"Training steps: {num_training_steps}"
-        )
-
-    # TODO(adam): use instantiate to create wandb handlers
-    wandb_handlers = None
-    if wandb_config.enabled:
-        wandb_handlers = []
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        for model_idx in range(num_networks):
-            handler = WandbHandler(
-                enabled=True,
-                project=wandb_config.project,
-                name=model._get_submodel_name(model_idx),
-                tags=list(wandb_config.tags) + [model._get_base_model_name()],
-                notes=wandb_config.notes,
-                entity=wandb_config.entity,
-                mode=wandb_config.mode,
-                cfg=resolved_cfg_plain,
-                group=f"{model._get_model_name()}-{timestamp}",
-                logger=logger,
-                _lazy_init=True,
-            )
-            wandb_handlers.append(handler)
-
-    model.train(
+    trainer = Trainer(
+        model=model,
         data_manager=data_manager,
-        optimizers=optimizers,
-        schedulers=schedulers,
+        optimizer_config=cfg.optimizer,
+        scheduler_config=cfg.scheduler,
+        wandb_config=wandb_config,
         batch_size=cfg.batch_size,
         eval_batch_size=cfg.eval_batch_size,
         gradient_accumulation_steps=cfg.acc_steps,
         max_epochs=cfg.max_epochs,
-        wandb_handlers=wandb_handlers,
         early_stopping_patience=cfg.early_stopping.patience,
         early_stopping_min_delta=cfg.early_stopping.min_delta,
+        resolved_cfg_plain=resolved_cfg_plain,
+        logger=logger,
     )
+    trainer.train()
 
 
 if __name__ == "__main__":
