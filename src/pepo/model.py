@@ -77,15 +77,50 @@ class PEPOModel:
             task_type=lora_task_type,
             target_modules=lora_target_modules,
         )
-        self.epochs_per_network = [0.0] * self.num_networks
+        self.epochs_per_network = [0] * self.num_networks
 
         self.tokenizer = self._init_tokenizer()
-        self.models = self._load_models()
+        self._models = None
+        self._init_epochs()
 
         if self.logger:
             self.logger.info(
                 f"PEPOModel initialized with alpha={self.alpha}, beta={self.beta}, L={self.num_networks}"
             )
+
+    def _init_epochs(self):
+        """Initialize epoch information without loading models."""
+        load_from_hub = self.hub_manager.should_load_from_hub
+        if not load_from_hub:
+            for model_idx in range(self.num_networks):
+                self.epochs_per_network[model_idx] = 0
+            return
+
+        for model_idx in range(self.num_networks):
+            submodel_name = self._get_submodel_name(model_idx)
+            if not self.hub_manager.model_exists(
+                submodel_name, self.hub_manager.load_epochs
+            ):
+                raise ValueError(
+                    f"Model {submodel_name} (epoch {self.hub_manager.load_epochs}) not found in hub"
+                )
+
+            if self.hub_manager.load_epochs is not None:
+                self.epochs_per_network[model_idx] = int(self.hub_manager.load_epochs)
+            else:
+                self.epochs_per_network[model_idx] = None
+
+    def ensure_models_loaded(self):
+        """Ensure models are loaded before use."""
+        if self._models is None:
+            if self.logger:
+                self.logger.info("Lazy loading models...")
+            self._models = self._load_models()
+
+    @property
+    def models(self):
+        self.ensure_models_loaded()
+        return self._models
 
     def _init_tokenizer(self):
         """
@@ -116,15 +151,20 @@ class PEPOModel:
     def get_tokenizer(self):
         return self.tokenizer
 
-    def get_min_epochs(self) -> float:
+    def get_min_epochs(self) -> Optional[int]:
         """
         Get the minimum number of epochs across all networks in the ensemble.
 
         Returns:
-            Minimum epochs. Returns inf if any network has unknown epochs, 0 if all are newly instantiated.
+            Minimum epochs. Returns None if any network has unknown epochs (loaded from best),
+            0 if all are newly instantiated.
         """
         if not self.epochs_per_network:
-            return 0.0
+            return 0
+
+        if any(e is None for e in self.epochs_per_network):
+            return None
+
         return min(self.epochs_per_network)
 
     def _get_model_name(self) -> str:
@@ -165,13 +205,8 @@ class PEPOModel:
         model_name = self._get_submodel_name(model_idx)
         if load_from_hub:
             model = self.hub_manager.load_model(base_model, model_name)
-            if self.hub_manager.load_epochs is not None:
-                self.epochs_per_network[model_idx] = float(self.hub_manager.load_epochs)
-            else:
-                self.epochs_per_network[model_idx] = float("inf")
         else:
             model = get_peft_model(base_model, self.lora_config)
-            self.epochs_per_network[model_idx] = 0.0
             if self.logger:
                 trainable, total = model.get_nb_trainable_parameters()
                 trainable = trainable / 1000000

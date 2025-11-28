@@ -17,6 +17,11 @@ evaluator:
     max_new_tokens: ${max_new_tokens}
     batch_size: ${batch_size}
 
+hub:
+  load: true
+  push: false
+  load_epochs: 2
+
 # Logger configuration (can override defaults from logger/default.yaml)
 logger:
   name: "eval"
@@ -28,7 +33,7 @@ log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (c
 log_dir: "logs"  # Log directory (relative to project root, will be converted to absolute path)
 log_file: null  # Log file name (null = auto-generate with timestamp, all loggers will use the same file)
 
-L: 1 # Number of submodels in the ensemble
+L: 4 # Number of submodels in the ensemble
 
 # Generator configuration can be overridden in evaluator config (evaluator/alpaca.yaml)
 # or via command line: evaluator.generator.max_new_tokens=10
