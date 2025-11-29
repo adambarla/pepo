@@ -122,6 +122,31 @@ class PEPOModel:
         self.ensure_models_loaded()
         return self._models
 
+    def unload_models(self):
+        """
+        Unload all submodels from GPU memory to free up resources.
+        Useful when transitioning from generation to evaluation with a different model.
+        Models can be reloaded later via lazy loading (they will be loaded on next access).
+        """
+        if self._models is None:
+            if self.logger:
+                self.logger.info("Models are already unloaded")
+            return
+
+        if self.logger:
+            self.logger.info(
+                f"Unloading {len(self._models)} submodels from GPU memory..."
+            )
+
+        for model in self._models:
+            del model
+
+        self._models = None
+        self.device_manager.clear_cache()
+
+        if self.logger:
+            self.logger.info("All submodels unloaded from GPU memory")
+
     def _init_tokenizer(self):
         """
         Initialize tokenizer for the PEPO ensemble.

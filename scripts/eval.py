@@ -81,6 +81,7 @@ def main(cfg: DictConfig):
         else:
             logger.info("force_generate=True - Regenerating responses")
         evaluator.generate_responses()
+        model.unload_models()  # Free up memory for evaluation
     else:
         logger.info("Responses file found - Skipping generation")
 

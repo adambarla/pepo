@@ -4,9 +4,10 @@ from pathlib import Path
 from typing import Dict, Optional, Union
 
 import yaml
-from alpaca_eval import evaluate as alpaca_evaluate
 from datasets import load_dataset
 from omegaconf import DictConfig, OmegaConf
+
+from alpaca_eval import evaluate as alpaca_evaluate  # type: ignore[attr-defined]
 
 from ..generate import Generator
 from ..utils import sanitize_filename
