@@ -20,7 +20,7 @@ evaluator:
 hub:
   load: true
   push: false
-  load_epochs: 2
+  load_epochs: ${epochs}
 
 # Logger configuration (can override defaults from logger/default.yaml)
 logger:
@@ -44,5 +44,6 @@ force_generate: false  # If true, regenerate responses even if they exist
 num_samples: null # null = use full dataset
 max_new_tokens: 1000
 batch_size: 100
+epochs: 2
 
 seed: 42

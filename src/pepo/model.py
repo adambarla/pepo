@@ -511,6 +511,10 @@ class PEPOModel:
 
         pbar = tqdm(range(max_length - input_ids.shape[1]))
         for i in pbar:
+            # Clear cache periodically to reduce fragmentation
+            if i > 0 and i % 100 == 0:
+                self.device_manager.clear_cache()
+
             if use_ensamble:
                 log_probs = self.predict(device_input_ids, device_attention_masks)
             else:

@@ -10,13 +10,15 @@ dataset_name: "alpaca_eval"  # Dataset configuration name
 dataset_split: "eval"
 instruction_key: "instruction"  # Key to extract instruction from dataset items
 annotators_config:
-  llama3_8b_judge:
-    prompt_template: "/users/lviano/PEPO/.venv/lib/python3.13/site-packages/alpaca_eval/evaluators_configs/alpaca_eval_gpt4_turbo_fn/alpaca_eval_fn.txt"
+  llama3_70b_judge:
+    prompt_template: alpaca_eval_llama3_70b_fn
     completions_kwargs:
       batch_size: 32
-      max_new_tokens: 512
-      model_name: meta-llama/Meta-Llama-3-8B-Instruct
-      temperature: 0.0
+      max_new_tokens: 1024
+      model_name: meta-llama/Meta-Llama-3-70B-Instruct
+      model_kwargs:
+        device_map: auto
+        dtype: float16
     fn_completions: "huggingface_local_completions"
     fn_completion_parser: "ranking_parser"
 

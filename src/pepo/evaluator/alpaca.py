@@ -3,11 +3,13 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Optional, Union
 
+import pandas as pd
 import yaml
 from datasets import load_dataset
 from omegaconf import DictConfig, OmegaConf
 
 from alpaca_eval import evaluate as alpaca_evaluate  # type: ignore[attr-defined]
+from alpaca_eval.constants import EVALUATORS_CONFIG_DIR
 
 from ..generate import Generator
 from ..utils import sanitize_filename
@@ -113,21 +115,17 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         """
         Load dataset from HuggingFace.
         """
-        if self.logger:
-            self.logger.info(f"Loading dataset: {self.dataset_id}")
         dataset = load_dataset(
             self.dataset_id,
             split=self.dataset_split,
             trust_remote_code=True,
         )
-        # Limit number of samples if specified
         if self.num_samples is not None and self.num_samples > 0:
             dataset = dataset.select(range(min(self.num_samples, len(dataset))))
-            if self.logger:
-                self.logger.info(f"Using {self.num_samples} samples from dataset")
-        else:
-            if self.logger:
-                self.logger.info(f"Using full dataset with {len(dataset)} samples")
+
+        if self.logger:
+            count = self.num_samples if self.num_samples else len(dataset)
+            self.logger.info(f"Loaded {count} samples from {self.dataset_id}")
         return dataset
 
     def generate_responses(self, **kwargs):
@@ -141,15 +139,9 @@ class AlpacaEvalEvaluator(BaseEvaluator):
             Path to the responses file.
         """
         if self.logger:
-            self.logger.info("Starting AlpacaEval response generation")
-            self.logger.info("Generated file names:")
-            self.logger.info(f"  Responses: {self.responses_file}")
-            self.logger.info(f"  Results: {self.results_file}")
+            self.logger.info(f"Generating responses for {len(self.dataset)} instructions")
 
         instructions = [item[self.instruction_key] for item in self.dataset]
-        if self.logger:
-            self.logger.info(f"Loaded {len(instructions)} instructions")
-
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         outputs = self.generator.generate_responses(
@@ -158,25 +150,29 @@ class AlpacaEvalEvaluator(BaseEvaluator):
             apply_chat_template=True,
         )
 
+        model_name = self.model._get_model_name()
+        min_epochs = self.model.get_min_epochs()
+        if min_epochs is not None:
+            model_name += f"-e{min_epochs}"
+
         formatted_outputs = []
         for item in outputs:
             formatted_outputs.append(
                 {
                     "instruction": item["prompt"],
                     "output": item["output"],
-                    "generator": self.model._get_model_name(),
+                    "generator": model_name,
                     "dataset": self.dataset_name,
                 }
             )
 
-        if self.logger:
-            self.logger.info(f"Saving results to {self.responses_file}")
         with open(self.responses_file, "w", encoding="utf-8") as f:
             json.dump(formatted_outputs, f, indent=2, ensure_ascii=False)
 
         if self.logger:
-            self.logger.info(f"Successfully generated {len(formatted_outputs)} responses")
-            self.logger.info(f"Output saved to: {self.responses_file}")
+            self.logger.info(
+                f"Saved {len(formatted_outputs)} responses to {self.responses_file}"
+            )
 
         return self.responses_file
 
@@ -201,34 +197,53 @@ class AlpacaEvalEvaluator(BaseEvaluator):
 
         conf_dict = OmegaConf.to_container(annotators_config, resolve=True)
 
-        # Create temp file
+        for annotator in conf_dict.values():
+            if "prompt_template" in annotator:
+                annotator["prompt_template"] = str(
+                    list(
+                        (EVALUATORS_CONFIG_DIR / annotator["prompt_template"]).glob(
+                            "*.txt"
+                        )
+                    )[0]
+                )
+
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
             yaml.dump(conf_dict, tmp)
             config_arg = tmp.name
-            if self.logger:
-                self.logger.info(
-                    f"Created temporary annotator config file at {config_arg}"
-                )
+
+        leaderboard_path = self.output_dir / "leaderboard.csv"
+        precomputed_leaderboard = (
+            str(leaderboard_path) if leaderboard_path.exists() else None
+        )
 
         if self.logger:
-            self.logger.info("Starting AlpacaEval evaluation")
-            self.logger.info(f"Responses file: {responses_file}")
-            self.logger.info(f"Annotator config: {config_arg}")
+            self.logger.info(f"Evaluating responses from {responses_file}")
 
         try:
             df_leaderboard, all_annotations = alpaca_evaluate(
                 model_outputs=str(responses_file),
                 annotators_config=config_arg,
                 output_path=self.output_dir,
+                precomputed_leaderboard=precomputed_leaderboard,
+                is_return_instead_of_print=True,
             )
 
-            if self.logger:
-                self.logger.info("Evaluation completed successfully")
-                self.logger.info(f"Leaderboard results:\n{df_leaderboard}")
+            if all_annotations is not None:
+                annotations_df = (
+                    pd.DataFrame(all_annotations)
+                    if not isinstance(all_annotations, pd.DataFrame)
+                    else all_annotations
+                )
+                annotations_df.to_json(self.results_file, orient="records", indent=2)
+                if self.logger:
+                    self.logger.info(f"Saved annotations to {self.results_file}")
 
-            return self.output_dir / "leaderboard.csv"
+            if self.logger:
+                self.logger.info(f"Evaluation completed. Leaderboard:\n{df_leaderboard}")
+
+            return self.results_file
 
         except Exception as e:
             if self.logger:
-                self.logger.error(f"AlpacaEval execution failed: {e}")
+                self.logger.error(f"Evaluation failed: {e}")
             raise e
