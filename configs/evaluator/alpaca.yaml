@@ -9,9 +9,31 @@ dataset_id: "tatsu-lab/alpaca_eval"
 dataset_name: "alpaca_eval"  # Dataset configuration name
 dataset_split: "eval"
 instruction_key: "instruction"  # Key to extract instruction from dataset items
+annotators_config:
+  llama3_70b_judge:
+    prompt_template: alpaca_eval_llama3_70b_fn
+    completions_kwargs:
+      batch_size: 32
+      max_new_tokens: 1024
+      model_name: meta-llama/Meta-Llama-3-70B-Instruct
+      model_kwargs:
+        device_map: auto
+        dtype: float16
+    fn_completions: "huggingface_local_completions"
+    fn_completion_parser: "ranking_parser"
 
 # Output configuration
 output_dir: "outputs"
 
 # Optional configuration
 num_samples: null  # null = use full dataset
+
+# Logger configuration
+logger:
+  _target_: pepo.utils.logger.Logger
+  name: "Evaluator"
+  log_file: null
+  log_dir: "logs"
+  level: "INFO"
+  format_string: null
+  date_format: null

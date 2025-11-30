@@ -3,6 +3,8 @@ defaults:
   - model: llama_instruct
   - dataset: ultrafeedback
   - logger: default
+  - hub: train
+  - device: default
   - _self_
 
 model:
@@ -27,18 +29,6 @@ scheduler:
   name: cosine
   num_warmup_steps: 0
 
-# Device configuration
-device:
-  _target_: pepo.utils.device.DeviceManager
-  gpu_ids: null  # list of GPU IDs (null = auto-detect), e.g. [0, 1, 2, 3]
-
-# HuggingFace Hub configuration
-hub:
-  _target_: pepo.utils.hub.HubManager
-  base_dir: "PessimisticDPO"  # HuggingFace username/organization
-  load: false
-  push: true
-
 # Reproducibility
 seed: 42
 
@@ -58,10 +48,12 @@ wandb:
   mode: "online"  # Options: "online", "offline", "disabled"
 
 log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
+log_dir: "logs"  # Log directory (relative to project root, will be converted to absolute path)
+log_file: null  # Log file name (null = auto-generate with timestamp, all loggers will use the same file)
 
 L: 4 # Number of submodels in the ensemble
 max_epochs: 8
-acc_steps: 2 # acc_steps * batch_size should stay constant
+acc_steps: 1 # acc_steps * batch_size should stay constant
 batch_size: 4
 eval_batch_size: null # if null will be set to 4x batch_size
 

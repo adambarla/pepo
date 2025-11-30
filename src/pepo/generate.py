@@ -8,7 +8,7 @@ class Generator:
 
     def __init__(
         self,
-        max_new_tokens: int = 512,
+        max_new_tokens: int = 1000,
         use_ensamble: bool = True,
         batch_size: int = 10,
         greedy_sampling: bool = True,

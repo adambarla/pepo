@@ -5,11 +5,10 @@ from typing import Dict, Optional
 import torch
 import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .utils import DataManager, DeviceManager, HubManager, Logger, WandbHandler
+from .utils import DeviceManager, HubManager, Logger
 
 # TODO(adam): possible abstraction here is to define a PEPOSubModel base class that handles the logic of a single model in the ensemble
 #             we could inherit this class to define submodels such as smollm, gemma, etc. which would handle their own chat template, tokenizer, etc.
@@ -78,15 +77,75 @@ class PEPOModel:
             task_type=lora_task_type,
             target_modules=lora_target_modules,
         )
-        self.epochs_per_network = [0.0] * self.num_networks
+        self.epochs_per_network = [0] * self.num_networks
 
         self.tokenizer = self._init_tokenizer()
-        self.models = self._load_models()
+        self._models = None
+        self._init_epochs()
 
         if self.logger:
             self.logger.info(
                 f"PEPOModel initialized with alpha={self.alpha}, beta={self.beta}, L={self.num_networks}"
             )
+
+    def _init_epochs(self):
+        """Initialize epoch information without loading models."""
+        load_from_hub = self.hub_manager.should_load_from_hub
+        if not load_from_hub:
+            for model_idx in range(self.num_networks):
+                self.epochs_per_network[model_idx] = 0
+            return
+
+        for model_idx in range(self.num_networks):
+            submodel_name = self._get_submodel_name(model_idx)
+            if not self.hub_manager.model_exists(
+                submodel_name, self.hub_manager.load_epochs
+            ):
+                raise ValueError(
+                    f"Model {submodel_name} (epoch {self.hub_manager.load_epochs}) not found in hub"
+                )
+
+            if self.hub_manager.load_epochs is not None:
+                self.epochs_per_network[model_idx] = int(self.hub_manager.load_epochs)
+            else:
+                self.epochs_per_network[model_idx] = None
+
+    def ensure_models_loaded(self):
+        """Ensure models are loaded before use."""
+        if self._models is None:
+            if self.logger:
+                self.logger.info("Lazy loading models...")
+            self._models = self._load_models()
+
+    @property
+    def models(self):
+        self.ensure_models_loaded()
+        return self._models
+
+    def unload_models(self):
+        """
+        Unload all submodels from GPU memory to free up resources.
+        Useful when transitioning from generation to evaluation with a different model.
+        Models can be reloaded later via lazy loading (they will be loaded on next access).
+        """
+        if self._models is None:
+            if self.logger:
+                self.logger.info("Models are already unloaded")
+            return
+
+        if self.logger:
+            self.logger.info(
+                f"Unloading {len(self._models)} submodels from GPU memory..."
+            )
+
+        for model in self._models:
+            del model
+
+        self._models = None
+        self.device_manager.clear_cache()
+
+        if self.logger:
+            self.logger.info("All submodels unloaded from GPU memory")
 
     def _init_tokenizer(self):
         """
@@ -117,15 +176,20 @@ class PEPOModel:
     def get_tokenizer(self):
         return self.tokenizer
 
-    def get_min_epochs(self) -> float:
+    def get_min_epochs(self) -> Optional[int]:
         """
         Get the minimum number of epochs across all networks in the ensemble.
 
         Returns:
-            Minimum epochs. Returns inf if any network has unknown epochs, 0 if all are newly instantiated.
+            Minimum epochs. Returns None if any network has unknown epochs (loaded from best),
+            0 if all are newly instantiated.
         """
         if not self.epochs_per_network:
-            return 0.0
+            return 0
+
+        if any(e is None for e in self.epochs_per_network):
+            return None
+
         return min(self.epochs_per_network)
 
     def _get_model_name(self) -> str:
@@ -166,13 +230,8 @@ class PEPOModel:
         model_name = self._get_submodel_name(model_idx)
         if load_from_hub:
             model = self.hub_manager.load_model(base_model, model_name)
-            if self.hub_manager.load_epochs is not None:
-                self.epochs_per_network[model_idx] = float(self.hub_manager.load_epochs)
-            else:
-                self.epochs_per_network[model_idx] = float("inf")
         else:
             model = get_peft_model(base_model, self.lora_config)
-            self.epochs_per_network[model_idx] = 0.0
             if self.logger:
                 trainable, total = model.get_nb_trainable_parameters()
                 trainable = trainable / 1000000
@@ -295,329 +354,6 @@ class PEPOModel:
         dpo_loss_components = -F.logsigmoid(argument)
         loss = dpo_loss_components.mean()
         return loss, lprobs_chosen, lprobs_reject
-
-    def _eval_model(
-        self,
-        model_idx: int,
-        model: torch.nn.Module,
-        eval_loader: DataLoader,
-        device: torch.device,
-        epoch: int,
-        n_epochs: int,
-        global_step: int,
-        wandb_handler: Optional[WandbHandler] = None,
-    ) -> float:
-        """
-        Evaluate the model on the evaluation dataset.
-
-        Args:
-            model_idx: Index of the model in the ensemble.
-            model: The model to evaluate.
-            eval_loader: DataLoader for evaluation data.
-            device: Device to run evaluation on.
-            epoch: Current epoch number.
-            n_epochs: Total number of epochs.
-            global_step: Current global training step.
-            wandb_handler: Optional wandb handler for logging.
-
-        Returns:
-            Average evaluation loss.
-        """
-        n_batches = len(eval_loader)
-        if n_batches == 0:
-            raise ValueError("Evaluation loader is empty")
-        model.eval()
-        loss = 0.0
-        b = 0
-        lprob_chosen_sum = 0.0
-        lprob_reject_sum = 0.0
-        margin_sum = 0.0
-
-        with torch.no_grad():
-            for batch in eval_loader:
-                batch_loss, lprobs_ch, lprobs_re = self._loss_fn(batch, model, device)
-
-                loss += batch_loss.item()
-                b += 1
-
-                lprob_chosen_sum += lprobs_ch.mean().item()
-                lprob_reject_sum += lprobs_re.mean().item()
-                margin_sum += (lprobs_ch - lprobs_re).mean().item()
-
-                if self.logger and b % max(1, n_batches // 10) == 0:
-                    current_avg_loss = loss / b
-                    e_str_len = len(str(n_epochs))
-                    b_str_len = len(str(n_batches))
-                    self.logger.info(
-                        f"Model {model_idx} - Eval. Epoch {epoch:>{e_str_len}}/{n_epochs} - Step {b:>{b_str_len}}/{n_batches} - "
-                        f"Avg Loss: {current_avg_loss:.4f} - "
-                        f"Avg Margin: {margin_sum / b:.4f}"
-                    )
-
-        if wandb_handler is not None:
-            wandb_handler.log(
-                {
-                    "eval/loss": loss / b,
-                    "eval/avg_lprobs_chosen": lprob_chosen_sum / b,
-                    "eval/avg_lprobs_reject": lprob_reject_sum / b,
-                    "eval/avg_margin": margin_sum / b,
-                    "eval/epoch": epoch,
-                },
-                step=global_step,
-            )
-
-        return loss / b
-
-    def _train_model(
-        self,
-        model_idx: int,
-        train_loader: DataLoader,
-        eval_loader: DataLoader,
-        optimizer: torch.optim.Optimizer,
-        scheduler: torch.optim.lr_scheduler._LRScheduler,
-        n_epochs: int = 1,
-        grad_acc_steps: int = 1,
-        wandb_handler: Optional[WandbHandler] = None,
-        es_patience: Optional[int] = None,
-        es_min_delta: float = 0.0,
-    ):
-        """
-        Train a single model in a thread. Each thread sets its CUDA device context
-        to ensure proper GPU isolation.
-
-        Args:
-            model_idx: Index of the model in the ensemble.
-            train_loader: DataLoader for training data.
-            eval_loader: DataLoader for evaluation data.
-            optimizer: Optimizer for training.
-            scheduler: Learning rate scheduler.
-            n_epochs: Maximum number of training epochs.
-            gradient_accumulation_steps: Number of steps to accumulate gradients.
-            wandb_handler: Optional wandb handler for logging.
-            early_stopping_patience: Number of epochs to wait before stopping if no improvement.
-                                     If None, early stopping is disabled.
-            early_stopping_min_delta: Minimum change to qualify as an improvement.
-        """
-        device = torch.device(self.device_manager.get_device_for_model(model_idx))
-        model = self.models[model_idx]
-
-        if wandb_handler is not None and wandb_handler.enabled:
-            wandb_handler.init_run()
-
-        if self.logger:
-            train_size = len(train_loader.dataset)  # type: ignore[arg-type]
-            eval_size = len(eval_loader.dataset)  # type: ignore[arg-type]
-            self.logger.info(
-                f"Model {model_idx} - Train: size={train_size}, batches={len(train_loader)} - Eval: size={eval_size}, batches={len(eval_loader)}"
-            )
-
-        global_step = 0
-
-        if self.logger:
-            self.logger.info(f"Model {model_idx} - Running initial evaluation...")
-
-        initial_eval_loss = self._eval_model(
-            model_idx=model_idx,
-            model=model,
-            eval_loader=eval_loader,
-            device=device,
-            epoch=0,
-            n_epochs=n_epochs,
-            global_step=global_step,
-            wandb_handler=wandb_handler,
-        )
-
-        best_eval_loss = initial_eval_loss
-        patience_counter = 0
-        es_enabled = es_patience is not None
-
-        n_batches = len(train_loader)
-        n_ebatches = n_batches // grad_acc_steps
-        for epoch in range(n_epochs):
-            if self.logger:
-                self.logger.info(f"Model {model_idx} - Starting training epoch {epoch+1}")
-
-            model.train()
-            optimizer.zero_grad()
-            loss = 0.0
-            lprob_chosen_sum = 0.0
-            lprob_reject_sum = 0.0
-            margin_sum = 0.0
-            ebatch = 0  # effective batch count
-
-            for step, batch in enumerate(train_loader):
-                if n_batches - step < grad_acc_steps:
-                    if self.logger:
-                        self.logger.info(
-                            f"Model {model_idx} - Epoch {epoch+1} - "
-                            f"Not enough batches to accumulate gradients, skipping remaining {n_batches - step} batches out of {n_batches}"
-                        )
-                    break
-                batch_loss, lprobs_ch, lprobs_re = self._loss_fn(batch, model, device)
-
-                loss += batch_loss.item()
-                lprob_chosen_sum += lprobs_ch.mean().item()
-                lprob_reject_sum += lprobs_re.mean().item()
-                margin_sum += (lprobs_ch - lprobs_re).mean().item()
-
-                batch_loss = batch_loss / grad_acc_steps
-                batch_loss.backward()
-
-                if (step + 1) % grad_acc_steps == 0:
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
-                    global_step += 1
-                    ebatch += 1
-
-                    current_lr = scheduler.get_last_lr()[0]
-
-                    if self.logger and ebatch % max(1, n_ebatches // 100) == 0:
-                        e_str_len = len(str(n_epochs))
-                        eb_str_len = len(str(n_ebatches))
-                        self.logger.info(
-                            f"Model {model_idx} - Train Epoch {epoch+1:>{e_str_len}}/{n_epochs} - Step {ebatch:>{eb_str_len}}/{n_ebatches} - "
-                            f"Avg Loss: {loss / ebatch:.4f} - Avg Margin: {margin_sum / ebatch:.4f}"
-                        )
-
-                    if wandb_handler is None:
-                        continue
-                    wandb_handler.log(
-                        {
-                            "train/learning_rate": current_lr,
-                            "train/step": global_step,
-                            "train/curr_avg_loss": loss / ebatch,
-                            "train/curr_avg_margin": margin_sum / ebatch,
-                        },
-                        step=global_step,
-                    )
-
-            if wandb_handler is not None:
-                wandb_handler.log(
-                    {
-                        "train/avg_lprobs_chosen": lprob_chosen_sum / ebatch,
-                        "train/avg_lprobs_reject": lprob_reject_sum / ebatch,
-                        "train/avg_margin": margin_sum / ebatch,
-                        "train/epoch": epoch + 1,
-                    },
-                    step=global_step,
-                )
-
-            self.epochs_per_network[model_idx] += 1
-            self._push_model(
-                model_idx, epochs=int(self.epochs_per_network[model_idx])
-            )  # push with epoch suffix
-
-            eval_loss = self._eval_model(
-                model_idx=model_idx,
-                model=model,
-                eval_loader=eval_loader,
-                device=device,
-                epoch=epoch + 1,
-                n_epochs=n_epochs,
-                global_step=global_step,
-                wandb_handler=wandb_handler,
-            )
-
-            if es_enabled:
-                if eval_loss < best_eval_loss - es_min_delta:
-                    best_eval_loss = eval_loss
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-
-                if patience_counter >= es_patience:
-                    if self.logger:
-                        self.logger.info(
-                            f"Model {model_idx} - Early stopping triggered after {epoch + 1} epochs. "
-                            f"Best validation loss: {best_eval_loss:.4f}"
-                        )
-                    break
-
-    def train(
-        self,
-        data_manager: DataManager,
-        optimizers: list[torch.optim.Optimizer],
-        schedulers: list[torch.optim.lr_scheduler._LRScheduler],
-        batch_size: int,
-        eval_batch_size: Optional[int] = None,
-        gradient_accumulation_steps: int = 1,
-        max_epochs: int = 1,
-        wandb_handlers: Optional[list[WandbHandler]] = None,
-        early_stopping_patience: Optional[int] = None,
-        early_stopping_min_delta: float = 0.0,
-    ):
-        """
-        Train the PEPO ensemble models and save the models to the hub.
-        Uses threading to run models in parallel on different GPUs.
-
-        Args:
-            data_manager: DataManager instance for getting dataloaders.
-            optimizers: List of optimizers, one per model in the ensemble.
-            schedulers: List of schedulers, one per model in the ensemble.
-            batch_size: Batch size for training.
-            gradient_accumulation_steps: Number of steps to accumulate gradients.
-            max_epochs: Maximum number of training epochs.
-            wandb_handlers: Optional list of wandb handlers, one per model.
-            early_stopping_patience: Number of epochs to wait before stopping if no improvement.
-                                     If None, early stopping is disabled.
-            early_stopping_min_delta: Minimum change to qualify as an improvement.
-        """
-        if self.logger:
-            self.logger.info("Training PEPO ensemble models...")
-
-        if len(optimizers) != self.num_networks or len(schedulers) != self.num_networks:
-            raise ValueError(
-                f"Number of optimizers ({len(optimizers)}) and schedulers ({len(schedulers)}) "
-                f"must match number of networks ({self.num_networks})"
-            )
-
-        if wandb_handlers is not None and len(wandb_handlers) != self.num_networks:
-            raise ValueError(
-                f"Number of wandb handlers ({len(wandb_handlers)}) "
-                f"must match number of networks ({self.num_networks})"
-            )
-
-        threads = []
-        for model_idx in range(self.num_networks):
-            train_loader = data_manager.get_dataloader(
-                model_idx=model_idx,
-                partition="train",
-                batch_size=batch_size,
-            )
-            eval_bs = eval_batch_size if eval_batch_size is not None else 4 * batch_size
-            eval_loader = data_manager.get_dataloader(
-                model_idx=model_idx,
-                partition="eval",
-                batch_size=eval_bs,
-            )
-
-            thread = threading.Thread(
-                target=self._train_model,
-                args=(
-                    model_idx,
-                    train_loader,
-                    eval_loader,
-                    optimizers[model_idx],
-                    schedulers[model_idx],
-                    max_epochs,
-                    gradient_accumulation_steps,
-                    wandb_handlers[model_idx] if wandb_handlers is not None else None,
-                    early_stopping_patience,
-                    early_stopping_min_delta,
-                ),
-            )
-            thread.start()
-            threads.append(thread)
-
-        for thread in threads:
-            thread.join()
-
-        if wandb_handlers is not None:
-            for wandb_handler in wandb_handlers:
-                wandb_handler.finish()
-
-        self._push_models()
 
     def _predict_submodel(
         self,
@@ -775,6 +511,10 @@ class PEPOModel:
 
         pbar = tqdm(range(max_length - input_ids.shape[1]))
         for i in pbar:
+            # Clear cache periodically to reduce fragmentation
+            if i > 0 and i % 100 == 0:
+                self.device_manager.clear_cache()
+
             if use_ensamble:
                 log_probs = self.predict(device_input_ids, device_attention_masks)
             else:
@@ -844,7 +584,6 @@ class PEPOModel:
                 )
 
             pbar.set_postfix({"stopped": f"{stop_signal.sum().item()}/{batch_size}"})
-            pbar.update(1)
 
             if sampled_token_ids[0] == self.tokenizer.eos_token_id:
                 if self.logger:
