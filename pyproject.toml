@@ -30,7 +30,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch" }
-alpaca-eval = { path = "/users/lviano/PEPO/alpaca_eval", editable = true }
+alpaca-eval = { path = "./alpaca_eval", editable = true }
 
 [dependency-groups]
 dev = [
