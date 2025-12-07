@@ -1,10 +1,13 @@
 import os
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import dotenv
 from huggingface_hub import HfApi, login
 from peft import PeftModel
 from transformers import AutoModelForCausalLM
+
+if TYPE_CHECKING:
+    from transformers import AutoTokenizer
 
 from .logger import Logger
 
@@ -34,7 +37,8 @@ class HubManager:
             base_dir: HuggingFace username/organization (e.g., "PessimisticDPO").
             load: Whether to load models from hub.
             push: Whether to push models to hub.
-            load_epochs: Optional number of epochs to load. If None, loads the final model.
+            load_epochs: Optional number of epochs to load.
+                If None, loads the final model.
             logger: Optional logger instance.
             hf_token: HuggingFace token. If None, uses HF_TOKEN env var or cached token.
         """
@@ -55,7 +59,7 @@ class HubManager:
     def should_load_from_hub(self) -> bool:
         return self.should_load
 
-    def _authenticate(self, hf_token: Optional[str] = None):
+    def _authenticate(self, hf_token: Optional[str] = None) -> None:
         """Authenticate with HuggingFace Hub."""
         if hf_token:
             login(token=hf_token)
@@ -68,7 +72,8 @@ class HubManager:
                 if self.logger:
                     self.logger.warning(
                         f"Could not login to HuggingFace: {e}. "
-                        f"Set HF_TOKEN environment variable or run 'huggingface-cli login'"
+                        f"Set HF_TOKEN environment variable or run "
+                        f"'huggingface-cli login'"
                     )
 
     def model_exists(self, model_name: str, epochs: Optional[int] = None) -> bool:
@@ -94,31 +99,36 @@ class HubManager:
             raise ValueError(f"Model {model_name} not found in hub")
         repo_id = self.get_repo_id(model_name, self.load_epochs)
         model = PeftModel.from_pretrained(
-            base_model, repo_id, is_trainable=self.load_trainable
+            base_model,  # type: ignore[arg-type]
+            repo_id,
+            is_trainable=self.load_trainable,
         )
 
         if self.logger and self.load_trainable:
             trainable, total = model.get_nb_trainable_parameters()
-            trainable = trainable / 1000000
-            total = total / 1000000
+            trainable = int(trainable / 1000000)
+            total = int(total / 1000000)
             self.logger.info(
-                f"Loaded model from {repo_id} with {trainable:.2f}M trainable parameters out of {total:.2f}M total parameters ({trainable/total*100:.2f}%)"
+                f"Loaded model from {repo_id} with {trainable:.2f}M trainable "
+                f"parameters out of {total:.2f}M total parameters "
+                f"({trainable / total * 100:.2f}%)"
             )
         elif self.logger:
             self.logger.info(
-                f"Loaded model from {repo_id} without trainable parameters (set hub.load_trainable=true to load trainable parameters)"
+                f"Loaded model from {repo_id} without trainable parameters "
+                f"(set hub.load_trainable=true to load trainable parameters)"
             )
-        return model
+        return model  # type: ignore[return-value]
 
     def push_model(
         self,
         model_name: str,
-        model,
-        tokenizer,
+        model: AutoModelForCausalLM,
+        tokenizer: "AutoTokenizer",
         model_idx: int,
         private: bool = False,
         epochs: Optional[int] = None,
-    ):
+    ) -> None:
         """
         Push model and tokenizer to HuggingFace Hub.
 
@@ -127,13 +137,14 @@ class HubManager:
             model: The model to push (PEFT model with LoRA adapters).
             model_idx: Index of the model in the ensemble.
             private: Whether to make the repository private.
-            epochs: Optional number of epochs. If provided, appends "-e{epochs}" to model_name.
-                   Use None for final push without epoch suffix.
+            epochs: Optional number of epochs. If provided, appends "-e{epochs}"
+                to model_name. Use None for final push without epoch suffix.
         """
         if not self.should_push_to_hub:
             if self.logger:
                 self.logger.warning(
-                    f"Skipping push of model {model_name} to Hub because push_to_hub is disabled in config."
+                    f"Skipping push of model {model_name} to Hub because "
+                    f"push_to_hub is disabled in config."
                 )
             return
 
@@ -145,20 +156,25 @@ class HubManager:
 
         # Generate commit message based on epochs
         if epochs is not None:
-            commit_message = f"Upload PEPO ensemble model {model_idx} checkpoint after {epochs} epochs to {repo_id}"
+            commit_message = (
+                f"Upload PEPO ensemble model {model_idx} checkpoint after "
+                f"{epochs} epochs to {repo_id}"
+            )
         else:
-            commit_message = f"Upload final PEPO ensemble model {model_idx} to {repo_id}"
+            commit_message = (
+                f"Upload final PEPO ensemble model {model_idx} to {repo_id}"
+            )
 
         if self.logger:
             self.logger.info(f"Pushing model to {repo_id}...")
 
         # Push model
-        model.push_to_hub(
+        model.push_to_hub(  # type: ignore[attr-defined]
             repo_id,
             commit_message=commit_message,
             private=private,
         )
-        tokenizer.push_to_hub(
+        tokenizer.push_to_hub(  # type: ignore[attr-defined]
             repo_id,
             commit_message=commit_message,
             private=private,

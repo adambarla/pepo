@@ -1,4 +1,5 @@
-# script to train the pepo model, using a hydra config file, log the training process to wb and save the model to huggingface
+# script to train the pepo model, using a hydra config file,
+# log the training process to wb and save the model to huggingface
 import os
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
@@ -21,7 +22,7 @@ OmegaConf.register_new_resolver(
 
 
 @hydra.main(config_path="../configs", config_name="train.yaml", version_base="1.1")
-def main(cfg: DictConfig):
+def main(cfg: DictConfig) -> None:
     hydra_cfg = HydraConfig.get()
     original_work_dir = Path(hydra_cfg.runtime.cwd)
 
@@ -42,7 +43,9 @@ def main(cfg: DictConfig):
     resolved_cfg_plain = None
     if wandb_config.enabled:
         resolved_cfg_plain = OmegaConf.to_container(
-            cfg, resolve=True, structured_config_mode=False
+            cfg,
+            resolve=True,
+            structured_config_mode=False,  # type: ignore[arg-type]
         )
         logger.info("Weights & Biases logging enabled")
 
@@ -84,10 +87,10 @@ def main(cfg: DictConfig):
         max_epochs=cfg.max_epochs,
         early_stopping_patience=cfg.early_stopping.patience,
         early_stopping_min_delta=cfg.early_stopping.min_delta,
-        resolved_cfg_plain=resolved_cfg_plain,
+        resolved_cfg_plain=resolved_cfg_plain,  # type: ignore[arg-type]
         logger=logger,
     )
-    trainer.train()
+    trainer.train()  # type: ignore[no-untyped-call]
 
 
 if __name__ == "__main__":

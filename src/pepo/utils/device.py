@@ -55,7 +55,8 @@ class DeviceManager:
 
     def get_device_for_model(self, model_idx: int) -> str:
         """
-        Get device string for a specific model, round-robin spread across available GPUs.
+        Get device string for a specific model, round-robin spread across
+        available GPUs.
         """
         gpu_id = self._available_gpus[model_idx % len(self._available_gpus)]
         gpu_device = f"cuda:{gpu_id}"
@@ -77,7 +78,7 @@ class DeviceManager:
         """Get the number of available GPUs."""
         return len(self._available_gpus)
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         """
         Clear CUDA cache on all managed GPUs.
         Useful after unloading models to free up GPU memory.
@@ -89,14 +90,15 @@ class DeviceManager:
                 torch.cuda.empty_cache()
         torch.cuda.empty_cache()
 
-    def _log_environment_info(self):
+    def _log_environment_info(self) -> None:
         """Log device assignment information."""
-        self.logger.info("Device Manager initialized:")
-        self.logger.info(f"Available GPUs: {self._available_gpus}")
-        self.logger.info(f"Dtype: {self.dtype}")
-        for gpu_id in self._available_gpus:
-            props = torch.cuda.get_device_properties(gpu_id)
-            memory_gb = props.total_memory / (1024**3)
-            self.logger.info(
-                f"GPU {gpu_id}: {props.name}, {memory_gb:.1f} GB total memory"
-            )
+        if self.logger:
+            self.logger.info("Device Manager initialized:")
+            self.logger.info(f"Available GPUs: {self._available_gpus}")
+            self.logger.info(f"Dtype: {self.dtype}")
+            for gpu_id in self._available_gpus:
+                props = torch.cuda.get_device_properties(gpu_id)
+                memory_gb = props.total_memory / (1024**3)
+                self.logger.info(
+                    f"GPU {gpu_id}: {props.name}, {memory_gb:.1f} GB total memory"
+                )

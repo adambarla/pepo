@@ -1,4 +1,5 @@
-# script to train the pepo model, using a hydra config file, log the training process to wb and save the model to huggingface
+# script to train the pepo model, using a hydra config file,
+# log the training process to wb and save the model to huggingface
 
 import logging
 from pathlib import Path
@@ -17,7 +18,7 @@ OmegaConf.register_new_resolver(
 )
 
 
-def chat(model: PEPOModel):
+def chat(model: PEPOModel) -> None:
     # prompts = ["Hello, how are you?", "What is the capital of France?"]
     prompts = ["Hello, how are you? I am Adam. What is your name?"]
     # model.generate_base_model(prompts, max_length=200)
@@ -28,16 +29,37 @@ def chat(model: PEPOModel):
     # print("--------------------------------")
     # model.generate_base_model(prompts, max_length=1000)
 
-    input_ids, attention_mask = model.generate(prompts, max_length=100)
+    tokenizer = model.get_tokenizer()  # type: ignore[no-untyped-call]
+    formatted_prompts = [
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        for prompt in prompts
+    ]
+    tokenizer.padding_side = "left"
+    tokenized = tokenizer(
+        formatted_prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=512,
+    )
+    input_ids = tokenized["input_ids"]
+    attention_mask = tokenized["attention_mask"]
+
+    input_ids, attention_mask = model.generate(
+        input_ids, attention_mask, max_length=100
+    )
     print(f"Input ids: {input_ids}")
     print(f"Attention mask: {attention_mask}")
-    tokenizer = model.get_tokenizer()
     output = tokenizer.decode(input_ids[0], skip_special_tokens=True)
-    print(f"Generated sequence idx=0:\n{output[0]}")
+    print(f"Generated sequence idx=0:\n{output}")
 
 
 @hydra.main(config_path="../configs", config_name="chat.yaml", version_base="1.1")
-def main(cfg: DictConfig):
+def main(cfg: DictConfig) -> None:
     hydra_cfg = HydraConfig.get()
     original_work_dir = Path(hydra_cfg.runtime.cwd)
 

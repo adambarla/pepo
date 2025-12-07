@@ -35,10 +35,32 @@ alpaca-eval = { path = "/users/lviano/PEPO/alpaca_eval", editable = true }
 [dependency-groups]
 dev = [
     "detect-secrets",
-    "pre-commit",
+    "mypy>=1.17.1",
+    "pytest>=8.4.2",
+    "ruff>=0.1.0",
+    "pre-commit>=4.3.0",
+    "nb-clean>=4.0.0",
+    "types-tqdm>=4.67.0.20250809",
+    "pandas-stubs>=2.3.3.251201",
     "types-pyyaml>=6.0.12.20250915",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.mypy]
+python_version = "3.13"
+strict=true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = false
+# Ignore missing stubs for external libraries
+[[tool.mypy.overrides]]
+module = [
+    "torch.*",
+    "datasets.*",
+    "alpaca_eval.*",
+]
+ignore_missing_imports = true

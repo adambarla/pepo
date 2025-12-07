@@ -1,40 +1,39 @@
+exclude: '^(alpaca_eval|arena-hard-auto|LLM|figures)/'
+
 repos:
-  # Clean Jupyter notebooks
-  - repo: https://github.com/srstevenson/nb-clean
-    rev: 4.0.1
+  - repo: local
     hooks:
+      # Clean Jupyter notebooks
       - id: nb-clean
+        name: nb-clean
+        entry: uv run nb-clean clean
+        language: system
         files: \.ipynb$
         description: "Clean Jupyter notebooks by removing outputs and metadata"
 
-  # Code formatting and linting
-  - repo: https://github.com/psf/black
-    rev: 24.10.0
-    hooks:
-      - id: black
-        language_version: python3.9
-        args: [--line-length=90]
-
-  - repo: https://github.com/pycqa/isort
-    rev: 5.13.2
-    hooks:
-      - id: isort
-        args: [--profile=black, --multi-line=3]
-
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
-    hooks:
+      # Ruff: Linting + Import Sorting
       - id: ruff
-        args: [--fix, --exit-non-zero-on-fix]
+        name: ruff check
+        entry: uv run ruff check
+        language: system
+        types: [python]
+        # --select I enables isort rules
+        args: [--fix, --exit-non-zero-on-fix, --show-fixes, --select, "I,E,F"]
 
-  # Type checking
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.17.1
-    hooks:
+      # Ruff: Formatting (Replaces Black)
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+
+      # Type checking
       - id: mypy
-        additional_dependencies:
-          - types-PyYAML
-        args: [--ignore-missing-imports, --no-strict-optional]
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types: [python]
+        args: [--incremental, --config-file=pyproject.toml, --show-error-codes]
 
   # General hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks

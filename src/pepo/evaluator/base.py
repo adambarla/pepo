@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from ..generate import Generator
 from ..model import PEPOModel
@@ -54,7 +54,7 @@ class BaseEvaluator(ABC):
         pass
 
     @abstractmethod
-    def evaluate(self, responses_file: Path):
+    def evaluate(self, responses_file: Path) -> Path:
         """
         Evaluate responses.
 
@@ -67,7 +67,7 @@ class BaseEvaluator(ABC):
         pass
 
     @abstractmethod
-    def responses_exist(self, **kwargs) -> bool:
+    def responses_exist(self, **kwargs: Any) -> bool:
         """
         Check if responses file already exists.
 
