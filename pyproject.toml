@@ -35,8 +35,11 @@ alpaca-eval = { path = "/users/lviano/PEPO/alpaca_eval", editable = true }
 [dependency-groups]
 dev = [
     "detect-secrets",
-    "pre-commit",
-    "types-pyyaml>=6.0.12.20250915",
+    "mypy>=1.17.1",
+    "pytest>=8.4.2",
+    "ruff>=0.1.0",
+    "pre-commit>=4.3.0",
+    "nb-clean>=4.0.0",
 ]
 
 [build-system]
