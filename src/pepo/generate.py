@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 
 from .utils import Logger
 
@@ -31,7 +31,9 @@ class Generator:
             logger: Optional logger instance.
         """
         if greedy_sampling and top_p_sampling:
-            raise ValueError("Greedy sampling and top-p sampling cannot be used together")
+            raise ValueError(
+                "Greedy sampling and top-p sampling cannot be used together"
+            )
         if not greedy_sampling and not top_p_sampling:
             raise ValueError("Either greedy sampling or top-p sampling must be used")
         self.max_new_tokens = max_new_tokens
@@ -61,10 +63,10 @@ class Generator:
 
     def generate_responses(
         self,
-        model,
+        model: Any,
         prompts: list[str],
         apply_chat_template: bool = True,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """
         Generate responses for a list of instructions.
 

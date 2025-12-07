@@ -15,9 +15,11 @@ def debug_tokens(
     logger: Optional[Logger] = None,
 ) -> None:
     """
-    Debug function to decode and display tokens with their attention masks, response masks, and log probabilities.
+    Debug function to decode and display tokens with their attention masks,
+    response masks, and log probabilities.
 
-    Displays tokens in rows of 10 tokens, followed by a row showing the attention mask, response mask, and log prob values.
+    Displays tokens in rows of 10 tokens, followed by a row showing the
+    attention mask, response mask, and log prob values.
 
     Args:
         input_ids: Input token IDs tensor of shape (B, T)
@@ -31,13 +33,13 @@ def debug_tokens(
 
     for b in range(B):
         token_debug_str = ""
-        decoded_tokens_chosen = [tokenizer.decode(token) for token in input_ids[b][1:]]
+        decoded_tokens_chosen = [tokenizer.decode(token) for token in input_ids[b][1:]]  # type: ignore[attr-defined]
         for i in range(len(decoded_tokens_chosen)):
-            if input_ids[b][i + 1] == tokenizer.eos_token_id:
+            if input_ids[b][i + 1] == tokenizer.eos_token_id:  # type: ignore[attr-defined]
                 decoded_tokens_chosen[i] = "<eos>"
-            elif input_ids[b][i + 1] == tokenizer.pad_token_id:
+            elif input_ids[b][i + 1] == tokenizer.pad_token_id:  # type: ignore[attr-defined]
                 decoded_tokens_chosen[i] = "<pad>"
-            elif input_ids[b][i + 1] == tokenizer.bos_token_id:
+            elif input_ids[b][i + 1] == tokenizer.bos_token_id:  # type: ignore[attr-defined]
                 decoded_tokens_chosen[i] = "<bos>"
         decoded_tokens_chosen = [
             token.replace("\n", "<nline>") for token in decoded_tokens_chosen
@@ -98,13 +100,17 @@ def initialize_lora_for_testing(
                     param.normal_(mean=0.0, std=std)
                     if logger:
                         logger.debug(
-                            f"Initialized {name} shape={param.shape}, mean={param.mean().item():.6f}, std={param.std().item():.6f}"
+                            f"Initialized {name} shape={param.shape}, "
+                            f"mean={param.mean().item():.6f}, "
+                            f"std={param.std().item():.6f}"
                         )
                 elif "lora_B" in name:
                     param.normal_(mean=0.0, std=std)
                     if logger:
                         logger.debug(
-                            f"Initialized {name} shape={param.shape}, mean={param.mean().item():.6f}, std={param.std().item():.6f}"
+                            f"Initialized {name} shape={param.shape}, "
+                            f"mean={param.mean().item():.6f}, "
+                            f"std={param.std().item():.6f}"
                         )
 
     if logger:

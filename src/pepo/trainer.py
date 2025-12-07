@@ -1,6 +1,6 @@
 import threading
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from omegaconf import DictConfig
@@ -15,7 +15,7 @@ class Trainer:
 
     def __init__(
         self,
-        model,
+        model: Any,
         data_manager: DataManager,
         optimizer_config: DictConfig,
         scheduler_config: DictConfig,
@@ -26,9 +26,9 @@ class Trainer:
         max_epochs: int = 1,
         early_stopping_patience: Optional[int] = None,
         early_stopping_min_delta: float = 0.0,
-        resolved_cfg_plain: Optional[dict] = None,
+        resolved_cfg_plain: Optional[dict[str, Any]] = None,
         logger: Optional[Logger] = None,
-    ):
+    ) -> None:
         """
         Initialize trainer.
 
@@ -42,8 +42,8 @@ class Trainer:
             eval_batch_size: Batch size for evaluation. If None, uses 4 * batch_size.
             gradient_accumulation_steps: Number of steps to accumulate gradients.
             max_epochs: Maximum number of training epochs.
-            early_stopping_patience: Number of epochs to wait before stopping if no improvement.
-                                     If None, early stopping is disabled.
+            early_stopping_patience: Number of epochs to wait before stopping
+                if no improvement. If None, early stopping is disabled.
             early_stopping_min_delta: Minimum change to qualify as an improvement.
             resolved_cfg_plain: Resolved config dict for wandb logging.
             logger: Optional logger instance.
@@ -63,7 +63,7 @@ class Trainer:
         if wandb_config.enabled and resolved_cfg_plain is not None:
             dataset_path = data_manager._get_cache_path()
             if dataset_path is not None:
-                dataset_hash = dataset_path.split("/")[-1]  # type: ignore[union-attr]
+                dataset_hash = dataset_path.split("/")[-1]
                 resolved_cfg_plain["dataset"]["hash"] = dataset_hash
 
         self.optimizers = []
@@ -174,15 +174,15 @@ class Trainer:
 
         if self.wandb_handlers is not None:
             for wandb_handler in self.wandb_handlers:
-                wandb_handler.finish()
+                wandb_handler.finish()  # type: ignore[no-untyped-call]
 
         self.model._push_models()
 
     def _train_model(
         self,
         model_idx: int,
-        train_loader: DataLoader,
-        eval_loader: DataLoader,
+        train_loader: DataLoader[dict[str, torch.Tensor]],
+        eval_loader: DataLoader[dict[str, torch.Tensor]],
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler._LRScheduler,
         n_epochs: int,
@@ -190,7 +190,7 @@ class Trainer:
         wandb_handler: Optional[WandbHandler],
         es_patience: Optional[int],
         es_min_delta: float,
-    ):
+    ) -> None:
         """
         Train a single model in a thread. Each thread sets its CUDA device context
         to ensure proper GPU isolation.
@@ -217,7 +217,9 @@ class Trainer:
             train_size = len(train_loader.dataset)  # type: ignore[arg-type]
             eval_size = len(eval_loader.dataset)  # type: ignore[arg-type]
             self.logger.info(
-                f"Model {model_idx} - Train: size={train_size}, batches={len(train_loader)} - Eval: size={eval_size}, batches={len(eval_loader)}"
+                f"Model {model_idx} - Train: size={train_size}, "
+                f"batches={len(train_loader)} - Eval: size={eval_size}, "
+                f"batches={len(eval_loader)}"
             )
 
         global_step = 0
@@ -244,7 +246,9 @@ class Trainer:
         n_ebatches = n_batches // grad_acc_steps
         for epoch in range(n_epochs):
             if self.logger:
-                self.logger.info(f"Model {model_idx} - Starting training epoch {epoch+1}")
+                self.logger.info(
+                    f"Model {model_idx} - Starting training epoch {epoch + 1}"
+                )
 
             model.train()
             optimizer.zero_grad()
@@ -258,8 +262,10 @@ class Trainer:
                 if n_batches - step < grad_acc_steps:
                     if self.logger:
                         self.logger.info(
-                            f"Model {model_idx} - Epoch {epoch+1} - "
-                            f"Not enough batches to accumulate gradients, skipping remaining {n_batches - step} batches out of {n_batches}"
+                            f"Model {model_idx} - Epoch {epoch + 1} - "
+                            f"Not enough batches to accumulate gradients, "
+                            f"skipping remaining {n_batches - step} batches "
+                            f"out of {n_batches}"
                         )
                     break
                 batch_loss, lprobs_ch, lprobs_re = self.model._loss_fn(
@@ -287,8 +293,11 @@ class Trainer:
                         e_str_len = len(str(n_epochs))
                         eb_str_len = len(str(n_ebatches))
                         self.logger.info(
-                            f"Model {model_idx} - Train Epoch {epoch+1:>{e_str_len}}/{n_epochs} - Step {ebatch:>{eb_str_len}}/{n_ebatches} - "
-                            f"Avg Loss: {loss / ebatch:.4f} - Avg Margin: {margin_sum / ebatch:.4f}"
+                            f"Model {model_idx} - Train Epoch "
+                            f"{epoch + 1:>{e_str_len}}/{n_epochs} - "
+                            f"Step {ebatch:>{eb_str_len}}/{n_ebatches} - "
+                            f"Avg Loss: {loss / ebatch:.4f} - "
+                            f"Avg Margin: {margin_sum / ebatch:.4f}"
                         )
 
                     if wandb_handler is not None:
@@ -340,7 +349,8 @@ class Trainer:
                 if patience_counter >= es_patience:
                     if self.logger:
                         self.logger.info(
-                            f"Model {model_idx} - Early stopping triggered after {epoch + 1} epochs. "
+                            f"Model {model_idx} - Early stopping triggered "
+                            f"after {epoch + 1} epochs. "
                             f"Best validation loss: {best_eval_loss:.4f}"
                         )
                     break
@@ -349,7 +359,7 @@ class Trainer:
         self,
         model_idx: int,
         model: torch.nn.Module,
-        eval_loader: DataLoader,
+        eval_loader: DataLoader[dict[str, torch.Tensor]],
         device: torch.device,
         epoch: int,
         n_epochs: int,
@@ -400,7 +410,9 @@ class Trainer:
                     e_str_len = len(str(n_epochs))
                     b_str_len = len(str(n_batches))
                     self.logger.info(
-                        f"Model {model_idx} - Eval. Epoch {epoch:>{e_str_len}}/{n_epochs} - Step {b:>{b_str_len}}/{n_batches} - "
+                        f"Model {model_idx} - Eval. Epoch "
+                        f"{epoch:>{e_str_len}}/{n_epochs} - "
+                        f"Step {b:>{b_str_len}}/{n_batches} - "
                         f"Avg Loss: {current_avg_loss:.4f} - "
                         f"Avg Margin: {margin_sum / b:.4f}"
                     )

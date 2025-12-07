@@ -10,11 +10,17 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .utils import DeviceManager, HubManager, Logger
 
-# TODO(adam): possible abstraction here is to define a PEPOSubModel base class that handles the logic of a single model in the ensemble
-#             we could inherit this class to define submodels such as smollm, gemma, etc. which would handle their own chat template, tokenizer, etc.
-#             this would allow for more modularity and easier to extend to new models.
-#             we would define hydra configs for each submodel we support and in the pepo config just specify the submodel with a single word (smollm) which would load the appropriate config and instantiate the submodel.
-#             ISSUE: instantiation of L submodels requires a factory/passing config to pepo
+# TODO(adam): possible abstraction here is to define a PEPOSubModel base class
+#             that handles the logic of a single model in the ensemble
+#             we could inherit this class to define submodels such as smollm,
+#             gemma, etc. which would handle their own chat template, tokenizer,
+#             etc. this would allow for more modularity and easier to extend to
+#             new models. we would define hydra configs for each submodel we
+#             support and in the pepo config just specify the submodel with a
+#             single word (smollm) which would load the appropriate config and
+#             instantiate the submodel.
+#             ISSUE: instantiation of L submodels requires a factory/passing
+#             config to pepo
 
 
 class PEPOModel:
@@ -48,7 +54,8 @@ class PEPOModel:
             device_manager: Device manager instance.
             hub_manager: Hub manager instance.
             tokenizer_id: HuggingFace tokenizer ID. If None, uses model_id.
-            chat_template: Custom chat template string. If None, uses model's built-in template.
+            chat_template: Custom chat template string. If None, uses model's
+                built-in template.
             lora_r: LoRA rank parameter.
             lora_alpha: LoRA alpha parameter.
             lora_dropout: LoRA dropout rate.
@@ -73,22 +80,23 @@ class PEPOModel:
             r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
-            bias=lora_bias,
+            bias=lora_bias,  # type: ignore[arg-type]
             task_type=lora_task_type,
             target_modules=lora_target_modules,
         )
-        self.epochs_per_network = [0] * self.num_networks
+        self.epochs_per_network: list[Optional[int]] = [0] * self.num_networks
 
         self.tokenizer = self._init_tokenizer()
-        self._models = None
+        self._models: list[AutoModelForCausalLM] | None = None
         self._init_epochs()
 
         if self.logger:
             self.logger.info(
-                f"PEPOModel initialized with alpha={self.alpha}, beta={self.beta}, L={self.num_networks}"
+                f"PEPOModel initialized with alpha={self.alpha}, "
+                f"beta={self.beta}, L={self.num_networks}"
             )
 
-    def _init_epochs(self):
+    def _init_epochs(self) -> None:
         """Initialize epoch information without loading models."""
         load_from_hub = self.hub_manager.should_load_from_hub
         if not load_from_hub:
@@ -102,7 +110,8 @@ class PEPOModel:
                 submodel_name, self.hub_manager.load_epochs
             ):
                 raise ValueError(
-                    f"Model {submodel_name} (epoch {self.hub_manager.load_epochs}) not found in hub"
+                    f"Model {submodel_name} (epoch "
+                    f"{self.hub_manager.load_epochs}) not found in hub"
                 )
 
             if self.hub_manager.load_epochs is not None:
@@ -110,7 +119,7 @@ class PEPOModel:
             else:
                 self.epochs_per_network[model_idx] = None
 
-    def ensure_models_loaded(self):
+    def ensure_models_loaded(self) -> None:
         """Ensure models are loaded before use."""
         if self._models is None:
             if self.logger:
@@ -126,7 +135,8 @@ class PEPOModel:
         """
         Unload all submodels from GPU memory to free up resources.
         Useful when transitioning from generation to evaluation with a different model.
-        Models can be reloaded later via lazy loading (they will be loaded on next access).
+        Models can be reloaded later via lazy loading (they will be loaded on
+        next access).
         """
         if self._models is None:
             if self.logger:
@@ -147,13 +157,14 @@ class PEPOModel:
         if self.logger:
             self.logger.info("All submodels unloaded from GPU memory")
 
-    def _init_tokenizer(self):
+    def _init_tokenizer(self) -> AutoTokenizer:
         """
         Initialize tokenizer for the PEPO ensemble.
-        Handles chat template configuration from config or uses model's built-in template.
+        Handles chat template configuration from config or uses model's
+        built-in template.
         """
         tokenizer_id = self.tokenizer_id or self.model_id
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)  # type: ignore[no-untyped-call]
 
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -168,10 +179,11 @@ class PEPOModel:
                 self.logger.info("Using model's built-in chat template")
         else:
             raise ValueError(
-                f"Model {tokenizer_id} has no built-in chat_template. Consider providing one in the model config."
+                f"Model {tokenizer_id} has no built-in chat_template. "
+                f"Consider providing one in the model config."
             )
 
-        return tokenizer
+        return tokenizer  # type: ignore[no-any-return]
 
     def get_tokenizer(self):
         return self.tokenizer
@@ -181,16 +193,16 @@ class PEPOModel:
         Get the minimum number of epochs across all networks in the ensemble.
 
         Returns:
-            Minimum epochs. Returns None if any network has unknown epochs (loaded from best),
-            0 if all are newly instantiated.
+            Minimum epochs. Returns None if any network has unknown epochs
+            (loaded from best), 0 if all are newly instantiated.
         """
         if not self.epochs_per_network:
             return 0
 
-        if any(e is None for e in self.epochs_per_network):
+        epochs_list = [e for e in self.epochs_per_network if e is not None]
+        if not epochs_list:
             return None
-
-        return min(self.epochs_per_network)
+        return min(epochs_list)
 
     def _get_model_name(self) -> str:
         """
@@ -229,21 +241,23 @@ class PEPOModel:
 
         model_name = self._get_submodel_name(model_idx)
         if load_from_hub:
-            model = self.hub_manager.load_model(base_model, model_name)
+            model = self.hub_manager.load_model(base_model, model_name)  # type: ignore[arg-type]
         else:
-            model = get_peft_model(base_model, self.lora_config)
+            model = get_peft_model(base_model, self.lora_config)  # type: ignore[assignment]
             if self.logger:
-                trainable, total = model.get_nb_trainable_parameters()
+                trainable, total = model.get_nb_trainable_parameters()  # type: ignore[attr-defined]
                 trainable = trainable / 1000000
                 total = total / 1000000
                 self.logger.info(
-                    f"Model {model_name} has {trainable:.2f}M trainable parameters out of {total:.2f}M total parameters ({trainable/total*100:.2f}%)"
+                    f"Model {model_name} has {trainable:.2f}M trainable "
+                    f"parameters out of {total:.2f}M total parameters "
+                    f"({trainable / total * 100:.2f}%)"
                 )
         if self.compile:
-            model = torch.compile(model)
+            model = torch.compile(model)  # type: ignore[call-overload]
         return model
 
-    def _load_models(self):
+    def _load_models(self) -> list[AutoModelForCausalLM]:
         """
         Load all ensemble models from Hub or initialize them from scratch.
         """
@@ -254,14 +268,14 @@ class PEPOModel:
             models.append(self._load_model(model_idx, load_from_hub))
         return models
 
-    def _push_model(self, model_idx: int, epochs: Optional[int] = None):
+    def _push_model(self, model_idx: int, epochs: Optional[int] = None) -> None:
         """
         Push a single model to Hub.
 
         Args:
             model_idx: Index of the model in the ensemble.
-            epochs: Optional number of epochs. If provided, appends "-e{epochs}" to model name.
-                    Use None for final push without epoch suffix.
+            epochs: Optional number of epochs. If provided, appends "-e{epochs}"
+                to model name. Use None for final push without epoch suffix.
         """
         self.hub_manager.push_model(
             model_name=self._get_submodel_name(model_idx),
@@ -295,9 +309,10 @@ class PEPOModel:
 
         input_ids = input_ids.to(device)
         attention_mask = attention_mask.to(device)
-        with torch.no_grad() if model.training is False else torch.enable_grad():
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            logits = outputs.logits  # (B, T , V); shifted by 1 (removed first, added new)
+        with torch.no_grad() if model.training is False else torch.enable_grad():  # type: ignore[attr-defined,no-untyped-call]
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)  # type: ignore[operator]
+            # (B, T, V); shifted by 1 (removed first, added new)
+            logits = outputs.logits
 
         logits = logits[:, :-1, :]  # (B, T-1, V); remove the new token
         labels = input_ids[:, 1:]  # (B, T-1); remove the first token
@@ -307,7 +322,8 @@ class PEPOModel:
         # select only the log probs for the labels, (B, T-1)
         log_probs = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
         log_probs = log_probs * response_mask.float()  # mask out the response tokens
-        log_probs_sum = log_probs.sum(dim=-1)  # (B,) sum the log probs of response tokens
+        # (B,) sum the log probs of response tokens
+        log_probs_sum = log_probs.sum(dim=-1)
         return log_probs_sum  # (B,)
 
     def _loss_fn(
@@ -331,7 +347,7 @@ class PEPOModel:
         lprobs_reject = self._get_lprobs(
             model, device, reject_ids, reject_amask, reject_rmask
         )
-        with model.disable_adapter():  # type: ignore[operator]
+        with model.disable_adapter():  # type: ignore[attr-defined]
             lprobs_chosen_ref = self._get_lprobs(
                 model,
                 device,
@@ -362,10 +378,11 @@ class PEPOModel:
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Predict log probabilities assuming input_ids and attention_mask are already on model.device.
-        This avoids unnecessary device transfers during generation.
+        Predict log probabilities assuming input_ids and attention_mask are
+        already on model.device. This avoids unnecessary device transfers
+        during generation.
         """
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)  # type: ignore[operator]
         logits = outputs.logits  # (B, T, V)
         last_logits = logits[:, -1, :]
         log_probs = F.log_softmax(last_logits, dim=-1)
@@ -377,12 +394,15 @@ class PEPOModel:
         device_attention_masks: list[torch.Tensor],
     ) -> torch.Tensor:
         """
-        Predict using device-resident tensors. Each model uses its own input_ids tensor
-        that stays on its device throughout generation, avoiding repeated CPU-GPU transfers.
+        Predict using device-resident tensors. Each model uses its own
+        input_ids tensor that stays on its device throughout generation,
+        avoiding repeated CPU-GPU transfers.
 
         Args:
-            device_input_ids: List of input_ids tensors, one per model, each on its model's device
-            device_attention_masks: List of attention_mask tensors, one per model, each on its model's device
+            device_input_ids: List of input_ids tensors, one per model, each
+                on its model's device
+            device_attention_masks: List of attention_mask tensors, one per
+                model, each on its model's device
 
         Returns:
             Minimum log probabilities across ensemble (on CPU)
@@ -414,14 +434,20 @@ class PEPOModel:
 
         if len(log_probs_ensemble) != self.num_networks:
             raise RuntimeError(
-                f"Expected {self.num_networks} log prob tensors, got {len(log_probs_ensemble)}"
+                f"Expected {self.num_networks} log prob tensors, "
+                f"got {len(log_probs_ensemble)}"
             )
         if len(log_probs_ensemble) == 1:
-            return log_probs_ensemble[0]
+            result = log_probs_ensemble[0]
+            if result is None:
+                raise RuntimeError("Unexpected None in log_probs_ensemble")
+            return result
 
-        log_probs_ensemble = [log_probs.cpu() for log_probs in log_probs_ensemble]
+        log_probs_ensemble_filtered = [
+            log_probs.cpu() for log_probs in log_probs_ensemble if log_probs is not None
+        ]
         log_probs_tensor: torch.Tensor = torch.stack(
-            log_probs_ensemble, dim=0
+            log_probs_ensemble_filtered, dim=0
         )  # (L, B, V)
         min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
         return min_log_probs
@@ -450,12 +476,15 @@ class PEPOModel:
                 )  # (B, V)
         return log_probs.cpu()
 
-    def _top_p_sampling(self, logits, top_p=0.9, temperature=1.0):
+    def _top_p_sampling(
+        self, logits: torch.Tensor, top_p: float = 0.9, temperature: float = 1.0
+    ) -> torch.Tensor:
         """
         Perform top-p (nucleus) sampling on the given logits.
 
         Args:
-            logits (torch.Tensor): The logits from the model of shape (batch_size, vocab_size).
+            logits (torch.Tensor): The logits from the model of shape
+                (batch_size, vocab_size).
             top_p (float): The cumulative probability threshold for nucleus sampling.
             temperature (float): The temperature for scaling logits.
         Returns:
@@ -492,9 +521,13 @@ class PEPOModel:
         top_p: float = 0.9,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if greedy_sampling and top_p_sampling:
-            raise ValueError("Greedy sampling and top-p sampling cannot be used together")
+            raise ValueError(
+                "Greedy sampling and top-p sampling cannot be used together"
+            )
         if attention_mask is None:
-            attention_mask = (input_ids != self.tokenizer.pad_token_id).float()
+            attention_mask = (
+                input_ids != self.tokenizer.pad_token_id  # type: ignore[attr-defined]
+            ).float()
 
         batch_size = input_ids.shape[0]
 
@@ -534,7 +567,7 @@ class PEPOModel:
 
             # resample where we got missing token until we get a non-missing token
             if sample_missing_token:
-                missing_token_id = len(self.tokenizer)
+                missing_token_id = self.tokenizer.vocab_size  # type: ignore[attr-defined]
                 missing_probs = torch.clamp(1 - torch.sum(min_probs, dim=-1), min=0.0)
                 min_probs = torch.cat([min_probs, missing_probs.unsqueeze(-1)], dim=-1)
                 missing_mask = torch.ones(
@@ -565,11 +598,13 @@ class PEPOModel:
                     sampled_token_ids = torch.multinomial(min_probs, num_samples=1)
 
             stop_signal = stop_signal.to(device=sampled_token_ids.device) | (
-                sampled_token_ids == self.tokenizer.eos_token_id
+                sampled_token_ids == self.tokenizer.eos_token_id  # type: ignore[attr-defined]
             )
             # Append new tokens directly on each device to avoid CPU-GPU transfers
             for model_idx in range(self.num_networks):
-                device = torch.device(self.device_manager.get_device_for_model(model_idx))
+                device = torch.device(
+                    self.device_manager.get_device_for_model(model_idx)
+                )
                 new_token_tensor = sampled_token_ids.to(device).unsqueeze(-1)
                 device_input_ids[model_idx] = torch.cat(
                     [device_input_ids[model_idx], new_token_tensor], dim=1
@@ -585,17 +620,19 @@ class PEPOModel:
 
             pbar.set_postfix({"stopped": f"{stop_signal.sum().item()}/{batch_size}"})
 
-            if sampled_token_ids[0] == self.tokenizer.eos_token_id:
+            if sampled_token_ids[0] == self.tokenizer.eos_token_id:  # type: ignore[attr-defined]
                 if self.logger:
                     self.logger.debug(f"Generated EOS token at step {i}")
             if torch.all(stop_signal):
                 break
         if self.logger:
-            self.logger.debug(
-                f"Generated sequence idx=0:\n{self.tokenizer.decode(device_input_ids[0].cpu()[0], skip_special_tokens=True)}"
+            decoded = self.tokenizer.decode(  # type: ignore[attr-defined]
+                device_input_ids[0].cpu()[0], skip_special_tokens=True
             )
+            self.logger.debug(f"Generated sequence idx=0:\n{decoded}")
 
-        # Return the first device's tensors (move to CPU for consistency with original API)
+        # Return the first device's tensors (move to CPU for consistency
+        # with original API)
         return device_input_ids[0].cpu(), device_attention_masks[0].cpu()
 
     def generate_base_model(

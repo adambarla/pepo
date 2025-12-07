@@ -116,3 +116,29 @@ model:
   num_networks: ${L}
 ```
 The values in the `train.yaml` config file can be overridden by the command line arguments.
+
+## Development
+
+### Pre-commit hooks
+
+This project uses pre-commit hooks to ensure code quality and consistency. **All contributors must set up pre-commit hooks**:
+
+```bash
+# Install development dependencies
+uv sync --group dev
+
+# Install pre-commit hooks
+pre-commit install
+
+# Optional: Install commit-msg hook for conventional commits
+pre-commit install --hook-type commit-msg
+```
+
+The hooks will automatically:
+- **Clean Jupyter notebooks** by removing output cells
+- **Format code** with Black and isort
+- **Lint code** with Ruff
+- **Type check** with mypy
+- **Check for common issues** like trailing whitespace, large files, etc.
+
+**Important**: Pre-commit hooks are enforced via GitHub Actions. Pull requests will fail if checks don't pass.

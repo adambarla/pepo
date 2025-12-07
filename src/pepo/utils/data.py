@@ -2,7 +2,7 @@ import hashlib
 import os
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -27,26 +27,26 @@ class DataCollator:
         self.max_length = max_length
         self.max_prompt_length = max_prompt_length
 
-    def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         prompt_texts = [f["prompt_text"] for f in features]
         chosen_texts = [f["chosen_text"] for f in features]
         reject_texts = [f["rejected_text"] for f in features]
 
-        prompt_encoded = self.tokenizer(
+        prompt_encoded = self.tokenizer(  # type: ignore[operator]
             prompt_texts,
             padding=True,
             truncation=self.max_prompt_length is not None,
             max_length=self.max_prompt_length,
             return_tensors="pt",
         )
-        chosen_encoded = self.tokenizer(
+        chosen_encoded = self.tokenizer(  # type: ignore[operator]
             chosen_texts,
             padding=True,
             truncation=self.max_length is not None,
             max_length=self.max_length,
             return_tensors="pt",
         )
-        reject_encoded = self.tokenizer(
+        reject_encoded = self.tokenizer(  # type: ignore[operator]
             reject_texts,
             padding=True,
             truncation=self.max_length is not None,
@@ -81,7 +81,7 @@ class DataCollator:
 
 
 class DataManager:
-    """Manages dataset loading, preprocessing, and splitting for PEPO ensemble training."""
+    """Manages dataset loading, preprocessing, and splitting for PEPO ensemble."""
 
     def __init__(
         self,
@@ -116,7 +116,8 @@ class DataManager:
             num_proc: Number of processes for preprocessing. None uses all CPUs.
             cache_dir: Directory to cache preprocessed datasets. None means no caching.
             force_recompute: If True, skip loading from cache and recompute the dataset.
-            dataloader_num_workers: Number of worker processes for data loading (0 = main thread only).
+            dataloader_num_workers: Number of worker processes for data loading
+                (0 = main thread only).
             dataloader_pin_memory: Pin memory for faster CPU->GPU transfer.
             dataloader_persistent_workers: Keep workers alive between epochs.
             logger: Optional logger instance.
@@ -169,7 +170,7 @@ class DataManager:
             "max_length": self.max_length,
             "max_prompt_length": self.max_prompt_length,
             "tokenizer": tokenizer_name,
-            "pad_token_id": self.tokenizer.pad_token_id,
+            "pad_token_id": self.tokenizer.pad_token_id,  # type: ignore[attr-defined]
             "chat_template": chat_template_hash,
         }
 
@@ -220,7 +221,9 @@ class DataManager:
             self.logger.info(f"Loaded dataset with {len(raw_dataset)} examples")
         return raw_dataset
 
-    def _ensure_message_list(self, messages, is_prompt: bool = False):
+    def _ensure_message_list(
+        self, messages: Any, is_prompt: bool = False
+    ) -> list[dict[str, str]] | None:
         """
         Validate and convert messages to list format.
         Matches logic from pepo_launcher.py ensure_message_list.
@@ -240,7 +243,9 @@ class DataManager:
         else:
             return None
 
-    def _is_valid_length(self, prompt_str: str, chosen_str: str, reject_str: str) -> bool:
+    def _is_valid_length(
+        self, prompt_str: str, chosen_str: str, reject_str: str
+    ) -> bool:
         """
         Checks the lenght of tokenized example to see if it's under the length limits.
         Tokenizes with add_special_tokens=True and truncation=False
@@ -252,17 +257,17 @@ class DataManager:
             return True
 
         if self.max_prompt_length is not None:
-            prompt_tokens = self.tokenizer(prompt_str, truncation=False)
+            prompt_tokens = self.tokenizer(prompt_str, truncation=False)  # type: ignore[operator]
             prompt_len = len(prompt_tokens["input_ids"])
             if prompt_len > self.max_prompt_length:
                 return False
 
         if self.max_length is not None:
-            chosen_tokens = self.tokenizer(chosen_str, truncation=False)
+            chosen_tokens = self.tokenizer(chosen_str, truncation=False)  # type: ignore[operator]
             chosen_len = len(chosen_tokens["input_ids"])
             if chosen_len > self.max_length:
                 return False
-            reject_tokens = self.tokenizer(reject_str, truncation=False)
+            reject_tokens = self.tokenizer(reject_str, truncation=False)  # type: ignore[operator]
             reject_len = len(reject_tokens["input_ids"])
             if reject_len > self.max_length:
                 return False
@@ -274,7 +279,7 @@ class DataManager:
         Stores formatted strings instead of tokenized sequences.
         Tokenization happens in the collator for better performance.
         """
-        processed = {
+        processed: dict[str, list[str]] = {
             "prompt_text": [],
             "chosen_text": [],
             "rejected_text": [],
@@ -292,16 +297,16 @@ class DataManager:
             if curr_prompt is None or curr_chosen is None or curr_reject is None:
                 continue
 
-            prompt_str = self.tokenizer.apply_chat_template(
+            prompt_str = self.tokenizer.apply_chat_template(  # type: ignore[attr-defined]
                 curr_prompt, tokenize=False, add_generation_prompt=True
             )
             chosen_str = (
-                self.tokenizer.apply_chat_template(curr_chosen, tokenize=False)
-                + self.tokenizer.eos_token
+                self.tokenizer.apply_chat_template(curr_chosen, tokenize=False)  # type: ignore[attr-defined]
+                + self.tokenizer.eos_token  # type: ignore[attr-defined]
             )
             reject_str = (
-                self.tokenizer.apply_chat_template(curr_reject, tokenize=False)
-                + self.tokenizer.eos_token
+                self.tokenizer.apply_chat_template(curr_reject, tokenize=False)  # type: ignore[attr-defined]
+                + self.tokenizer.eos_token  # type: ignore[attr-defined]
             )
 
             if not self._is_valid_length(prompt_str, chosen_str, reject_str):
@@ -364,7 +369,8 @@ class DataManager:
             self.train_datasets[model_idx] = train_dataset_preprocessed.select(indices)
             if self.logger:
                 self.logger.info(
-                    f"Train split {model_idx} has {len(self.train_datasets[model_idx])} examples"
+                    f"Train split {model_idx} has "
+                    f"{len(self.train_datasets[model_idx])} examples"
                 )
 
         self.eval_dataset = eval_dataset_preprocessed
@@ -381,7 +387,8 @@ class DataManager:
                     self.logger.info("Recomputing dataset (force_recompute=True)...")
                 else:
                     self.logger.info(
-                        f"No cached dataset found at {self.cache_path}. Creating new dataset..."
+                        f"No cached dataset found at {self.cache_path}. "
+                        f"Creating new dataset..."
                     )
             dataset_raw = self._load()
             dataset_preprocessed = self._process(dataset_raw)
@@ -394,7 +401,7 @@ class DataManager:
         model_idx: int,
         partition: str,
         batch_size: int,
-    ) -> DataLoader:
+    ) -> DataLoader[dict[str, torch.Tensor]]:
         """
         Get DataLoader for a specific model and partition.
 

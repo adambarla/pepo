@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Union
 try:
     import wandb
 except ImportError:
-    wandb = None
+    wandb = None  # type: ignore[assignment]
 
 
 class ColoredFormatter(logging.Formatter):
@@ -62,8 +62,9 @@ class Logger:
             name: Logger name (used to identify different loggers).
             log_file: Path to log file. If None, auto-generates with timestamp.
             log_dir: Directory for log files (created if doesn't exist).
-            level: Logging level as string ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
-                   or integer (logging.DEBUG, logging.INFO, etc.). Default is string-based.
+            level: Logging level as string ("DEBUG", "INFO", "WARNING",
+                "ERROR", "CRITICAL") or integer (logging.DEBUG, logging.INFO,
+                etc.). Default is string-based.
             format_string: Custom format string for log messages.
             date_format: Custom date format string.
         """
@@ -108,7 +109,9 @@ class Logger:
                 log_level = logging.INFO
             elif level_str not in valid_levels:
                 raise ValueError(
-                    f"Unknown level: '{level}' (type: {type(level)}, normalized: '{level_str}'). Valid levels are: {list(valid_levels.keys())}"
+                    f"Unknown level: '{level}' (type: {type(level)}, "
+                    f"normalized: '{level_str}'). "
+                    f"Valid levels are: {list(valid_levels.keys())}"
                 )
             else:
                 log_level = valid_levels[level_str]
@@ -147,27 +150,27 @@ class Logger:
         console_handler.setFormatter(console_formatter)
         self.logger.addHandler(console_handler)
 
-    def debug(self, message: str):
+    def debug(self, message: str) -> None:
         """Log a debug message."""
         self.logger.debug(message)
 
-    def info(self, message: str):
+    def info(self, message: str) -> None:
         """Log an info message."""
         self.logger.info(message)
 
-    def warning(self, message: str):
+    def warning(self, message: str) -> None:
         """Log a warning message."""
         self.logger.warning(message)
 
-    def error(self, message: str):
+    def error(self, message: str) -> None:
         """Log an error message."""
         self.logger.error(message)
 
-    def critical(self, message: str):
+    def critical(self, message: str) -> None:
         """Log a critical message."""
         self.logger.critical(message)
 
-    def exception(self, message: str):
+    def exception(self, message: str) -> None:
         """Log an exception with traceback."""
         self.logger.exception(message)
 
@@ -226,14 +229,14 @@ class WandbHandler:
         self.logger = logger
 
         if wandb is not None:
-            self.run_id: Optional[str] = wandb.util.generate_id()  # type: ignore[attr-defined]
+            self.run_id: Optional[str] = wandb.util.generate_id()
         else:
             self.run_id = None
 
         if enabled and not _lazy_init:
             self.init_run()
 
-    def init_run(self):
+    def init_run(self) -> None:
         """
         Initialize the wandb run.
         """
@@ -244,7 +247,9 @@ class WandbHandler:
 
         if self.initialized and self.run is not None:
             if self.logger is not None:
-                self.logger.warning("Wandb run is already initialized, skipping init_run")
+                self.logger.warning(
+                    "Wandb run is already initialized, skipping init_run"
+                )
             return
 
         if self.wandb is None:
@@ -257,7 +262,7 @@ class WandbHandler:
                 self.logger.error("Wandb run_id is None, skipping init_run")
             return
 
-        init_kwargs: Dict[str, Any] = {
+        init_kwargs: dict[str, Any] = {
             "project": self.project,
             "name": self.name,
             "tags": self.tags,
@@ -270,15 +275,17 @@ class WandbHandler:
             init_kwargs["group"] = self.group
         if self.cfg is not None:
             init_kwargs["config"] = self.cfg
-        self.run = self.wandb.init(**init_kwargs)  # type: ignore[assignment,arg-type]
+        self.run = self.wandb.init(**init_kwargs)
         self.initialized = True
 
         if self.logger is not None:
             self.logger.info(
-                f"Wandb run {self.name} was initialized. Run: {self.run_id}, Group: {self.group}, Project: {self.project}, Entity: {self.entity}"
+                f"Wandb run {self.name} was initialized. Run: {self.run_id}, "
+                f"Group: {self.group}, Project: {self.project}, "
+                f"Entity: {self.entity}"
             )
 
-    def log(self, metrics: Dict[str, Any], step: Optional[int] = None):
+    def log(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
         """
         Log metrics to wandb.
 
@@ -292,7 +299,8 @@ class WandbHandler:
             except Exception:
                 if self.logger is not None:
                     self.logger.exception(
-                        f"Failed to log metrics to wandb. Metrics: {metrics}, Step: {step}"
+                        f"Failed to log metrics to wandb. Metrics: {metrics}, "
+                        f"Step: {step}"
                     )
 
     def finish(self):

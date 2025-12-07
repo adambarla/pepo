@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import hydra
+import pandas as pd
 from dotenv import load_dotenv
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
@@ -18,7 +19,7 @@ load_dotenv()
 
 
 @hydra.main(config_path="../configs", config_name="eval.yaml", version_base="1.1")
-def main(cfg: DictConfig):
+def main(cfg: DictConfig) -> None:
     hydra_cfg = HydraConfig.get()
     original_work_dir = Path(hydra_cfg.runtime.cwd)
 
@@ -45,7 +46,8 @@ def main(cfg: DictConfig):
 
     if not os.getenv("HF_TOKEN"):
         logger.warning(
-            "HF_TOKEN environment variable not set. Model loading may fail if models are private."
+            "HF_TOKEN environment variable not set. "
+            "Model loading may fail if models are private."
         )
 
     # All loggers will be instantiated recursively by Hydra from config
@@ -86,8 +88,43 @@ def main(cfg: DictConfig):
         logger.info("Responses file found - Skipping generation")
 
     # Evaluate responses
-    logger.info("Running evaluation (implementation pending)")
+    logger.info("Running evaluation")
     evaluator.evaluate()
+
+    # Consolidate all model-specific leaderboard files into one leaderboard.csv
+    logger.info("Consolidating leaderboard files")
+    from pepo.evaluator.alpaca import AlpacaEvalEvaluator
+
+    consolidated_path = AlpacaEvalEvaluator.consolidate_leaderboards(
+        output_dir=output_dir_path, logger=logger
+    )
+    logger.info(f"Consolidated leaderboard saved to: {consolidated_path}")
+
+    # Display the full leaderboard
+    if consolidated_path.exists():
+        df_leaderboard = pd.read_csv(consolidated_path, index_col=0)
+
+        print("\n" + "=" * 80)
+        print("CONSOLIDATED LEADERBOARD")
+        print("=" * 80)
+
+        with pd.option_context(
+            "display.max_rows",
+            None,
+            "display.max_columns",
+            None,
+            "display.width",
+            None,
+            "display.max_colwidth",
+            None,
+            "display.precision",
+            4,
+        ):
+            print(df_leaderboard.to_string())
+
+        print("=" * 80 + "\n")
+
+        logger.info("Leaderboard displayed above")
 
 
 if __name__ == "__main__":
