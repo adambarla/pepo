@@ -1,8 +1,7 @@
+import logging
 from typing import List, Optional
 
 import torch
-
-from .logger import Logger
 
 
 class DeviceManager:
@@ -14,28 +13,25 @@ class DeviceManager:
     def __init__(
         self,
         gpu_ids: Optional[List[int]] = None,
-        logger: Optional[Logger] = None,
+        dtype: torch.dtype = torch.bfloat16,
     ):
         """
         Initialize the device manager.
 
         Args:
             gpu_ids: Optional list of GPU IDs to use. If None, uses all available GPUs.
-            logger: Optional logger instance for device info messages.
         """
         self.gpu_ids = gpu_ids
-        self.logger = logger
+        self.dtype = dtype
 
         self._available_gpus = self._get_available_gpus()
-
-        if self.logger:
-            self._log_environment_info()
+        self._log_environment_info()
 
     def _get_available_gpus(self) -> List[int]:
         """Get list of available GPU IDs."""
         if not torch.cuda.is_available():
-            if self.logger:
-                self.logger.error("CUDA is not available!")
+            logger = logging.getLogger(__name__)
+            logger.error("CUDA is not available!")
             raise RuntimeError("CUDA is not available")
 
         num_gpus = torch.cuda.device_count()
@@ -64,16 +60,6 @@ class DeviceManager:
         return gpu_device
 
     @property
-    def dtype(self) -> torch.dtype:
-        """Get the appropriate dtype for the current device."""
-        if torch.cuda.is_available():
-            return torch.bfloat16
-        elif torch.backends.mps.is_available():
-            return torch.float16
-        else:
-            return torch.float32
-
-    @property
     def num_available_gpus(self) -> int:
         """Get the number of available GPUs."""
         return len(self._available_gpus)
@@ -92,13 +78,11 @@ class DeviceManager:
 
     def _log_environment_info(self) -> None:
         """Log device assignment information."""
-        if self.logger:
-            self.logger.info("Device Manager initialized:")
-            self.logger.info(f"Available GPUs: {self._available_gpus}")
-            self.logger.info(f"Dtype: {self.dtype}")
-            for gpu_id in self._available_gpus:
-                props = torch.cuda.get_device_properties(gpu_id)
-                memory_gb = props.total_memory / (1024**3)
-                self.logger.info(
-                    f"GPU {gpu_id}: {props.name}, {memory_gb:.1f} GB total memory"
-                )
+        logger = logging.getLogger(__name__)
+        logger.info("Device Manager initialized:")
+        logger.info(f"Available GPUs: {self._available_gpus}")
+        logger.info(f"Dtype: {self.dtype}")
+        for gpu_id in self._available_gpus:
+            props = torch.cuda.get_device_properties(gpu_id)
+            memory_gb = props.total_memory / (1024**3)
+            logger.info(f"GPU {gpu_id}: {props.name}, {memory_gb:.1f} GB total memory")

@@ -1,13 +1,17 @@
+import logging
 import threading
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import torch
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 from transformers import get_scheduler
 
-from .utils import DataManager, Logger, WandbHandler
+from .utils import DataManager, WandbManager, WandbRun
+
+logger = logging.getLogger(__name__)
 
 
 class Trainer:
@@ -15,119 +19,156 @@ class Trainer:
 
     def __init__(
         self,
-        model: Any,
-        data_manager: DataManager,
-        optimizer_config: DictConfig,
-        scheduler_config: DictConfig,
+        optimizer: Callable[..., torch.optim.Optimizer],
+        scheduler_name: str,
+        scheduler_num_warmup_steps: int,
         wandb_config: DictConfig,
-        batch_size: int,
-        eval_batch_size: Optional[int] = None,
+        train_batch_size: int,
+        eval_batch_size: int,
         gradient_accumulation_steps: int = 1,
-        max_epochs: int = 1,
         early_stopping_patience: Optional[int] = None,
         early_stopping_min_delta: float = 0.0,
-        resolved_cfg_plain: Optional[dict[str, Any]] = None,
-        logger: Optional[Logger] = None,
+        log_interval: int = 100,
     ) -> None:
         """
         Initialize trainer.
 
         Args:
-            model: PEPOModel instance to train.
-            data_manager: DataManager instance for getting dataloaders.
-            optimizer_config: Hydra config for optimizer instantiation.
-            scheduler_config: Hydra config for scheduler (name, num_warmup_steps).
+            optimizer: Callable factory for optimizer instantiation (partial).
+            scheduler_name: Name of the scheduler to use.
+            scheduler_num_warmup_steps: Number of warmup steps for the scheduler.
             wandb_config: Hydra config for wandb settings.
-            batch_size: Batch size for training.
-            eval_batch_size: Batch size for evaluation. If None, uses 4 * batch_size.
+            train_batch_size: Batch size for training.
+            eval_batch_size: Batch size for evaluation and generation
+                (found via find_optimal_batch_sizes.py).
             gradient_accumulation_steps: Number of steps to accumulate gradients.
-            max_epochs: Maximum number of training epochs.
             early_stopping_patience: Number of epochs to wait before stopping
                 if no improvement. If None, early stopping is disabled.
             early_stopping_min_delta: Minimum change to qualify as an improvement.
-            resolved_cfg_plain: Resolved config dict for wandb logging.
-            logger: Optional logger instance.
         """
-        from hydra.utils import instantiate
-
-        self.model = model
-        self.data_manager = data_manager
-        self.batch_size = batch_size
+        self.optimizer_factory = optimizer
+        self.scheduler_name = scheduler_name
+        self.scheduler_num_warmup_steps = scheduler_num_warmup_steps
+        self.wandb_config = wandb_config
+        self.batch_size = train_batch_size
         self.eval_batch_size = eval_batch_size
         self.gradient_accumulation_steps = gradient_accumulation_steps
-        self.max_epochs = max_epochs
         self.early_stopping_patience = early_stopping_patience
         self.early_stopping_min_delta = early_stopping_min_delta
-        self.logger = logger
+        self.log_interval = log_interval
 
-        if wandb_config.enabled and resolved_cfg_plain is not None:
-            dataset_path = data_manager._get_cache_path()
-            if dataset_path is not None:
-                dataset_hash = dataset_path.split("/")[-1]
-                resolved_cfg_plain["dataset"]["hash"] = dataset_hash
+        self.optimizers: list[torch.optim.Optimizer] = []
+        self.schedulers: list[torch.optim.lr_scheduler._LRScheduler] = []
+        self.wandb_manager: Optional[WandbManager] = None
 
-        self.optimizers = []
-        self.schedulers = []
-        self.wandb_handlers = None
+    def _setup_training(
+        self,
+        data_manager: DataManager,
+        max_epochs: int,
+        wandb_manager: Optional[WandbManager] = None,
+    ) -> None:
+        """
+        Setup optimizers, schedulers, and wandb handlers.
+        Internal helper called by train().
 
-        for model_idx in range(model.num_networks):
-            model_params = model.models[model_idx].parameters()
+        Args:
+            data_manager: Data manager for training data.
+            max_epochs: Maximum number of epochs to train for.
+            wandb_manager: Optional WandbManager instance for logging.
+        """
+        if self.optimizers:
+            return
 
-            optimizer = instantiate(
-                optimizer_config,
-                params=model_params,
-            )
+        self.data_manager = data_manager
+
+        for model_idx in range(self.model.num_networks):
+            model_params = self.model.models[model_idx].parameters()
+
+            optimizer = self.optimizer_factory(params=model_params)
             self.optimizers.append(optimizer)
 
             train_loader = data_manager.get_dataloader(
                 model_idx=model_idx,
                 partition="train",
-                batch_size=batch_size,
+                batch_size=self.batch_size,
             )
             num_training_steps = (
-                len(train_loader) // gradient_accumulation_steps
+                len(train_loader) // self.gradient_accumulation_steps
             ) * max_epochs
 
             scheduler = get_scheduler(
-                name=scheduler_config.name,
+                name=self.scheduler_name,
                 optimizer=optimizer,
-                num_warmup_steps=scheduler_config.num_warmup_steps,
+                num_warmup_steps=self.scheduler_num_warmup_steps,
                 num_training_steps=num_training_steps,
             )
             self.schedulers.append(scheduler)
 
-            if logger:
-                logger.info(
-                    f"Created optimizer and scheduler for model {model_idx}. "
-                    f"Training steps: {num_training_steps}"
-                )
+            logger.info(
+                f"Created optimizer and scheduler for model {model_idx}. "
+                f"Training steps: {num_training_steps}"
+            )
 
-        if wandb_config.enabled:
-            self.wandb_handlers = []
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            for model_idx in range(model.num_networks):
-                handler = WandbHandler(
-                    enabled=True,
-                    project=wandb_config.project,
-                    name=model._get_submodel_name(model_idx),
-                    tags=list(wandb_config.tags) + [model._get_base_model_name()],
-                    notes=wandb_config.notes,
-                    entity=wandb_config.entity,
-                    mode=wandb_config.mode,
-                    cfg=resolved_cfg_plain,
-                    group=f"{model._get_model_name()}-{timestamp}",
-                    logger=logger,
-                    _lazy_init=True,
-                )
-                self.wandb_handlers.append(handler)
+        if wandb_manager is not None:
+            self.wandb_manager = wandb_manager
 
-    def train(self):
+    def train(
+        self,
+        model: Any,
+        data_manager: DataManager,
+        max_epochs: int,
+        wandb_manager: Optional[WandbManager] = None,
+        continue_training: bool = False,
+    ) -> None:
         """
         Train the PEPO ensemble models and save the models to the hub.
         Uses threading to run models in parallel on different GPUs.
+
+        Args:
+            model: PEPOModel instance to train.
+            data_manager: Data manager for training data.
+            max_epochs: Maximum number of epochs to train for.
+            wandb_manager: Optional WandbManager instance for logging.
         """
-        if self.logger:
-            self.logger.info("Training PEPO ensemble models...")
+        self.model = model
+
+        # Load models if not already loaded
+        if self.model._models is None:
+            if continue_training:
+                model_name = model._get_model_name()
+                latest_epoch = model.hub_manager.find_latest_epoch_for_all_submodels(
+                    model_name, model.num_networks, max_epoch=max_epochs
+                )
+                if latest_epoch is None:
+                    logger.warning(
+                        "Continue training enabled but no checkpoint found. "
+                        "Starting training from scratch with new models."
+                    )
+                    self.model.load_models(init_new=True)
+                elif self.model.can_load_from_epoch(latest_epoch):
+                    logger.info(
+                        f"Continuing training from checkpoint: epoch {latest_epoch}"
+                    )
+                    self.model.load_from_epoch(latest_epoch)
+                else:
+                    logger.warning(
+                        f"Continue training enabled but cannot load from "
+                        f"epoch {latest_epoch}. "
+                        "Starting training from scratch with new models."
+                    )
+                    self.model.load_models(init_new=True)
+            else:
+                logger.info("Initializing new models for training...")
+                self.model.load_models(init_new=True)
+        else:
+            logger.info("Models already loaded. Using existing models for training.")
+
+        self._setup_training(data_manager, max_epochs, wandb_manager)
+
+        logger.info("Training PEPO ensemble models...")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        group = f"{self.model._get_model_name()}-{timestamp}"
 
         threads = []
         for model_idx in range(self.model.num_networks):
@@ -136,16 +177,20 @@ class Trainer:
                 partition="train",
                 batch_size=self.batch_size,
             )
-            eval_bs = (
-                self.eval_batch_size
-                if self.eval_batch_size is not None
-                else 4 * self.batch_size
-            )
             eval_loader = self.data_manager.get_dataloader(
                 model_idx=model_idx,
                 partition="eval",
-                batch_size=eval_bs,
+                batch_size=self.eval_batch_size,
             )
+
+            wandb_run = None
+            if self.wandb_manager is not None:
+                wandb_run = self.wandb_manager.get_training_wandb_handler(
+                    model=self.model,
+                    data_manager=data_manager,
+                    model_idx=model_idx,
+                    group=group,
+                )
 
             thread = threading.Thread(
                 target=self._train_model,
@@ -155,13 +200,9 @@ class Trainer:
                     eval_loader,
                     self.optimizers[model_idx],
                     self.schedulers[model_idx],
-                    self.max_epochs,
+                    max_epochs,
                     self.gradient_accumulation_steps,
-                    (
-                        self.wandb_handlers[model_idx]
-                        if self.wandb_handlers is not None
-                        else None
-                    ),
+                    wandb_run,
                     self.early_stopping_patience,
                     self.early_stopping_min_delta,
                 ),
@@ -172,11 +213,8 @@ class Trainer:
         for thread in threads:
             thread.join()
 
-        if self.wandb_handlers is not None:
-            for wandb_handler in self.wandb_handlers:
-                wandb_handler.finish()  # type: ignore[no-untyped-call]
-
-        self.model._push_models()
+        if self.model.factory:
+            self.model.factory.save_model(self.model.models)
 
     def _train_model(
         self,
@@ -187,46 +225,43 @@ class Trainer:
         scheduler: torch.optim.lr_scheduler._LRScheduler,
         n_epochs: int,
         grad_acc_steps: int,
-        wandb_handler: Optional[WandbHandler],
+        wandb_run: Optional[WandbRun],
         es_patience: Optional[int],
         es_min_delta: float,
     ) -> None:
         """
         Train a single model in a thread. Each thread sets its CUDA device context
         to ensure proper GPU isolation.
-
-        Args:
-            model_idx: Index of the model in the ensemble.
-            train_loader: DataLoader for training data.
-            eval_loader: DataLoader for evaluation data.
-            optimizer: Optimizer for training.
-            scheduler: Learning rate scheduler.
-            n_epochs: Maximum number of training epochs.
-            grad_acc_steps: Number of steps to accumulate gradients.
-            wandb_handler: Optional wandb handler for logging.
-            es_patience: Number of epochs to wait before stopping if no improvement.
-            es_min_delta: Minimum change to qualify as an improvement.
         """
         device = torch.device(self.model.device_manager.get_device_for_model(model_idx))
         model = self.model.models[model_idx]
 
-        if wandb_handler is not None and wandb_handler.enabled:
-            wandb_handler.init_run()
+        if wandb_run is not None and wandb_run.enabled:
+            wandb_run.init_train_run()
 
-        if self.logger:
-            train_size = len(train_loader.dataset)  # type: ignore[arg-type]
-            eval_size = len(eval_loader.dataset)  # type: ignore[arg-type]
-            self.logger.info(
-                f"Model {model_idx} - Train: size={train_size}, "
-                f"batches={len(train_loader)} - Eval: size={eval_size}, "
-                f"batches={len(eval_loader)}"
-            )
+        logger = logging.getLogger(__name__)
+        train_size = len(train_loader.dataset)  # type: ignore[arg-type]
+        eval_size = len(eval_loader.dataset)  # type: ignore[arg-type]
+        logger.info(
+            f"Model {model_idx} - Train: size={train_size}, "
+            f"batches={len(train_loader)} - Eval: size={eval_size}, "
+            f"batches={len(eval_loader)}"
+        )
+        n_batches = len(train_loader)
 
-        global_step = 0
+        start_epoch = self.model.epochs_per_network[model_idx] or 0
+        global_step = (
+            0 if start_epoch == 0 else start_epoch * n_batches // grad_acc_steps
+        )
+        if global_step > 0:
+            for _ in range(global_step):
+                scheduler.step()
 
-        if self.logger:
-            self.logger.info(f"Model {model_idx} - Running initial evaluation...")
+        logger.info(
+            f"Model {model_idx} - Running evaluation from epoch {start_epoch}..."
+        )
 
+        initial_eval_loss = float("inf")
         initial_eval_loss = self._eval_model(
             model_idx=model_idx,
             model=model,
@@ -235,47 +270,49 @@ class Trainer:
             epoch=0,
             n_epochs=n_epochs,
             global_step=global_step,
-            wandb_handler=wandb_handler,
+            wandb_run=wandb_run,
         )
+
+        is_continuing = start_epoch > 0
+        if not is_continuing:
+            if self.model.factory:
+                self.model.factory.push_submodel(model, model_idx, epochs=0)
 
         best_eval_loss = initial_eval_loss
         patience_counter = 0
         es_enabled = es_patience is not None
 
-        n_batches = len(train_loader)
-        n_ebatches = n_batches // grad_acc_steps
-        for epoch in range(n_epochs):
-            if self.logger:
-                self.logger.info(
-                    f"Model {model_idx} - Starting training epoch {epoch + 1}"
-                )
+        for epoch in range(start_epoch + 1, n_epochs + 1):
+            logger.info(
+                f"Model {model_idx} - Starting training epoch {epoch}/{n_epochs}"
+            )
 
             model.train()
             optimizer.zero_grad()
-            loss = 0.0
-            lprob_chosen_sum = 0.0
-            lprob_reject_sum = 0.0
-            margin_sum = 0.0
+            loss_sum = torch.tensor(0.0, device=device)
+            lprob_chosen_sum_tensor = torch.tensor(0.0, device=device)
+            lprob_reject_sum_tensor = torch.tensor(0.0, device=device)
+            margin_sum_tensor = torch.tensor(0.0, device=device)
             ebatch = 0
 
+            desc = f"Model {model_idx} - Epoch {epoch}/{n_epochs}"
+            pbar = tqdm(
+                total=n_batches // self.log_interval,
+                desc=desc,
+                position=model_idx,
+                leave=False,
+                mininterval=1.0,  # Update at most once per second
+            )
+
             for step, batch in enumerate(train_loader):
-                if n_batches - step < grad_acc_steps:
-                    if self.logger:
-                        self.logger.info(
-                            f"Model {model_idx} - Epoch {epoch + 1} - "
-                            f"Not enough batches to accumulate gradients, "
-                            f"skipping remaining {n_batches - step} batches "
-                            f"out of {n_batches}"
-                        )
-                    break
                 batch_loss, lprobs_ch, lprobs_re = self.model._loss_fn(
                     batch, model, device
                 )
 
-                loss += batch_loss.item()
-                lprob_chosen_sum += lprobs_ch.mean().item()
-                lprob_reject_sum += lprobs_re.mean().item()
-                margin_sum += (lprobs_ch - lprobs_re).mean().item()
+                loss_sum += batch_loss.detach()
+                lprob_chosen_sum_tensor += lprobs_ch.mean().detach()
+                lprob_reject_sum_tensor += lprobs_re.mean().detach()
+                margin_sum_tensor += (lprobs_ch - lprobs_re).mean().detach()
 
                 batch_loss = batch_loss / grad_acc_steps
                 batch_loss.backward()
@@ -287,55 +324,59 @@ class Trainer:
                     global_step += 1
                     ebatch += 1
 
+                if (step + 1) % self.log_interval == 0:
                     current_lr = scheduler.get_last_lr()[0]
+                    loss_val = loss_sum.item() / (step + 1)
+                    margin_val = margin_sum_tensor.item() / (step + 1)
 
-                    if self.logger and ebatch % max(1, n_ebatches // 100) == 0:
-                        e_str_len = len(str(n_epochs))
-                        eb_str_len = len(str(n_ebatches))
-                        self.logger.info(
-                            f"Model {model_idx} - Train Epoch "
-                            f"{epoch + 1:>{e_str_len}}/{n_epochs} - "
-                            f"Step {ebatch:>{eb_str_len}}/{n_ebatches} - "
-                            f"Avg Loss: {loss / ebatch:.4f} - "
-                            f"Avg Margin: {margin_sum / ebatch:.4f}"
-                        )
+                    pbar.set_postfix(
+                        {
+                            "loss": f"{loss_val:.4f}",
+                            "margin": f"{margin_val:.4f}",
+                            "lr": f"{current_lr:.2e}",
+                        }
+                    )
+                    pbar.update(1)
 
-                    if wandb_handler is not None:
-                        wandb_handler.log(
+                    if wandb_run is not None:
+                        wandb_run.log(
                             {
                                 "train/learning_rate": current_lr,
                                 "train/step": global_step,
-                                "train/curr_avg_loss": loss / ebatch,
-                                "train/curr_avg_margin": margin_sum / ebatch,
+                                "train/curr_avg_loss": loss_val,
+                                "train/curr_avg_margin": margin_val,
                             },
                             step=global_step,
                         )
 
-            if wandb_handler is not None:
-                wandb_handler.log(
+            pbar.close()
+
+            if wandb_run is not None:
+                wandb_run.log(
                     {
-                        "train/avg_lprobs_chosen": lprob_chosen_sum / ebatch,
-                        "train/avg_lprobs_reject": lprob_reject_sum / ebatch,
-                        "train/avg_margin": margin_sum / ebatch,
-                        "train/epoch": epoch + 1,
+                        "train/avg_lprobs_chosen": lprob_chosen_sum_tensor.item()
+                        / ebatch,
+                        "train/avg_lprobs_reject": lprob_reject_sum_tensor.item()
+                        / ebatch,
+                        "train/avg_margin": margin_sum_tensor.item() / ebatch,
+                        "train/epoch": epoch,
                     },
                     step=global_step,
                 )
 
-            self.model.epochs_per_network[model_idx] += 1
-            self.model._push_model(
-                model_idx, epochs=int(self.model.epochs_per_network[model_idx])
-            )
+            self.model.epochs_per_network[model_idx] = epoch
+            if self.model.factory:
+                self.model.factory.push_submodel(model, model_idx, epochs=epoch)
 
             eval_loss = self._eval_model(
                 model_idx=model_idx,
                 model=model,
                 eval_loader=eval_loader,
                 device=device,
-                epoch=epoch + 1,
+                epoch=epoch,
                 n_epochs=n_epochs,
                 global_step=global_step,
-                wandb_handler=wandb_handler,
+                wandb_run=wandb_run,
             )
 
             if es_enabled and es_patience is not None:
@@ -347,13 +388,15 @@ class Trainer:
 
                 assert es_patience is not None
                 if patience_counter >= es_patience:
-                    if self.logger:
-                        self.logger.info(
-                            f"Model {model_idx} - Early stopping triggered "
-                            f"after {epoch + 1} epochs. "
-                            f"Best validation loss: {best_eval_loss:.4f}"
-                        )
+                    logger.info(
+                        f"Model {model_idx} - Early stopping triggered "
+                        f"after {epoch} epochs "
+                        f"Best validation loss: {best_eval_loss:.4f}"
+                    )
                     break
+
+        if wandb_run is not None:
+            wandb_run.finish()
 
     def _eval_model(
         self,
@@ -364,69 +407,72 @@ class Trainer:
         epoch: int,
         n_epochs: int,
         global_step: int,
-        wandb_handler: Optional[WandbHandler] = None,
+        wandb_run: Optional[WandbRun] = None,
     ) -> float:
         """
         Evaluate the model on the evaluation dataset.
-
-        Args:
-            model_idx: Index of the model in the ensemble.
-            model: The model to evaluate.
-            eval_loader: DataLoader for evaluation data.
-            device: Device to run evaluation on.
-            epoch: Current epoch number.
-            n_epochs: Total number of epochs.
-            global_step: Current global training step.
-            wandb_handler: Optional wandb handler for logging.
-
-        Returns:
-            Average evaluation loss.
         """
         n_batches = len(eval_loader)
         if n_batches == 0:
             raise ValueError("Evaluation loader is empty")
+
         model.eval()
-        loss = 0.0
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        loss_sum = torch.tensor(0.0, device=device)
         b = 0
-        lprob_chosen_sum = 0.0
-        lprob_reject_sum = 0.0
-        margin_sum = 0.0
+        lprob_chosen_sum_tensor = torch.tensor(0.0, device=device)
+        lprob_reject_sum_tensor = torch.tensor(0.0, device=device)
+        margin_sum_tensor = torch.tensor(0.0, device=device)
+
+        desc = f"Model {model_idx} - Eval Epoch {epoch}/{n_epochs}"
+        pbar = tqdm(
+            eval_loader,
+            desc=desc,
+            position=model_idx,
+            leave=False,
+            total=n_batches,
+            mininterval=1.0,  # Update at most once per second
+        )
 
         with torch.no_grad():
-            for batch in eval_loader:
+            for batch in pbar:
                 batch_loss, lprobs_ch, lprobs_re = self.model._loss_fn(
                     batch, model, device
                 )
 
-                loss += batch_loss.item()
+                loss_sum += batch_loss
                 b += 1
 
-                lprob_chosen_sum += lprobs_ch.mean().item()
-                lprob_reject_sum += lprobs_re.mean().item()
-                margin_sum += (lprobs_ch - lprobs_re).mean().item()
+                lprob_chosen_sum_tensor += lprobs_ch.mean()
+                lprob_reject_sum_tensor += lprobs_re.mean()
+                margin_sum_tensor += (lprobs_ch - lprobs_re).mean()
 
-                if self.logger and b % max(1, n_batches // 10) == 0:
-                    current_avg_loss = loss / b
-                    e_str_len = len(str(n_epochs))
-                    b_str_len = len(str(n_batches))
-                    self.logger.info(
-                        f"Model {model_idx} - Eval. Epoch "
-                        f"{epoch:>{e_str_len}}/{n_epochs} - "
-                        f"Step {b:>{b_str_len}}/{n_batches} - "
-                        f"Avg Loss: {current_avg_loss:.4f} - "
-                        f"Avg Margin: {margin_sum / b:.4f}"
+                # Only update postfix periodically to reduce overhead
+                if b % max(1, n_batches // 10) == 0 or b == 1:
+                    current_avg_loss = loss_sum.item() / b
+                    margin_val = margin_sum_tensor.item() / b
+
+                    pbar.set_postfix(
+                        {
+                            "loss": f"{current_avg_loss:.4f}",
+                            "margin": f"{margin_val:.4f}",
+                        }
                     )
 
-        if wandb_handler is not None:
-            wandb_handler.log(
+        pbar.close()
+
+        if wandb_run is not None:
+            wandb_run.log(
                 {
-                    "eval/loss": loss / b,
-                    "eval/avg_lprobs_chosen": lprob_chosen_sum / b,
-                    "eval/avg_lprobs_reject": lprob_reject_sum / b,
-                    "eval/avg_margin": margin_sum / b,
+                    "eval/loss": loss_sum.item() / b,
+                    "eval/avg_lprobs_chosen": lprob_chosen_sum_tensor.item() / b,
+                    "eval/avg_lprobs_reject": lprob_reject_sum_tensor.item() / b,
+                    "eval/avg_margin": margin_sum_tensor.item() / b,
                     "eval/epoch": epoch,
                 },
                 step=global_step,
             )
 
-        return loss / b
+        return loss_sum.item() / b

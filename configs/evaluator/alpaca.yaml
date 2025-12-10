@@ -1,9 +1,7 @@
 # AlpacaEval Evaluator Configuration
 _target_: pepo.evaluator.alpaca.AlpacaEvalEvaluator
 
-defaults:
-  - /generator/greedy
-
+# Generator is now provided by the model (model.generator)
 # Dataset configuration
 dataset_id: "tatsu-lab/alpaca_eval"
 dataset_name: "alpaca_eval"  # Dataset configuration name
@@ -14,7 +12,7 @@ annotators_config:
     prompt_template: alpaca_eval_llama3_70b_fn
     completions_kwargs:
       batch_size: 32
-      max_new_tokens: 1024
+      max_new_tokens: 512
       model_name: meta-llama/Meta-Llama-3-70B-Instruct
       model_kwargs:
         device_map: auto
@@ -27,13 +25,3 @@ output_dir: "outputs"
 
 # Optional configuration
 num_samples: null  # null = use full dataset
-
-# Logger configuration
-logger:
-  _target_: pepo.utils.logger.Logger
-  name: "Evaluator"
-  log_file: null
-  log_dir: "logs"
-  level: "INFO"
-  format_string: null
-  date_format: null

@@ -1,16 +1,13 @@
 # script to train the pepo model, using a hydra config file,
 # log the training process to wb and save the model to huggingface
 
-import logging
-from pathlib import Path
 
 import hydra
-from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from pepo import PEPOModel
-from pepo.utils import constants, set_seed
+from pepo.utils import constants, set_seed, setup_logging
 
 OmegaConf.register_new_resolver(
     "pepo.constants",
@@ -49,8 +46,15 @@ def chat(model: PEPOModel) -> None:
     input_ids = tokenized["input_ids"]
     attention_mask = tokenized["attention_mask"]
 
-    input_ids, attention_mask = model.generate(
-        input_ids, attention_mask, max_length=100
+    if model.generator is None:
+        raise ValueError(
+            "Generator not set on model. Cannot generate without generator."
+        )
+    input_ids, attention_mask = model.generator.generate(
+        model=model,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        max_length=100,
     )
     print(f"Input ids: {input_ids}")
     print(f"Attention mask: {attention_mask}")
@@ -60,41 +64,30 @@ def chat(model: PEPOModel) -> None:
 
 @hydra.main(config_path="../configs", config_name="chat.yaml", version_base="1.1")
 def main(cfg: DictConfig) -> None:
-    hydra_cfg = HydraConfig.get()
-    original_work_dir = Path(hydra_cfg.runtime.cwd)
-
     log_level_str = cfg.get("log_level", "INFO").upper()
-    log_level = getattr(logging, log_level_str, logging.INFO)
-
-    logger = instantiate(
-        cfg.logger,
-        log_dir=str(original_work_dir / "logs"),
-        level=log_level,
-    )
+    logger = setup_logging(level=log_level_str)
 
     resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
-    logger.info("PEPO Training - Starting")
+    logger.info("PEPO Chat - Starting")
     logger.info(f"Configuration:\n{OmegaConf.to_yaml(resolved_cfg)}")
 
     set_seed(cfg.seed)
     logger.info(f"Random seed set to: {cfg.seed}")
 
-    device_manager = instantiate(
-        cfg.device,
-        logger=logger,
-    )
+    device_manager = instantiate(cfg.device)
 
-    hub_manager = instantiate(
-        cfg.hub,
-        logger=logger,
-    )
+    hub_manager = instantiate(cfg.hub)
 
     model = instantiate(
         cfg.model,
-        logger=logger,
         device_manager=device_manager,
         hub_manager=hub_manager,
     )
+
+    generator = None
+    if "generator" in cfg.model:
+        generator = instantiate(cfg.model.generator)
+        model.generator = generator
 
     chat(model)
 

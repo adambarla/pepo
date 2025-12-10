@@ -4,20 +4,50 @@ import os
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Literal, Optional, cast
 
 import numpy as np
 import torch
 from datasets import Dataset, load_dataset
-from torch.utils.data import DataLoader
+from torch.utils.data import BatchSampler, DataLoader, SequentialSampler
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .device import DeviceManager
-from .general import set_seed
 from .model_utils import get_log_probs
 
 logger = logging.getLogger(__name__)
+
+
+class LengthBasedBatchSampler(BatchSampler):
+    """
+    Batch sampler that groups consecutive examples (sorted by length) into batches,
+    then shuffles the batches rather than individual examples.
+    """
+
+    def __init__(
+        self,
+        dataset_size: int,
+        batch_size: int,
+        shuffle: bool = True,
+        seed: Optional[int] = None,
+    ):
+        base_sampler = SequentialSampler(range(dataset_size))
+        super().__init__(base_sampler, batch_size, drop_last=False)
+        self.shuffle = shuffle
+        self.seed = seed
+        self._batches = [
+            list(batch)
+            for batch in BatchSampler(base_sampler, batch_size, drop_last=False)
+        ]
+
+    def __iter__(self):
+        batches = self._batches.copy()
+        if self.shuffle:
+            if self.seed is not None:
+                np.random.seed(self.seed)
+            np.random.shuffle(batches)
+        return iter(batches)
 
 
 class DataCollator:
@@ -169,10 +199,19 @@ class DataManager:
             dataloader_num_workers if dataloader_num_workers is not None else 0
         )
         self.dataloader_pin_memory = dataloader_pin_memory
-        self.dataloader_persistent_workers = dataloader_persistent_workers
-        self.dataloader_prefetch_factor = (
-            dataloader_prefetch_factor if dataloader_prefetch_factor is not None else 2
+        self.dataloader_persistent_workers = (
+            dataloader_persistent_workers if self.dataloader_num_workers > 0 else False
         )
+        self.dataloader_prefetch_factor = (
+            dataloader_prefetch_factor if self.dataloader_num_workers > 0 else None
+        )
+
+        logger.info(f"Dataloader num workers: {self.dataloader_num_workers}")
+        logger.info(f"Dataloader pin memory: {self.dataloader_pin_memory}")
+        logger.info(
+            f"Dataloader persistent workers: {self.dataloader_persistent_workers}"
+        )
+        logger.info(f"Dataloader prefetch factor: {self.dataloader_prefetch_factor}")
 
         self.cache_path = self._get_cache_path()
         self._initialize_dataset()
@@ -358,9 +397,35 @@ class DataManager:
 
         return dataset_preprocessed
 
+    def _compute_example_length(self, example: Dict[str, Any]) -> int:
+        """
+        Compute the length of an example for sorting purposes.
+        Uses the maximum of chosen_text and rejected_text lengths since both
+        are in the same batch and need to be padded to the same length.
+        """
+        chosen_len = len(example["chosen_text"])
+        rejected_len = len(example["rejected_text"])
+        return max(chosen_len, rejected_len)
+
+    def _sort_dataset_by_length(self, dataset: Dataset) -> Dataset:
+        """
+        Sort dataset by example length (descending, largest first).
+        This reduces padding in batches by grouping similar-length examples.
+        """
+        lengths = [
+            self._compute_example_length(dataset[i]) for i in range(len(dataset))
+        ]
+        sorted_indices = sorted(
+            range(len(lengths)), key=lambda i: lengths[i], reverse=True
+        )
+        sorted_dataset = dataset.select(sorted_indices)
+        return sorted_dataset
+
     def _split(self, dataset: Dataset) -> None:
         """
         Split preprocessed dataset into train/eval, then split train into n_splits.
+        Shuffles train dataset before splitting to ensure random distribution
+        across submodels. Each split is then sorted by length for efficient batching.
         Format conversion is handled by the DataCollator.
         """
         dataset_split = dataset.train_test_split(
@@ -374,20 +439,19 @@ class DataManager:
             f"Eval: {len(eval_dataset_preprocessed)} examples"
         )
 
-        indices = np.arange(len(train_dataset_preprocessed))
-        set_seed(self.seed)
-        np.random.shuffle(indices)
-        split_indices = np.array_split(indices, self.n_splits)
+        np.random.seed(self.seed)
+        train_indices = np.arange(len(train_dataset_preprocessed))
+        np.random.shuffle(train_indices)
+        train_dataset_shuffled = train_dataset_preprocessed.select(train_indices)
 
+        split_indices = np.array_split(
+            np.arange(len(train_dataset_shuffled)), self.n_splits
+        )
         self.train_datasets = {}
         for model_idx, indices in enumerate(split_indices):
-            self.train_datasets[model_idx] = train_dataset_preprocessed.select(indices)
-            logger.info(
-                f"Train split {model_idx} has "
-                f"{len(self.train_datasets[model_idx])} examples"
-            )
-
-        self.eval_dataset = eval_dataset_preprocessed
+            split_dataset = train_dataset_shuffled.select(indices)
+            self.train_datasets[model_idx] = self._sort_dataset_by_length(split_dataset)
+        self.eval_dataset = self._sort_dataset_by_length(eval_dataset_preprocessed)
 
         logger.info("Dataset preprocessing and splitting complete.")
 
@@ -477,6 +541,8 @@ class DataManager:
                     collate_fn=collator,
                     num_workers=self.dataloader_num_workers,
                     pin_memory=self.dataloader_pin_memory,
+                    persistent_workers=self.dataloader_persistent_workers,
+                    prefetch_factor=self.dataloader_prefetch_factor,
                 )
 
                 chosen_logps_shard: list[float] = []
@@ -551,7 +617,7 @@ class DataManager:
     def get_dataloader(
         self,
         model_idx: int,
-        partition: str,
+        partition: Literal["train", "eval"],
         batch_size: int,
     ) -> DataLoader[dict[str, torch.Tensor]]:
         """
@@ -572,10 +638,10 @@ class DataManager:
 
         if partition == "train":
             dataset = self.train_datasets[model_idx]
-            shuffle = True
+            shuffle_batches = True
         elif partition == "eval":
             dataset = self.eval_dataset
-            shuffle = False
+            shuffle_batches = False
         else:
             raise ValueError(f"Partition must be 'train' or 'eval', got '{partition}'")
 
@@ -585,21 +651,19 @@ class DataManager:
             max_prompt_length=self.max_prompt_length,
         )
 
+        batch_sampler = LengthBasedBatchSampler(
+            dataset_size=len(dataset),
+            batch_size=batch_size,
+            shuffle=shuffle_batches,
+            seed=self.seed if shuffle_batches else None,
+        )
+
         return DataLoader(
             dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
+            batch_sampler=batch_sampler,
             collate_fn=collator,
             num_workers=self.dataloader_num_workers,
             pin_memory=self.dataloader_pin_memory,
-            persistent_workers=(
-                self.dataloader_persistent_workers
-                if self.dataloader_num_workers > 0
-                else False
-            ),
-            prefetch_factor=(
-                self.dataloader_prefetch_factor
-                if self.dataloader_num_workers > 0
-                else None
-            ),
+            persistent_workers=self.dataloader_persistent_workers,
+            prefetch_factor=self.dataloader_prefetch_factor,
         )

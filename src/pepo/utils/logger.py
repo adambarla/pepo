@@ -1,8 +1,9 @@
+import dataclasses
 import logging
 import sys
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
+
+from omegaconf import OmegaConf
 
 try:
     import wandb
@@ -11,7 +12,8 @@ except ImportError:
 
 
 class ColoredFormatter(logging.Formatter):
-    """Custom formatter that adds colors only to the log level in console output."""
+    """Custom formatter that adds colors to log level and logger name
+    in console output."""
 
     COLORS = {
         "DEBUG": "\033[36m",  # Cyan
@@ -20,163 +22,69 @@ class ColoredFormatter(logging.Formatter):
         "ERROR": "\033[31m",  # Red
         "CRITICAL": "\033[1m\033[31m",  # Bold Red
     }
+    GRAY = "\033[90m"  # Gray for logger names
     RESET = "\033[0m"
-    MAX_NAME_LENGTH = 5
 
     def format(self, record: logging.LogRecord) -> str:
-        original_name = record.name
-        if len(original_name) > self.MAX_NAME_LENGTH:
-            record.name = original_name[: self.MAX_NAME_LENGTH]
-
         log_message = super().format(record)
 
-        record.name = original_name
+        # Color the logger name in gray
+        logger_name = record.name
+        colored_name = f"{self.GRAY}{logger_name}{self.RESET}"
+        log_message = log_message.replace(f"[{logger_name}]", f"[{colored_name}]", 1)
 
+        # Color the levelname
         if hasattr(record, "levelname") and record.levelname in self.COLORS:
             levelname = record.levelname
             color = self.COLORS[levelname]
             colored_levelname = f"{color}{levelname}{self.RESET}"
-            return log_message.replace(levelname, colored_levelname, 1)
+            log_message = log_message.replace(levelname, colored_levelname, 1)
+
         return log_message
 
 
-class Logger:
-    """
-    A general-purpose logging class that provides a simple API for logging.
-    Uses Python's logging library under the hood.
-    """
+def setup_logging(
+    level: str = "INFO",
+    log_file: Optional[str] = None,
+    model_name: Optional[str] = None,
+) -> logging.Logger:
+    """Set up logging configuration."""
+    logger_name = f"pepo.{model_name}" if model_name else "pepo"
+    logger = logging.getLogger(logger_name)
 
-    def __init__(
-        self,
-        name: str = "pepo",
-        log_file: Optional[str] = None,
-        log_dir: str = "logs",
-        level: Union[str, int] = "INFO",
-        format_string: Optional[str] = None,
-        date_format: Optional[str] = None,
-    ):
-        """
-        Initialize the logger.
+    # Prevent duplicate handlers
+    if logger.handlers:
+        return logger
 
-        Args:
-            name: Logger name (used to identify different loggers).
-            log_file: Path to log file. If None, auto-generates with timestamp.
-            log_dir: Directory for log files (created if doesn't exist).
-            level: Logging level as string ("DEBUG", "INFO", "WARNING",
-                "ERROR", "CRITICAL") or integer (logging.DEBUG, logging.INFO,
-                etc.). Default is string-based.
-            format_string: Custom format string for log messages.
-            date_format: Custom date format string.
-        """
-        self.name = name.upper()
-        self.log_dir = Path(log_dir)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+    # Map string level to logging constant
+    log_level = getattr(logging, level.upper(), logging.INFO)
+    logger.setLevel(log_level)
 
-        if log_file is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_file_path = self.log_dir / f"{name.lower()}_{timestamp}.log"
-        else:
-            log_file_path = Path(log_file)
-            if not log_file_path.is_absolute():
-                log_file_path = self.log_dir / log_file_path
+    # Prevent propagation to root logger to avoid duplicates
+    logger.propagate = False
 
-        self.log_file = log_file_path
-        self.logger = logging.getLogger(self.name)
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [%(name)s] %(message)s",
+        datefmt="%m-%d %H:%M:%S",
+    )
 
-        # Support both string levels and integer logging constants
-        if isinstance(level, int):
-            log_level = level
-        elif level is None:
-            log_level = logging.INFO
-        else:
-            # Handle OmegaConf nodes and other types by converting to string first
-            try:
-                # If it's an OmegaConf node, get its value
-                if hasattr(level, "_value"):
-                    level = level._value()
-                level_str = str(level).strip().upper()
-            except Exception:
-                level_str = str(level).strip().upper()
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(
+        ColoredFormatter(
+            fmt="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+            datefmt="%m-%d %H:%M:%S",
+        )
+    )
+    logger.addHandler(console_handler)
 
-            valid_levels = {
-                "DEBUG": logging.DEBUG,
-                "INFO": logging.INFO,
-                "WARNING": logging.WARNING,
-                "ERROR": logging.ERROR,
-                "CRITICAL": logging.CRITICAL,
-            }
-            if not level_str:
-                log_level = logging.INFO
-            elif level_str not in valid_levels:
-                raise ValueError(
-                    f"Unknown level: '{level}' (type: {type(level)}, "
-                    f"normalized: '{level_str}'). "
-                    f"Valid levels are: {list(valid_levels.keys())}"
-                )
-            else:
-                log_level = valid_levels[level_str]
-
-        self.logger.setLevel(log_level)
-        self.logger.handlers.clear()
-        self.logger.propagate = False
-
-        if format_string is None:
-            format_string = "[%(asctime)s][%(name)5s][%(levelname)s]: %(message)s"
-
-        if date_format is None:
-            date_format = "%H:%M:%S"
-
-        class CompactFormatter(logging.Formatter):
-            MAX_NAME_LENGTH = 5
-
-            def format(self, record: logging.LogRecord) -> str:
-                original_name = record.name
-                if len(original_name) > self.MAX_NAME_LENGTH:
-                    record.name = original_name[: self.MAX_NAME_LENGTH]
-                result = super().format(record)
-                record.name = original_name
-                return result
-
-        file_formatter = CompactFormatter(format_string, datefmt=date_format)
-        console_formatter = ColoredFormatter(format_string, datefmt=date_format)
-
-        file_handler = logging.FileHandler(self.log_file, mode="a")
+    if log_file:
+        file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(log_level)
-        file_handler.setFormatter(file_formatter)
-        self.logger.addHandler(file_handler)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(log_level)
-        console_handler.setFormatter(console_formatter)
-        self.logger.addHandler(console_handler)
-
-    def debug(self, message: str) -> None:
-        """Log a debug message."""
-        self.logger.debug(message)
-
-    def info(self, message: str) -> None:
-        """Log an info message."""
-        self.logger.info(message)
-
-    def warning(self, message: str) -> None:
-        """Log a warning message."""
-        self.logger.warning(message)
-
-    def error(self, message: str) -> None:
-        """Log an error message."""
-        self.logger.error(message)
-
-    def critical(self, message: str) -> None:
-        """Log a critical message."""
-        self.logger.critical(message)
-
-    def exception(self, message: str) -> None:
-        """Log an exception with traceback."""
-        self.logger.exception(message)
-
-    def get_logger(self):
-        """Get the underlying Python logger object for advanced usage."""
-        return self.logger
+    return logger
 
 
 class WandbHandler:
@@ -189,15 +97,13 @@ class WandbHandler:
         self,
         enabled: bool = False,
         project: Optional[str] = None,
-        name: Optional[str] = None,
         tags: Optional[List[str]] = None,
         notes: Optional[str] = None,
         entity: Optional[str] = None,
         mode: str = "online",
         cfg: Optional[Dict[str, Any]] = None,
         group: Optional[str] = None,
-        _lazy_init: bool = False,
-        logger: Optional[Logger] = None,
+        lazy_init: bool = False,
     ):
         """
         Initialize wandb handler.
@@ -205,109 +111,291 @@ class WandbHandler:
         Args:
             enabled: Whether wandb logging is enabled.
             project: Wandb project name.
-            name: Wandb run name (None = auto-generate).
             tags: List of tags for the run.
             notes: Notes/description for the run.
             entity: Wandb entity/team name.
             mode: Wandb mode ("online", "offline", "disabled").
             cfg: Configuration dictionary to log to wandb.
             group: Group name for organizing related runs together.
+            lazy_init: If True, don't initialize run until init_train_run()
+                or init_bench_run() is called.
         """
         self.enabled = enabled
         self.wandb = wandb
         self.initialized = False
         self.run: Optional[Any] = None
         self.project = project
-        self.name = name
         self.tags = tags or []
         self.notes = notes
         self.entity = entity
         self.mode = mode
         self.cfg = cfg
         self.group = group
-        self._lazy_init = _lazy_init
-        self.logger = logger
+        self.lazy_init = lazy_init
+        self.logger: Optional[logging.Logger] = None
+        self.model: Optional[Any] = None
+        self.data_manager: Optional[Any] = None
+        self.model_idx: Optional[int] = None
+
+        self.peer_run_ids: List[str] = []
+        self.latest_metrics: Dict[str, Any] = {}
 
         if wandb is not None:
             self.run_id: Optional[str] = wandb.util.generate_id()
         else:
             self.run_id = None
 
-        if enabled and not _lazy_init:
-            self.init_run()
+        if enabled and not self.lazy_init:
+            raise ValueError(
+                "If enabled=True, you must use lazy_init=True and "
+                "call init_train_run() or init_bench_run()"
+            )
 
-    def init_run(self) -> None:
+    def set_run_context(
+        self, model: Any, data_manager: Any, model_idx: Optional[int] = None
+    ) -> None:
+        """Set model and data manager for run name generation."""
+        self.model = model
+        self.data_manager = data_manager
+        if model_idx is not None:
+            self.model_idx = model_idx
+
+    def _generate_run_name(self) -> Optional[str]:
+        """Generate run name from model and data manager identifiers."""
+        parts = []
+        if self.model:
+            if hasattr(self.model, "get_run_identifier"):
+                parts.append(self.model.get_run_identifier())
+            elif hasattr(self.model, "_get_model_name"):
+                parts.append(self.model._get_model_name())
+            elif hasattr(self.model, "_get_submodel_name"):
+                model_idx = (
+                    self.model_idx
+                    if self.model_idx is not None
+                    else getattr(self.model, "_model_idx", 0)
+                )
+                parts.append(self.model._get_submodel_name(model_idx))
+        if self.data_manager and hasattr(self.data_manager, "get_run_identifier"):
+            parts.append(self.data_manager.get_run_identifier())
+        if parts:
+            name = "-".join(parts)
+            if self.model_idx is not None and f"-l{self.model_idx}" not in name:
+                name = f"{name}-l{self.model_idx}"
+            return name
+        return None
+
+    def init_train_run(
+        self, run_id: Optional[str] = None, model_idx: Optional[int] = None
+    ) -> None:
+        """Initialize a training run. Sets job_type='train' automatically."""
+        if not self.enabled:
+            return
+        if model_idx is not None:
+            self.model_idx = model_idx
+        self._init_run(job_type="train", run_id=run_id)
+
+    def find_training_run_id(
+        self, model_name: str, model_idx: int = 0
+    ) -> Optional[str]:
         """
-        Initialize the wandb run.
+        Search for the most recent training run_id for a given model name
+        with specified idx.
+
+        Args:
+            model_name: Model name to search for (base name without epoch suffix).
+            model_idx: Model index (default 0 for l0).
+
+        Returns:
+            Run ID of the most recent training run matching
+            {model_name}-l{model_idx}, or None if not found.
+        """
+        if not self.enabled or self.wandb is None:
+            return None
+
+        logger = logging.getLogger(__name__)
+        expected_name = f"{model_name}-l{model_idx}"
+
+        try:
+            api = self.wandb.Api()
+            entity = self.entity or "wandb"
+            project_path = f"{entity}/{self.project}"
+
+            runs = api.runs(project_path, order="-created_at", per_page=100)
+            for run in runs:
+                run_name = getattr(run, "name", None) or getattr(
+                    run, "display_name", None
+                )
+                run_job_type = getattr(run, "job_type", None)
+
+                if run_name == expected_name:
+                    if run_job_type == "train":
+                        logger.debug(
+                            f"Found training run {expected_name}: {run.id} "
+                            "(job_type=train)"
+                        )
+                        return str(run.id)
+                    elif (
+                        run_job_type is None
+                        or run_job_type == ""
+                        or run_job_type == "benchmark"
+                    ):
+                        logger.debug(
+                            f"Found run {expected_name}: {run.id} "
+                            f"(job_type={run_job_type}, "
+                            f"may be resumed training run)"
+                        )
+                        return str(run.id)
+
+            runs = api.runs(
+                project_path,
+                filters={"display_name": expected_name},
+                order="-created_at",
+                per_page=10,
+            )
+            if runs:
+                logger.debug(f"Found run {expected_name} via filter: {runs[0].id}")
+                return str(runs[0].id)
+        except Exception as e:
+            logger.warning(f"Error finding training run for {expected_name}: {e}")
+
+        return None
+
+    def init_bench_run(self, run_id: Optional[str] = None) -> None:
+        """Initialize a benchmark run. Sets job_type='benchmark' automatically."""
+        if not self.enabled:
+            return
+        if run_id is not None:
+            if self.wandb is None:
+                raise ValueError("Wandb is not installed")
+            try:
+                api = self.wandb.Api()
+                run_path = f"{self.entity or 'wandb'}/{self.project}/{run_id}"
+                run = api.run(run_path)  # type: ignore[no-untyped-call]
+                if run is None:
+                    raise ValueError(
+                        f"Wandb run {run_id} does not exist in project {self.project}"
+                    )
+                self._preserve_run_metadata(run)
+            except Exception as e:
+                error_str = str(e).lower()
+                if (
+                    "does not exist" in error_str
+                    or "not found" in error_str
+                    or "no such" in error_str
+                ):
+                    raise ValueError(
+                        f"Cannot resume wandb run {run_id}: run does not exist "
+                        f"in project {self.project}. "
+                        f"Please ensure the training run completed successfully."
+                    ) from e
+            self._init_run(job_type="benchmark", resume="must", run_id=run_id)
+        else:
+            training_run_id = None
+            if self.model and hasattr(self.model, "_get_model_name"):
+                model_name = self.model._get_model_name()
+                training_run_id = self.find_training_run_id(model_name)
+
+            if training_run_id:
+                if self.wandb is not None:
+                    api = self.wandb.Api()
+                    run_path = (
+                        f"{self.entity or 'wandb'}/{self.project}/{training_run_id}"
+                    )
+                    run = api.run(run_path)  # type: ignore[no-untyped-call]
+                    if run:
+                        self._preserve_run_metadata(run)
+                self._init_run(
+                    job_type="benchmark", resume="must", run_id=training_run_id
+                )
+            else:
+                self._init_run(job_type="benchmark", resume="allow", run_id=None)
+
+    def _init_run(
+        self,
+        job_type: str,
+        resume: Optional[str] = None,
+        run_id: Optional[str] = None,
+        run_name: Optional[str] = None,
+    ) -> None:
+        """
+        Internal method to initialize wandb run with specified job_type.
         """
         if not self.enabled:
-            if self.logger is not None:
-                self.logger.info("Wandb logging is disabled, skipping init_run")
             return
 
         if self.initialized and self.run is not None:
-            if self.logger is not None:
-                self.logger.warning(
-                    "Wandb run is already initialized, skipping init_run"
-                )
-            return
+            raise ValueError("Wandb run is already initialized. Call finish() first.")
 
         if self.wandb is None:
-            if self.logger is not None:
-                self.logger.error("Wandb is not installed, skipping init_run")
-            return
+            raise ValueError("Wandb is not installed")
 
+        if run_id is not None:
+            self.run_id = run_id
         if self.run_id is None:
-            if self.logger is not None:
-                self.logger.error("Wandb run_id is None, skipping init_run")
-            return
+            raise ValueError("Wandb run_id is None")
 
-        init_kwargs: dict[str, Any] = {
+        if run_name is None:
+            run_name = self._generate_run_name()
+
+        if run_name is None:
+            run_name = f"run-{self.run_id}"
+
+        tags = self.tags
+        if self.model and hasattr(self.model, "_get_base_model_name"):
+            tags = tags + [self.model._get_base_model_name()]
+
+        init_kwargs: Dict[str, Any] = {
             "project": self.project,
-            "name": self.name,
-            "tags": self.tags,
+            "name": run_name,
+            "tags": tags,
             "notes": self.notes,
             "entity": self.entity,
             "mode": self.mode,
             "id": self.run_id,
+            "job_type": job_type,
         }
+
+        if resume is not None:
+            init_kwargs["resume"] = resume
+
         if self.group is not None:
             init_kwargs["group"] = self.group
+
         if self.cfg is not None:
-            init_kwargs["config"] = self.cfg
+            cfg_obj = self.cfg
+
+            if OmegaConf.is_config(cfg_obj):
+                init_kwargs["config"] = OmegaConf.to_container(cfg_obj, resolve=True)
+            elif dataclasses.is_dataclass(cfg_obj):
+                init_kwargs["config"] = dataclasses.asdict(cfg_obj)
+            else:
+                init_kwargs["config"] = cfg_obj
+
         self.run = self.wandb.init(**init_kwargs)
         self.initialized = True
 
-        if self.logger is not None:
-            self.logger.info(
-                f"Wandb run {self.name} was initialized. Run: {self.run_id}, "
-                f"Group: {self.group}, Project: {self.project}, "
-                f"Entity: {self.entity}"
-            )
-
     def log(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
-        """
-        Log metrics to wandb.
-
-        Args:
-            metrics: Dictionary of metrics to log.
-            step: Optional step number.
-        """
+        """Log metrics to wandb."""
+        self.latest_metrics.update(metrics)
         if self.enabled and self.initialized and self.run is not None:
-            try:
-                self.run.log(metrics, step=step)
-            except Exception:
-                if self.logger is not None:
-                    self.logger.exception(
-                        f"Failed to log metrics to wandb. Metrics: {metrics}, "
-                        f"Step: {step}"
-                    )
+            self.run.log(metrics, step=step)
 
-    def finish(self):
+    def _preserve_run_metadata(self, run: Any) -> None:
+        """Preserve metadata from an existing run."""
+        if hasattr(run, "group") and run.group:
+            self.group = run.group
+        if hasattr(run, "tags") and run.tags:
+            existing_tags = set(self.tags)
+            new_tags = [tag for tag in run.tags if tag not in existing_tags]
+            self.tags = self.tags + new_tags
+        if hasattr(run, "notes") and run.notes and not self.notes:
+            self.notes = run.notes
+
+    def finish(self) -> None:
         """Finish wandb run."""
         if self.enabled and self.initialized and self.run is not None:
             self.run.finish()
             self.initialized = False
             self.run = None
-            if self.logger is not None:
-                self.logger.info(f"Wandb run {self.name} finished.")
+            self.peer_run_ids = []
+            self.latest_metrics = {}

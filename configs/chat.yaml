@@ -2,7 +2,6 @@
 defaults:
   - model: llama_instruct
   # - model: smollm
-  - logger: default
   - hub: default
   - device: default
   - _self_
@@ -13,12 +12,6 @@ model:
 # Reproducibility
 seed: 42
 
-# Logger configuration (can override defaults from logger/default.yaml)
-logger:
-  name: "chat"
-
 log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
-log_dir: "logs"  # Log directory (relative to project root, will be converted to absolute path)
-log_file: null  # Log file name (null = auto-generate with timestamp, all loggers will use the same file)
 
 L: 4 # Number of submodels in the ensemble
