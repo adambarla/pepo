@@ -1,17 +1,18 @@
+import logging
 import os
 from typing import TYPE_CHECKING, Optional
 
 import dotenv
 from huggingface_hub import HfApi, login
 from peft import PeftModel
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, PreTrainedModel
 
 if TYPE_CHECKING:
     from transformers import AutoTokenizer
 
-from .logger import Logger
-
 dotenv.load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class HubManager:
@@ -25,9 +26,7 @@ class HubManager:
         base_dir: str,
         load: bool = False,
         push: bool = True,
-        load_epochs: Optional[int] = None,
         load_trainable: bool = True,
-        logger: Optional[Logger] = None,
         hf_token: Optional[str] = None,
     ):
         """
@@ -37,17 +36,12 @@ class HubManager:
             base_dir: HuggingFace username/organization (e.g., "PessimisticDPO").
             load: Whether to load models from hub.
             push: Whether to push models to hub.
-            load_epochs: Optional number of epochs to load.
-                If None, loads the final model.
-            logger: Optional logger instance.
             hf_token: HuggingFace token. If None, uses HF_TOKEN env var or cached token.
         """
         self.base_dir = base_dir
         self.should_load = load
         self.should_push = push
-        self.load_epochs = load_epochs
         self.load_trainable = load_trainable
-        self.logger = logger
         self.api = HfApi()
         self._authenticate(hf_token)
 
@@ -69,21 +63,26 @@ class HubManager:
             try:
                 login()  # Uses cached token
             except Exception as e:
-                if self.logger:
-                    self.logger.warning(
-                        f"Could not login to HuggingFace: {e}. "
-                        f"Set HF_TOKEN environment variable or run "
-                        f"'huggingface-cli login'"
-                    )
+                logger.warning(
+                    f"Could not login to HuggingFace: {e}. "
+                    f"Set HF_TOKEN environment variable or run "
+                    f"'huggingface-cli login'"
+                )
 
     def model_exists(self, model_name: str, epochs: Optional[int] = None) -> bool:
+        if not self.should_load_from_hub:
+            logger.warning(
+                f"Loading from hub is disabled. Cannot check if model "
+                f"{model_name} exists."
+            )
+            return False
+
         repo_id = self.get_repo_id(model_name, epochs)
         try:
             self.api.model_info(repo_id)
             return True
-        except Exception as e:
-            if self.logger:
-                self.logger.warning(f"Model {model_name} not found in hub: {e}")
+        except Exception:
+            logger.warning(f"Failed to load {repo_id}")
             return False
 
     def get_repo_id(self, model_name: str, epochs: Optional[int] = None) -> str:
@@ -93,32 +92,89 @@ class HubManager:
             return f"{self.base_dir}/{model_name}"
 
     def load_model(
-        self, base_model: AutoModelForCausalLM, model_name: str
-    ) -> AutoModelForCausalLM:
-        if not self.model_exists(model_name, self.load_epochs):
+        self,
+        base_model: PreTrainedModel,
+        model_name: str,
+        epochs: Optional[int] = None,
+    ) -> PeftModel:
+        if not self.should_load_from_hub:
+            logger.error(
+                f"Loading from hub is disabled. Cannot load model {model_name}. "
+            )
+            raise ValueError(
+                f"Loading from hub is disabled, "
+                f"but load_model was called for {model_name}"
+            )
+
+        if not self.model_exists(model_name, epochs):
             raise ValueError(f"Model {model_name} not found in hub")
-        repo_id = self.get_repo_id(model_name, self.load_epochs)
+        repo_id = self.get_repo_id(model_name, epochs)
         model = PeftModel.from_pretrained(
-            base_model,  # type: ignore[arg-type]
+            base_model,
             repo_id,
             is_trainable=self.load_trainable,
         )
 
-        if self.logger and self.load_trainable:
+        if self.load_trainable:
             trainable, total = model.get_nb_trainable_parameters()
             trainable = int(trainable / 1000000)
             total = int(total / 1000000)
-            self.logger.info(
+            logger.info(
                 f"Loaded model from {repo_id} with {trainable:.2f}M trainable "
                 f"parameters out of {total:.2f}M total parameters "
                 f"({trainable / total * 100:.2f}%)"
             )
-        elif self.logger:
-            self.logger.info(
+        else:
+            logger.info(
                 f"Loaded model from {repo_id} without trainable parameters "
                 f"(set hub.load_trainable=true to load trainable parameters)"
             )
-        return model  # type: ignore[return-value]
+        return model
+
+    def find_latest_epoch_for_all_submodels(
+        self, base_model_name: str, num_networks: int, max_epoch: int
+    ) -> Optional[int]:
+        """
+        Find the latest epoch where all submodels have checkpoints.
+        Checks backwards from max_epoch until finding an epoch where all
+        submodels exist.
+
+        Args:
+            base_model_name: Base model name (without submodel suffix).
+            num_networks: Number of submodels in the ensemble.
+            max_epoch: Maximum epoch to check from. Checks backwards from here.
+
+        Returns:
+            The latest epoch where all submodels exist, or None if no common
+            epoch exists.
+        """
+        if not self.should_load_from_hub:
+            logger.warning(
+                f"Loading from hub is disabled. Cannot find latest epoch for "
+                f"{base_model_name}."
+            )
+            return None
+
+        for epoch in range(max_epoch, -1, -1):
+            all_exist = True
+            for model_idx in range(num_networks):
+                submodel_name = f"{base_model_name}-l{model_idx}"
+                if not self.model_exists(submodel_name, epoch):
+                    all_exist = False
+                    break
+
+            if all_exist:
+                logger.info(
+                    f"Found latest common epoch {epoch} for all "
+                    f"{num_networks} submodels"
+                )
+                return epoch
+
+        logger.warning(
+            f"No common epoch found across all {num_networks} submodels "
+            f"(checked from epoch {max_epoch} down to 0)"
+        )
+        return None
 
     def push_model(
         self,
@@ -141,11 +197,10 @@ class HubManager:
                 to model_name. Use None for final push without epoch suffix.
         """
         if not self.should_push_to_hub:
-            if self.logger:
-                self.logger.warning(
-                    f"Skipping push of model {model_name} to Hub because "
-                    f"push_to_hub is disabled in config."
-                )
+            logger.warning(
+                f"Skipping push of model {model_name} to Hub because "
+                f"push_to_hub is disabled in config."
+            )
             return
 
         # Append epoch suffix if provided
@@ -165,8 +220,7 @@ class HubManager:
                 f"Upload final PEPO ensemble model {model_idx} to {repo_id}"
             )
 
-        if self.logger:
-            self.logger.info(f"Pushing model to {repo_id}...")
+        logger.info(f"Pushing model to {repo_id}...")
 
         # Push model
         model.push_to_hub(  # type: ignore[attr-defined]
@@ -180,7 +234,6 @@ class HubManager:
             private=private,
         )
 
-        if self.logger:
-            self.logger.info(
-                f"Model and tokenizer successfully pushed to: https://huggingface.co/{repo_id}"
-            )
+        logger.info(
+            f"Model and tokenizer successfully pushed to: https://huggingface.co/{repo_id}"
+        )

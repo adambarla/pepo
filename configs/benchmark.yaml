@@ -1,0 +1,54 @@
+defaults:
+  - model: llama_instruct
+  - dataset: ultrafeedback
+  - evaluator: alpaca
+  - hub: default
+  - device: default
+  - _self_
+
+wandb:
+  _target_: pepo.utils.wandb.WandbManager
+  enabled: true
+  project: "pepo"
+  tags: ["benchmark"]
+  notes: null
+  entity: "pepo-team"
+  mode: "online"
+
+dataset:
+  max_length: 1024
+  max_prompt_length: 512
+  n_splits: ${L}
+  cache_dir: ${oc.env:SCRATCH}/pepo/cache # cache is $SCRATCH/pepo/cache
+  dataloader_num_workers: 4
+  dataloader_prefetch_factor: 4
+  seed: ${seed}
+  force_recompute: false
+
+model:
+  num_networks: ${L}
+  alpha: ${a}
+  beta: ${b}
+  generator:
+    max_new_tokens: 1024
+  trainer:
+    log_interval: 1
+  debug: ${debug}
+  compile: false
+
+evaluator:
+  output_dir: "eval_outputs"
+
+hub:
+  load: true
+  push: true # Push trained models
+
+L: 4 # Number of submodels
+e: 3 # Epoch to evaluate at (also used as max_epochs when training)
+a: 0.1 # Alpha parameter for PEPO
+b: 0.1 # Beta parameter for PEPO
+overwrite: false
+seed: 42
+debug: false
+log_level: "info"
+continue: false

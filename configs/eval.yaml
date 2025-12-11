@@ -2,7 +2,6 @@
 defaults:
   - model: llama_instruct
   - evaluator: alpaca
-  - logger: default
   - hub: eval
   - device: default
   - _self_
@@ -13,32 +12,15 @@ model:
 evaluator:
   num_samples: ${num_samples}
   output_dir: ${output_dir}
-  generator:
-    max_new_tokens: ${max_new_tokens}
-    batch_size: ${batch_size}
 
 hub:
   load: true
   push: false
-  load_epochs: ${epochs}
-
-# Logger configuration (can override defaults from logger/default.yaml)
-logger:
-  name: "eval"
-  log_file: ${log_file}
-  log_dir: ${log_dir}
-  level: ${log_level}
 
 log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
-log_dir: "logs"  # Log directory (relative to project root, will be converted to absolute path)
-log_file: null  # Log file name (null = auto-generate with timestamp, all loggers will use the same file)
 
 L: 4 # Number of submodels in the ensemble
 
-# Generator configuration can be overridden in evaluator config (evaluator/alpaca.yaml)
-# or via command line: evaluator.generator.max_new_tokens=10
-
-# Output directory for saving generations (relative to project root)
 output_dir: "eval_outputs"  # Directory to save generated responses (relative to project root)
 force_generate: false  # If true, regenerate responses even if they exist
 num_samples: null # null = use full dataset

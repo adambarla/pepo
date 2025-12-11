@@ -1,17 +1,53 @@
 import hashlib
+import logging
 import os
 import shutil
+import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, cast
 
 import numpy as np
 import torch
 from datasets import Dataset, load_dataset
-from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
+from torch.utils.data import BatchSampler, DataLoader, SequentialSampler
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .general import set_seed
-from .logger import Logger
+from .device import DeviceManager
+from .model_utils import get_log_probs
+
+logger = logging.getLogger(__name__)
+
+
+class LengthBasedBatchSampler(BatchSampler):
+    """
+    Batch sampler that groups consecutive examples (sorted by length) into batches,
+    then shuffles the batches rather than individual examples.
+    """
+
+    def __init__(
+        self,
+        dataset_size: int,
+        batch_size: int,
+        shuffle: bool = True,
+        seed: Optional[int] = None,
+    ):
+        base_sampler = SequentialSampler(range(dataset_size))
+        super().__init__(base_sampler, batch_size, drop_last=False)
+        self.shuffle = shuffle
+        self.seed = seed
+        self._batches = [
+            list(batch)
+            for batch in BatchSampler(base_sampler, batch_size, drop_last=False)
+        ]
+
+    def __iter__(self):
+        batches = self._batches.copy()
+        if self.shuffle:
+            if self.seed is not None:
+                np.random.seed(self.seed)
+            np.random.shuffle(batches)
+        return iter(batches)
 
 
 class DataCollator:
@@ -68,7 +104,7 @@ class DataCollator:
         reject_resp_mask = torch.cat([prompt_mask, reject_zero_mask], dim=-1)  # B, T_r
         reject_resp_mask ^= reject_att_mask
 
-        return {
+        batch = {
             "prompt_input_ids": prompt_encoded["input_ids"],
             "chosen_input_ids": chosen_encoded["input_ids"],
             "rejected_input_ids": reject_encoded["input_ids"],
@@ -78,6 +114,17 @@ class DataCollator:
             "chosen_response_mask": chosen_resp_mask,
             "rejected_response_mask": reject_resp_mask,
         }
+
+        if "reference_chosen_logps" in features[0]:
+            batch["reference_chosen_logps"] = torch.tensor(
+                [f["reference_chosen_logps"] for f in features], dtype=torch.float
+            )
+        if "reference_rejected_logps" in features[0]:
+            batch["reference_rejected_logps"] = torch.tensor(
+                [f["reference_rejected_logps"] for f in features], dtype=torch.float
+            )
+
+        return batch
 
 
 class DataManager:
@@ -100,7 +147,10 @@ class DataManager:
         dataloader_num_workers: Optional[int] = 0,
         dataloader_pin_memory: bool = False,
         dataloader_persistent_workers: bool = False,
-        logger: Optional[Logger] = None,
+        dataloader_prefetch_factor: Optional[int] = 2,
+        ref_model_id: Optional[str] = None,
+        inference_batch_size: int = 8,
+        device_manager: Optional[DeviceManager] = None,
     ):
         """
         Args:
@@ -120,13 +170,18 @@ class DataManager:
                 (0 = main thread only).
             dataloader_pin_memory: Pin memory for faster CPU->GPU transfer.
             dataloader_persistent_workers: Keep workers alive between epochs.
-            logger: Optional logger instance.
+            dataloader_prefetch_factor: Number of batches to prefetch per worker.
+            ref_model_id: ID of the reference model for caching logprobs.
+            inference_batch_size: Batch size for computing reference logprobs.
+            device_manager: Device manager for model loading.
         """
-        self.logger = logger
         self.n_splits = n_splits
         self.seed = seed
         self.dataset_id = dataset_id
         self.split = split
+        self.ref_model_id = ref_model_id
+        self.inference_batch_size = inference_batch_size
+        self.device_manager = device_manager
 
         if train_split + eval_split != 1:
             raise ValueError("train_split and eval_split must sum to 1")
@@ -144,7 +199,19 @@ class DataManager:
             dataloader_num_workers if dataloader_num_workers is not None else 0
         )
         self.dataloader_pin_memory = dataloader_pin_memory
-        self.dataloader_persistent_workers = dataloader_persistent_workers
+        self.dataloader_persistent_workers = (
+            dataloader_persistent_workers if self.dataloader_num_workers > 0 else False
+        )
+        self.dataloader_prefetch_factor = (
+            dataloader_prefetch_factor if self.dataloader_num_workers > 0 else None
+        )
+
+        logger.info(f"Dataloader num workers: {self.dataloader_num_workers}")
+        logger.info(f"Dataloader pin memory: {self.dataloader_pin_memory}")
+        logger.info(
+            f"Dataloader persistent workers: {self.dataloader_persistent_workers}"
+        )
+        logger.info(f"Dataloader prefetch factor: {self.dataloader_prefetch_factor}")
 
         self.cache_path = self._get_cache_path()
         self._initialize_dataset()
@@ -172,6 +239,7 @@ class DataManager:
             "tokenizer": tokenizer_name,
             "pad_token_id": self.tokenizer.pad_token_id,  # type: ignore[attr-defined]
             "chat_template": chat_template_hash,
+            "ref_model_id": self.ref_model_id or "none",
         }
 
         cache_key = hashlib.md5(str(sorted(cache_params.items())).encode()).hexdigest()
@@ -186,21 +254,14 @@ class DataManager:
         if not self.cache_path or not cache_exists:
             return None
 
-        if self.logger:
-            self.logger.info(
-                f"Loading preprocessed dataset from cache: {self.cache_path}"
-            )
+        logger.info(f"Loading preprocessed dataset from cache: {self.cache_path}")
 
         try:
             dataset = Dataset.load_from_disk(self.cache_path)
-            if self.logger:
-                self.logger.info(
-                    f"Successfully loaded from cache - {len(dataset)} examples"
-                )
+            logger.info(f"Successfully loaded from cache - {len(dataset)} examples")
             return dataset
         except Exception as e:
-            if self.logger:
-                self.logger.warning(f"Failed to load from cache: {e}. Reprocessing...")
+            logger.warning(f"Failed to load from cache: {e}. Reprocessing...")
             return None
 
     def _save_cache(self, dataset: Dataset) -> None:
@@ -210,15 +271,13 @@ class DataManager:
         if self.force_recompute and os.path.exists(self.cache_path):
             shutil.rmtree(self.cache_path)
 
-        if self.logger:
-            self.logger.info(f"Saving preprocessed dataset to cache: {self.cache_path}")
+        logger.info(f"Saving preprocessed dataset to cache: {self.cache_path}")
         os.makedirs(self.cache_path, exist_ok=True)
         dataset.save_to_disk(self.cache_path)
 
     def _load(self) -> Dataset:
         raw_dataset = load_dataset(path=self.dataset_id, split=self.split)
-        if self.logger:
-            self.logger.info(f"Loaded dataset with {len(raw_dataset)} examples")
+        logger.info(f"Loaded dataset with {len(raw_dataset)} examples")
         return raw_dataset
 
     def _ensure_message_list(
@@ -319,10 +378,7 @@ class DataManager:
         return processed
 
     def _process(self, dataset: Dataset) -> Dataset:
-        if self.logger:
-            self.logger.info(
-                "Preprocessing dataset (applying chat template and filtering)..."
-            )
+        logger.info("Preprocessing dataset (applying chat template and filtering)...")
 
         original_size = len(dataset)
 
@@ -334,17 +390,42 @@ class DataManager:
             desc="Preprocessing dataset",
         )
 
-        if self.logger:
-            self.logger.info(
-                f"Dataset: {original_size} -> {len(dataset_preprocessed)} examples "
-                f"(filtered {original_size - len(dataset_preprocessed)})"
-            )
+        logger.info(
+            f"Dataset: {original_size} -> {len(dataset_preprocessed)} examples "
+            f"(filtered {original_size - len(dataset_preprocessed)})"
+        )
 
         return dataset_preprocessed
+
+    def _compute_example_length(self, example: Dict[str, Any]) -> int:
+        """
+        Compute the length of an example for sorting purposes.
+        Uses the maximum of chosen_text and rejected_text lengths since both
+        are in the same batch and need to be padded to the same length.
+        """
+        chosen_len = len(example["chosen_text"])
+        rejected_len = len(example["rejected_text"])
+        return max(chosen_len, rejected_len)
+
+    def _sort_dataset_by_length(self, dataset: Dataset) -> Dataset:
+        """
+        Sort dataset by example length (descending, largest first).
+        This reduces padding in batches by grouping similar-length examples.
+        """
+        lengths = [
+            self._compute_example_length(dataset[i]) for i in range(len(dataset))
+        ]
+        sorted_indices = sorted(
+            range(len(lengths)), key=lambda i: lengths[i], reverse=True
+        )
+        sorted_dataset = dataset.select(sorted_indices)
+        return sorted_dataset
 
     def _split(self, dataset: Dataset) -> None:
         """
         Split preprocessed dataset into train/eval, then split train into n_splits.
+        Shuffles train dataset before splitting to ensure random distribution
+        across submodels. Each split is then sorted by length for efficient batching.
         Format conversion is handled by the DataCollator.
         """
         dataset_split = dataset.train_test_split(
@@ -353,53 +434,190 @@ class DataManager:
         train_dataset_preprocessed = dataset_split["train"]
         eval_dataset_preprocessed = dataset_split["test"]
 
-        if self.logger:
-            self.logger.info(
-                f"Train: {len(train_dataset_preprocessed)} examples, "
-                f"Eval: {len(eval_dataset_preprocessed)} examples"
-            )
+        logger.info(
+            f"Train: {len(train_dataset_preprocessed)} examples, "
+            f"Eval: {len(eval_dataset_preprocessed)} examples"
+        )
 
-        indices = np.arange(len(train_dataset_preprocessed))
-        set_seed(self.seed)
-        np.random.shuffle(indices)
-        split_indices = np.array_split(indices, self.n_splits)
+        np.random.seed(self.seed)
+        train_indices = np.arange(len(train_dataset_preprocessed))
+        np.random.shuffle(train_indices)
+        train_dataset_shuffled = train_dataset_preprocessed.select(train_indices)
 
+        split_indices = np.array_split(
+            np.arange(len(train_dataset_shuffled)), self.n_splits
+        )
         self.train_datasets = {}
         for model_idx, indices in enumerate(split_indices):
-            self.train_datasets[model_idx] = train_dataset_preprocessed.select(indices)
-            if self.logger:
-                self.logger.info(
-                    f"Train split {model_idx} has "
-                    f"{len(self.train_datasets[model_idx])} examples"
-                )
+            split_dataset = train_dataset_shuffled.select(indices)
+            self.train_datasets[model_idx] = self._sort_dataset_by_length(split_dataset)
+        self.eval_dataset = self._sort_dataset_by_length(eval_dataset_preprocessed)
 
-        self.eval_dataset = eval_dataset_preprocessed
-
-        if self.logger:
-            self.logger.info("Dataset preprocessing and splitting complete.")
+        logger.info("Dataset preprocessing and splitting complete.")
 
     def _initialize_dataset(self) -> None:
         dataset_preprocessed = self._load_cache()
 
         if dataset_preprocessed is None:
-            if self.logger:
-                if self.force_recompute:
-                    self.logger.info("Recomputing dataset (force_recompute=True)...")
-                else:
-                    self.logger.info(
-                        f"No cached dataset found at {self.cache_path}. "
-                        f"Creating new dataset..."
-                    )
+            if self.force_recompute:
+                logger.info("Recomputing dataset (force_recompute=True)...")
+            else:
+                logger.info(
+                    f"No cached dataset found at {self.cache_path}. "
+                    f"Creating new dataset..."
+                )
             dataset_raw = self._load()
             dataset_preprocessed = self._process(dataset_raw)
+
+            if self.ref_model_id:
+                dataset_preprocessed = self._add_ref_logprobs(dataset_preprocessed)
+            else:
+                logger.warning(
+                    "No reference model ID provided."
+                    "Training will be 2x slower without precomputed reference logprobs."
+                )
+
             self._save_cache(dataset_preprocessed)
 
         self._split(dataset_preprocessed)
 
+    def _add_ref_logprobs(self, dataset: Dataset) -> Dataset:
+        if self.device_manager is None:
+            raise ValueError(
+                "DeviceManager is required for reference lprob computation"
+            )
+        if self.ref_model_id is None:
+            raise ValueError("ref_model_id is required for reference lprob computation")
+
+        available_gpus = self.device_manager._available_gpus
+        num_gpus = len(available_gpus)
+        logger.info(f"Computing reference lprobs with {self.ref_model_id}...")
+
+        # Load models sequentially (following trainer pattern)
+        models: list[AutoModelForCausalLM] = []
+        for gpu_id in available_gpus:
+            device_str = f"cuda:{gpu_id}"
+            logger.info(f"Loading reference model on {device_str}...")
+            model = cast(
+                AutoModelForCausalLM,
+                AutoModelForCausalLM.from_pretrained(
+                    self.ref_model_id,
+                    dtype=self.device_manager.dtype,
+                    device_map=device_str,
+                ),
+            )
+            model.eval()  # type: ignore[attr-defined]
+            models.append(model)
+
+        total_size = len(dataset)
+        chunk_size = (total_size + num_gpus - 1) // num_gpus
+
+        results: list[tuple[list[float], list[float]] | Exception | None] = [
+            None
+        ] * num_gpus
+        threads: list[threading.Thread] = []
+
+        def worker(
+            model: AutoModelForCausalLM,
+            gpu_id: int,
+            shard_idx: int,
+            start_idx: int,
+            end_idx: int,
+        ) -> None:
+            try:
+                device = torch.device(f"cuda:{gpu_id}")
+                sub_dataset = dataset.select(range(start_idx, end_idx))
+
+                collator = DataCollator(
+                    tokenizer=self.tokenizer,
+                    max_length=self.max_length,
+                    max_prompt_length=self.max_prompt_length,
+                )
+
+                dataloader = DataLoader(
+                    sub_dataset,
+                    batch_size=self.inference_batch_size,
+                    shuffle=False,
+                    collate_fn=collator,
+                    num_workers=self.dataloader_num_workers,
+                    pin_memory=self.dataloader_pin_memory,
+                    persistent_workers=self.dataloader_persistent_workers,
+                    prefetch_factor=self.dataloader_prefetch_factor,
+                )
+
+                chosen_logps_shard: list[float] = []
+                rejected_logps_shard: list[float] = []
+
+                desc = f"GPU {gpu_id} ({start_idx}-{end_idx})"
+                for batch in tqdm(
+                    dataloader, desc=desc, position=shard_idx, leave=False
+                ):
+                    with torch.no_grad():
+                        chosen_logps = get_log_probs(
+                            model,
+                            device,
+                            batch["chosen_input_ids"],
+                            batch["chosen_attention_mask"],
+                            batch["chosen_response_mask"],
+                        )
+                        rejected_logps = get_log_probs(
+                            model,
+                            device,
+                            batch["rejected_input_ids"],
+                            batch["rejected_attention_mask"],
+                            batch["rejected_response_mask"],
+                        )
+                    chosen_logps_shard.extend(chosen_logps.cpu().tolist())
+                    rejected_logps_shard.extend(rejected_logps.cpu().tolist())
+
+                results[shard_idx] = (chosen_logps_shard, rejected_logps_shard)
+
+            except Exception as e:
+                logger.error(f"Worker on GPU {gpu_id} failed: {e}")
+                results[shard_idx] = e
+
+        # Launch threads for processing (models already loaded)
+        for i, gpu_id in enumerate(available_gpus):
+            start = i * chunk_size
+            end = min(start + chunk_size, total_size)
+            if start >= total_size:
+                break
+
+            t = threading.Thread(target=worker, args=(models[i], gpu_id, i, start, end))
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        # Cleanup models
+        for model in models:
+            del model
+        if self.device_manager:
+            self.device_manager.clear_cache()
+
+        # Check for errors and combine results
+        final_chosen: list[float] = []
+        final_rejected: list[float] = []
+
+        for res in results:
+            if isinstance(res, Exception):
+                raise res
+            if res is None:
+                continue
+            chosen, rejected = res
+            final_chosen.extend(chosen)
+            final_rejected.extend(rejected)
+
+        dataset = dataset.add_column("reference_chosen_logps", final_chosen)
+        dataset = dataset.add_column("reference_rejected_logps", final_rejected)
+
+        return dataset
+
     def get_dataloader(
         self,
         model_idx: int,
-        partition: str,
+        partition: Literal["train", "eval"],
         batch_size: int,
     ) -> DataLoader[dict[str, torch.Tensor]]:
         """
@@ -420,10 +638,10 @@ class DataManager:
 
         if partition == "train":
             dataset = self.train_datasets[model_idx]
-            shuffle = True
+            shuffle_batches = True
         elif partition == "eval":
             dataset = self.eval_dataset
-            shuffle = False
+            shuffle_batches = False
         else:
             raise ValueError(f"Partition must be 'train' or 'eval', got '{partition}'")
 
@@ -433,16 +651,19 @@ class DataManager:
             max_prompt_length=self.max_prompt_length,
         )
 
+        batch_sampler = LengthBasedBatchSampler(
+            dataset_size=len(dataset),
+            batch_size=batch_size,
+            shuffle=shuffle_batches,
+            seed=self.seed if shuffle_batches else None,
+        )
+
         return DataLoader(
             dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
+            batch_sampler=batch_sampler,
             collate_fn=collator,
             num_workers=self.dataloader_num_workers,
             pin_memory=self.dataloader_pin_memory,
-            persistent_workers=(
-                self.dataloader_persistent_workers
-                if self.dataloader_num_workers > 0
-                else False
-            ),
+            persistent_workers=self.dataloader_persistent_workers,
+            prefetch_factor=self.dataloader_prefetch_factor,
         )

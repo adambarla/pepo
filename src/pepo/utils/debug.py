@@ -1,9 +1,8 @@
+import logging
 from typing import Optional
 
 import torch
 from transformers import AutoTokenizer
-
-from .logger import Logger
 
 
 def debug_tokens(
@@ -12,7 +11,7 @@ def debug_tokens(
     attn_mask_shifted: torch.Tensor,
     response_mask: torch.Tensor,
     log_probs: torch.Tensor,
-    logger: Optional[Logger] = None,
+    logger: Optional[logging.Logger] = None,
 ) -> None:
     """
     Debug function to decode and display tokens with their attention masks,
@@ -69,7 +68,7 @@ def debug_tokens(
 def initialize_lora_for_testing(
     model: torch.nn.Module,
     std: float = 0.1,
-    logger: Optional[Logger] = None,
+    logger: Optional[logging.Logger] = None,
 ) -> int:
     """
     Initialize LoRA weights for testing purposes.

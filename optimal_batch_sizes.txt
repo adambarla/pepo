@@ -1,0 +1,14 @@
+Optimal Batch Sizes
+
+Model: meta-llama/Llama-3.2-3B-Instruct
+
+Configuration:
+  L: 4
+  max_length: 1024
+  max_prompt_length: 512
+  max_new_tokens: 1024
+
+Optimal Batch Sizes:
+  training: 4
+  generation: 64
+  evaluation: 64
