@@ -1,5 +1,5 @@
 # Top-p Sampling Generator Configuration
-_target_: pepo.generate.Generator
+_target_: pepo.generator.Generator
 
 use_ensamble: true
 greedy_sampling: false

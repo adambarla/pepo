@@ -10,7 +10,7 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM
 
 from .factory import PEPOFactory
-from .generate import Generator
+from .generator import Generator
 from .trainer import Trainer
 from .utils import DeviceManager, HubManager
 from .utils.model_utils import get_log_probs
