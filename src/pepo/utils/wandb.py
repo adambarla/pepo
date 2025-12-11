@@ -3,11 +3,11 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from omegaconf import OmegaConf
+from wandb.util import generate_id
 
-try:
-    import wandb
-except ImportError:
-    wandb = None  # type: ignore[assignment]
+import wandb
+
+logger = logging.getLogger(__name__)
 
 
 class WandbRun:
@@ -45,10 +45,7 @@ class WandbRun:
         self.data_manager = data_manager
         self.model_idx = model_idx
 
-        if wandb is not None:
-            self.run_id = run_id or wandb.util.generate_id()
-        else:
-            self.run_id = None
+        self.run_id = run_id or generate_id()
 
     def _generate_run_name(self) -> Optional[str]:
         """Generate run name from model and data manager identifiers."""
@@ -245,7 +242,6 @@ class WandbManager:
         if not self.enabled or self.wandb is None:
             return None
 
-        logger = logging.getLogger(__name__)
         expected_name = f"{model_name}-l{model_idx}"
 
         try:
@@ -334,7 +330,7 @@ class WandbManager:
         try:
             api = self.wandb.Api()
             run_path = f"{self.entity or 'wandb'}/{self.project}/{training_run_id}"
-            run = api.run(run_path)  # type: ignore[no-untyped-call]
+            run = api.run(run_path)
 
             if run is None:
                 raise ValueError(

@@ -10,6 +10,8 @@ try:
 except ImportError:
     wandb = None  # type: ignore[assignment]
 
+logger = logging.getLogger(__name__)
+
 
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that adds colors to log level and logger name
@@ -212,7 +214,6 @@ class WandbHandler:
         if not self.enabled or self.wandb is None:
             return None
 
-        logger = logging.getLogger(__name__)
         expected_name = f"{model_name}-l{model_idx}"
 
         try:
@@ -270,7 +271,7 @@ class WandbHandler:
             try:
                 api = self.wandb.Api()
                 run_path = f"{self.entity or 'wandb'}/{self.project}/{run_id}"
-                run = api.run(run_path)  # type: ignore[no-untyped-call]
+                run = api.run(run_path)
                 if run is None:
                     raise ValueError(
                         f"Wandb run {run_id} does not exist in project {self.project}"
@@ -301,7 +302,7 @@ class WandbHandler:
                     run_path = (
                         f"{self.entity or 'wandb'}/{self.project}/{training_run_id}"
                     )
-                    run = api.run(run_path)  # type: ignore[no-untyped-call]
+                    run = api.run(run_path)
                     if run:
                         self._preserve_run_metadata(run)
                 self._init_run(

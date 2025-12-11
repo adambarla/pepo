@@ -6,6 +6,8 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+logger = logging.getLogger(__name__)
+
 
 class Generator:
     """Simple generator class for producing model responses from instructions."""
@@ -172,11 +174,9 @@ class Generator:
             pbar.set_postfix({"stopped": f"{stop_signal.sum().item()}/{batch_size}"})
 
             if sampled_token_ids[0] == model.tokenizer.eos_token_id:
-                logger = logging.getLogger(__name__)
                 logger.debug(f"Generated EOS token at step {i}")
             if torch.all(stop_signal):
                 break
-        logger = logging.getLogger(__name__)
         decoded = model.tokenizer.decode(
             device_input_ids[0].cpu()[0], skip_special_tokens=True
         )
@@ -219,7 +219,6 @@ class Generator:
         """
         tokenizer = model.get_tokenizer()
         outputs = []
-        logger = logging.getLogger(__name__)
 
         logger.info(f"Generating responses for {len(prompts)} prompts")
         logger.info("Generation parameters:")

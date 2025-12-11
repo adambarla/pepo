@@ -10,11 +10,13 @@ from alpaca_eval.constants import EVALUATORS_CONFIG_DIR
 from datasets import load_dataset
 from omegaconf import DictConfig, OmegaConf
 
-from alpaca_eval import evaluate as alpaca_evaluate  # type: ignore[attr-defined]
-from alpaca_eval import metrics  # type: ignore[attr-defined]
+from alpaca_eval import evaluate as alpaca_evaluate
+from alpaca_eval import metrics
 
 from ..utils import WandbRun, sanitize_filename
 from .base import BaseEvaluator
+
+logger = logging.getLogger(__name__)
 
 
 class AlpacaEvalEvaluator(BaseEvaluator):
@@ -124,7 +126,6 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         if self.num_samples is not None and self.num_samples > 0:
             dataset = dataset.select(range(min(self.num_samples, len(dataset))))
 
-        logger = logging.getLogger(__name__)
         count = self.num_samples if self.num_samples else len(dataset)
         logger.info(f"Loaded {count} samples from {self.dataset_id}")
         return dataset
@@ -140,7 +141,6 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         Returns:
             Path to the responses file.
         """
-        logger = logging.getLogger(__name__)
         logger.info(f"Generating responses for {len(self.dataset)} instructions")
 
         instructions = [item[self.instruction_key] for item in self.dataset]
@@ -202,7 +202,6 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         if not self.results_file.exists():
             return None, None
 
-        logger = logging.getLogger(__name__)
         logger.info(f"Loading existing annotations from {self.results_file}")
 
         annotations_df = pd.read_json(self.results_file)
@@ -253,7 +252,6 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         self, responses_file: Path, config_path: str
     ) -> tuple[pd.DataFrame, list[Any]]:
         """Run full evaluation with annotation."""
-        logger = logging.getLogger(__name__)
         logger.info(f"Evaluating responses from {responses_file}")
 
         precomputed_leaderboard = (
@@ -285,7 +283,6 @@ class AlpacaEvalEvaluator(BaseEvaluator):
             )
             annotations_df.to_json(self.results_file, orient="records", indent=2)
 
-        logger = logging.getLogger(__name__)
         logger.info(f"Saved leaderboard to {self.leaderboard_file}")
         if all_annotations is not None:
             logger.info(f"Saved annotations to {self.results_file}")
@@ -368,7 +365,6 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         """
         output_dir = Path(output_dir)
 
-        logger = logging.getLogger(__name__)
         leaderboard_files = sorted(output_dir.glob("*_leaderboard.csv"))
 
         if not leaderboard_files:

@@ -239,7 +239,6 @@ class Trainer:
         if wandb_run is not None and wandb_run.enabled:
             wandb_run.init_train_run()
 
-        logger = logging.getLogger(__name__)
         n_batches = len(train_loader)
 
         start_epoch = self.model.epochs_per_network[model_idx] or 0

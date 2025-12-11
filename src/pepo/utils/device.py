@@ -3,6 +3,8 @@ from typing import List, Optional
 
 import torch
 
+logger = logging.getLogger(__name__)
+
 
 class DeviceManager:
     """
@@ -30,7 +32,6 @@ class DeviceManager:
     def _get_available_gpus(self) -> List[int]:
         """Get list of available GPU IDs."""
         if not torch.cuda.is_available():
-            logger = logging.getLogger(__name__)
             logger.error("CUDA is not available!")
             raise RuntimeError("CUDA is not available")
 
@@ -86,7 +87,6 @@ class DeviceManager:
 
     def _log_environment_info(self) -> None:
         """Log device assignment information."""
-        logger = logging.getLogger(__name__)
         logger.info("Device Manager initialized:")
         logger.info(f"Available GPUs: {self._available_gpus}")
         logger.info(f"Dtype: {self.dtype}")
