@@ -240,13 +240,6 @@ class Trainer:
             wandb_run.init_train_run()
 
         logger = logging.getLogger(__name__)
-        train_size = len(train_loader.dataset)  # type: ignore[arg-type]
-        eval_size = len(eval_loader.dataset)  # type: ignore[arg-type]
-        logger.info(
-            f"Model {model_idx} - Train: size={train_size}, "
-            f"batches={len(train_loader)} - Eval: size={eval_size}, "
-            f"batches={len(eval_loader)}"
-        )
         n_batches = len(train_loader)
 
         start_epoch = self.model.epochs_per_network[model_idx] or 0
@@ -262,12 +255,12 @@ class Trainer:
         )
 
         initial_eval_loss = float("inf")
-        initial_eval_loss = self._eval_model(
+        initial_eval_loss = self._eval_epoch(
             model_idx=model_idx,
             model=model,
             eval_loader=eval_loader,
             device=device,
-            epoch=0,
+            epoch=start_epoch,
             n_epochs=n_epochs,
             global_step=global_step,
             wandb_run=wandb_run,
@@ -276,7 +269,7 @@ class Trainer:
         is_continuing = start_epoch > 0
         if not is_continuing:
             if self.model.factory:
-                self.model.factory.push_submodel(model, model_idx, epochs=0)
+                self.model.factory.push_submodel(model, model_idx, epochs=start_epoch)
 
         best_eval_loss = initial_eval_loss
         patience_counter = 0
@@ -287,88 +280,24 @@ class Trainer:
                 f"Model {model_idx} - Starting training epoch {epoch}/{n_epochs}"
             )
 
-            model.train()
-            optimizer.zero_grad()
-            loss_sum = torch.tensor(0.0, device=device)
-            lprob_chosen_sum_tensor = torch.tensor(0.0, device=device)
-            lprob_reject_sum_tensor = torch.tensor(0.0, device=device)
-            margin_sum_tensor = torch.tensor(0.0, device=device)
-            ebatch = 0
-
-            desc = f"Model {model_idx} - Epoch {epoch}/{n_epochs}"
-            pbar = tqdm(
-                total=n_batches // self.log_interval,
-                desc=desc,
-                position=model_idx,
-                leave=False,
-                mininterval=1.0,  # Update at most once per second
+            self._train_epoch(
+                model_idx=model_idx,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                train_loader=train_loader,
+                device=device,
+                epoch=epoch,
+                n_epochs=n_epochs,
+                grad_acc_steps=grad_acc_steps,
+                wandb_run=wandb_run,
             )
-
-            for step, batch in enumerate(train_loader):
-                batch_loss, lprobs_ch, lprobs_re = self.model._loss_fn(
-                    batch, model, device
-                )
-
-                loss_sum += batch_loss.detach()
-                lprob_chosen_sum_tensor += lprobs_ch.mean().detach()
-                lprob_reject_sum_tensor += lprobs_re.mean().detach()
-                margin_sum_tensor += (lprobs_ch - lprobs_re).mean().detach()
-
-                batch_loss = batch_loss / grad_acc_steps
-                batch_loss.backward()
-
-                if (step + 1) % grad_acc_steps == 0:
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
-                    global_step += 1
-                    ebatch += 1
-
-                if (step + 1) % self.log_interval == 0:
-                    current_lr = scheduler.get_last_lr()[0]
-                    loss_val = loss_sum.item() / (step + 1)
-                    margin_val = margin_sum_tensor.item() / (step + 1)
-
-                    pbar.set_postfix(
-                        {
-                            "loss": f"{loss_val:.4f}",
-                            "margin": f"{margin_val:.4f}",
-                            "lr": f"{current_lr:.2e}",
-                        }
-                    )
-                    pbar.update(1)
-
-                    if wandb_run is not None:
-                        wandb_run.log(
-                            {
-                                "train/learning_rate": current_lr,
-                                "train/step": global_step,
-                                "train/curr_avg_loss": loss_val,
-                                "train/curr_avg_margin": margin_val,
-                            },
-                            step=global_step,
-                        )
-
-            pbar.close()
-
-            if wandb_run is not None:
-                wandb_run.log(
-                    {
-                        "train/avg_lprobs_chosen": lprob_chosen_sum_tensor.item()
-                        / ebatch,
-                        "train/avg_lprobs_reject": lprob_reject_sum_tensor.item()
-                        / ebatch,
-                        "train/avg_margin": margin_sum_tensor.item() / ebatch,
-                        "train/epoch": epoch,
-                    },
-                    step=global_step,
-                )
 
             self.model.epochs_per_network[model_idx] = epoch
             if self.model.factory:
                 self.model.factory.push_submodel(model, model_idx, epochs=epoch)
 
-            eval_loss = self._eval_model(
+            eval_loss = self._eval_epoch(
                 model_idx=model_idx,
                 model=model,
                 eval_loader=eval_loader,
@@ -398,7 +327,96 @@ class Trainer:
         if wandb_run is not None:
             wandb_run.finish()
 
-    def _eval_model(
+    def _train_epoch(
+        self,
+        model_idx: int,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler._LRScheduler,
+        train_loader: DataLoader[dict[str, torch.Tensor]],
+        device: torch.device,
+        epoch: int,  # 1-indexed epoch number
+        n_epochs: int,
+        grad_acc_steps: int,
+        wandb_run: Optional[WandbRun],
+    ) -> None:
+        n_batches = len(train_loader)
+        global_step = (epoch - 1) * n_batches // grad_acc_steps
+
+        self.model.device_manager.clear_cache(model_idx)
+
+        model.train()
+        optimizer.zero_grad()
+        loss_sum = torch.tensor(0.0, device=device)
+        lprob_chosen_sum_tensor = torch.tensor(0.0, device=device)
+        lprob_reject_sum_tensor = torch.tensor(0.0, device=device)
+        margin_sum_tensor = torch.tensor(0.0, device=device)
+        ebatch = 0
+
+        desc = f"Model {model_idx} - Epoch {epoch}/{n_epochs}"
+        pbar = tqdm(
+            total=n_batches // self.log_interval,
+            desc=desc,
+            position=model_idx,
+            leave=False,
+            mininterval=1.0,  # Update at most once per second
+        )
+
+        for step, batch in enumerate(train_loader):
+            batch_loss, lprobs_ch, lprobs_re = self.model._loss_fn(batch, model, device)
+
+            loss_sum += batch_loss.detach()
+            lprob_chosen_sum_tensor += lprobs_ch.mean().detach()
+            lprob_reject_sum_tensor += lprobs_re.mean().detach()
+            margin_sum_tensor += (lprobs_ch - lprobs_re).mean().detach()
+
+            batch_loss = batch_loss / grad_acc_steps
+            batch_loss.backward()
+
+            if (step + 1) % grad_acc_steps == 0:
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                global_step += 1
+                ebatch += 1
+
+            if (step + 1) % self.log_interval == 0:
+                current_lr = scheduler.get_last_lr()[0]
+                loss_val = loss_sum.item() / (step + 1)
+                margin_val = margin_sum_tensor.item() / (step + 1)
+
+                pbar.set_postfix(
+                    {
+                        "loss": f"{loss_val:.4f}",
+                        "margin": f"{margin_val:.4f}",
+                        "lr": f"{current_lr:.2e}",
+                    }
+                )
+                pbar.update(1)
+
+                if wandb_run is not None:
+                    wandb_run.log(
+                        {
+                            "train/learning_rate": current_lr,
+                            "train/step": global_step,
+                            "train/curr_avg_loss": loss_val,
+                            "train/curr_avg_margin": margin_val,
+                        },
+                        step=global_step,
+                    )
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "train/avg_lprobs_chosen": lprob_chosen_sum_tensor.item() / ebatch,
+                    "train/avg_lprobs_reject": lprob_reject_sum_tensor.item() / ebatch,
+                    "train/avg_margin": margin_sum_tensor.item() / ebatch,
+                    "train/epoch": epoch,
+                },
+                step=global_step,
+            )
+        pbar.close()
+
+    def _eval_epoch(
         self,
         model_idx: int,
         model: torch.nn.Module,
@@ -417,8 +435,7 @@ class Trainer:
             raise ValueError("Evaluation loader is empty")
 
         model.eval()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+        self.model.device_manager.clear_cache(model_idx)
 
         loss_sum = torch.tensor(0.0, device=device)
         b = 0

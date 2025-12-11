@@ -35,7 +35,7 @@ alpaca-eval = { path = "./alpaca_eval", editable = true }
 [dependency-groups]
 dev = [
     "detect-secrets",
-    "mypy>=1.17.1",
+    "mypy[faster-cache]>=1.17.1",
     "pytest>=8.4.2",
     "ruff>=0.1.0",
     "pre-commit>=4.3.0",
@@ -55,12 +55,22 @@ strict=true
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
-ignore_missing_imports = false
-# Ignore missing stubs for external libraries
+exclude = [
+    "alpaca_eval",
+    "arena-hard-auto",
+    "LLM",
+    "figures"
+]
+
 [[tool.mypy.overrides]]
 module = [
-    "torch.*",
-    "datasets.*",
     "alpaca_eval.*",
+    "transformers.*",
+    "peft.*",
+    "accelerate.*",
+    "bitsandbytes.*",
+    "wandb.*",
+    "hydra.*"
 ]
 ignore_missing_imports = true
+follow_imports = "skip"

@@ -54,22 +54,30 @@ class DeviceManager:
         Get device string for a specific model, round-robin spread across
         available GPUs.
         """
-        gpu_id = self._available_gpus[model_idx % len(self._available_gpus)]
+        gpu_id = self._get_gpu_id_for_model(model_idx)
         gpu_device = f"cuda:{gpu_id}"
         torch.cuda.set_device(gpu_id)
         return gpu_device
+
+    def _get_gpu_id_for_model(self, model_idx: int) -> int:
+        return self._available_gpus[model_idx % len(self._available_gpus)]
 
     @property
     def num_available_gpus(self) -> int:
         """Get the number of available GPUs."""
         return len(self._available_gpus)
 
-    def clear_cache(self) -> None:
+    def clear_cache(self, model_idx: Optional[int] = None) -> None:
         """
         Clear CUDA cache on all managed GPUs.
         Useful after unloading models to free up GPU memory.
         """
         if not torch.cuda.is_available():
+            return
+        if model_idx is not None:
+            gpu_id = self._get_gpu_id_for_model(model_idx)
+            with torch.cuda.device(gpu_id):
+                torch.cuda.empty_cache()
             return
         for gpu_id in self._available_gpus:
             with torch.cuda.device(gpu_id):
