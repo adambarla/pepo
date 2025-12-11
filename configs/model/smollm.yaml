@@ -21,8 +21,8 @@ lora_target_modules: "all-linear"
 compile: false
 
 trainer:
-  train_batch_size: 4
-  eval_batch_size: 128
+  train_batch_size: 64
+  eval_batch_size: 256
   gradient_accumulation_steps: 1
 
 generator:

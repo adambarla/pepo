@@ -8,12 +8,15 @@ defaults:
 
 wandb:
   _target_: pepo.utils.wandb.WandbManager
-  enabled: true
+  enabled: ${sync}
   project: "pepo"
   tags: ["benchmark"]
   notes: null
   entity: "pepo-team"
   mode: "online"
+
+hub:
+  push: ${sync} # Push trained models
 
 dataset:
   max_length: 1024
@@ -39,10 +42,6 @@ model:
 evaluator:
   output_dir: "eval_outputs"
 
-hub:
-  load: true
-  push: true # Push trained models
-
 L: 4 # Number of submodels
 e: 3 # Epoch to evaluate at (also used as max_epochs when training)
 a: 0.1 # Alpha parameter for PEPO
@@ -52,3 +51,4 @@ seed: 42
 debug: false
 log_level: "info"
 continue: false
+sync: true  # If false, disables wandb logging and hub push (useful for test runs)

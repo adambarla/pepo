@@ -35,7 +35,7 @@ OmegaConf.register_new_resolver(
 )
 
 
-@hydra.main(config_path="../configs", config_name="benchmark.yaml", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="benchmark.yaml", version_base="1.1")  # type: ignore[untyped-decorator]
 def main(cfg: DictConfig) -> None:
     hydra_cfg = HydraConfig.get()
     original_work_dir = Path(hydra_cfg.runtime.cwd)
@@ -86,7 +86,6 @@ def main(cfg: DictConfig) -> None:
     can_load = model.can_load_from_epoch(evaluation_epoch)
 
     wandb_config = cfg.get("wandb", OmegaConf.create({"enabled": False}))
-
     wandb_manager = None
     if wandb_config.enabled:
         resolved_cfg_plain = OmegaConf.to_container(

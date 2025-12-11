@@ -308,12 +308,6 @@ class PEPOModel:
                 )
                 _warned_missing_ref_logprobs = True
             # if we don't have reference logprobs, we need to compute them
-            raise ValueError(
-                "Precomputed reference logprobs not found in batch. "
-                "Computing on-the-fly (2x slower). "
-                "Consider preprocessing dataset with ref_model_id "
-                "to cache them."
-            )
             with model.disable_adapter():
                 with torch.no_grad():
                     lprobs_chosen_ref = get_log_probs(
@@ -347,7 +341,7 @@ class PEPOModel:
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)  # type: ignore[operator]
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
         logits = outputs.logits  # (B, T, V)
         last_logits = logits[:, -1, :]
         log_probs = F.log_softmax(last_logits, dim=-1)

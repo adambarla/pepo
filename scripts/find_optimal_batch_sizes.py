@@ -3,13 +3,19 @@
 Script to find optimal batch sizes for training and generation tasks.
 """
 
+import io
+import logging
+import multiprocessing
 import os
+import sys
+import types
+from pathlib import Path  # noqa: E402
 
 os.environ["TQDM_DISABLE"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Set multiprocessing start method to 'spawn' to avoid deadlocks with CUDA and threading
-import multiprocessing
+logger = logging.getLogger("batch_finder")
 
 try:
     multiprocessing.set_start_method("spawn", force=True)
@@ -19,12 +25,6 @@ except RuntimeError:
         "This is required for DataLoader workers to work correctly "
         "with CUDA and threading."
     )
-
-import io
-import logging
-import sys
-import types
-from pathlib import Path  # noqa: E402
 from typing import Any, Dict, Optional, Tuple  # noqa: E402
 
 import hydra  # noqa: E402
@@ -81,9 +81,9 @@ OmegaConf.register_new_resolver(
 
 
 def test_batch_size(
+    model: Any,
     cfg: DictConfig,
     task: str,
-    max_epochs: int = 1,
 ) -> Tuple[Optional[int], Optional[str]]:
     """
     Test a task with increasing batch sizes until failure.
@@ -92,16 +92,6 @@ def test_batch_size(
     batch_size = 1
     optimal_batch_size = None
 
-    device_manager = instantiate(cfg.device)
-    hub_manager = instantiate(cfg.hub)
-
-    model = instantiate(
-        cfg.model,
-        device_manager=device_manager,
-        hub_manager=hub_manager,
-    )
-    if not model._models:
-        model.load_models(init_new=True)
     tokenizer = model.get_tokenizer()
     if hasattr(tokenizer, "vocab_size") and tokenizer.vocab_size is not None:
         vocab_size = tokenizer.vocab_size
@@ -109,49 +99,40 @@ def test_batch_size(
         vocab_dict = tokenizer.get_vocab()
         vocab_size = len(vocab_dict)
 
-    # Determine max_length based on model config if not provided in dataset config
-    model_config = getattr(model.models[0], "config", None)
-    model_max_len = getattr(model_config, "max_position_embeddings", None)
-
     if task == "training" or task == "evaluation":
+        if "max_length" not in cfg.dataset or cfg.dataset.max_length is None:
+            raise ValueError(
+                "dataset.max_length must be defined in config. "
+                "It is required for training and evaluation tasks."
+            )
         max_length = cfg.dataset.max_length
-        if max_length is None:
-            if model_max_len is not None:
-                max_length = min(model_max_len, 8192)
-                logger.info(
-                    f"Using model's max_position_embeddings for {task} test: "
-                    f"{max_length}"
-                )
-            else:
-                max_length = 2048
-                logger.info(
-                    f"Using default fallback length for {task} test: {max_length}"
-                )
-        else:
-            logger.info(f"Using configured max_length for {task} test: {max_length}")
+        logger.info(f"Using configured max_length for {task} test: {max_length}")
 
     elif task == "generation":
+        if (
+            "max_prompt_length" not in cfg.dataset
+            or cfg.dataset.max_prompt_length is None
+        ):
+            raise ValueError(
+                "dataset.max_prompt_length must be defined in config. "
+                "It is required for generation task."
+            )
         max_prompt_length = cfg.dataset.max_prompt_length
-        if max_prompt_length is None:
-            if model_max_len is not None:
-                # For generation, we test with half context as prompt
-                max_prompt_length = min(model_max_len, 8192) // 2
-                logger.info(
-                    f"Using half of model's max_position_embeddings for "
-                    f"generation prompt: {max_prompt_length}"
-                )
-            else:
-                max_length = cfg.dataset.max_length
-                if max_length is not None:
-                    max_prompt_length = max_length // 2
-                else:
-                    max_prompt_length = 1024  # Default fallback
-                    logger.info(
-                        f"Using default fallback prompt length for "
-                        f"generation test: {max_prompt_length}"
-                    )
 
-        max_new_tokens = cfg.model.generator.get("max_new_tokens", 1000)
+        if "generator" not in cfg.model:
+            raise ValueError(
+                "Generator not configured in model config. "
+                "Please add generator section to model config."
+            )
+        if (
+            "max_new_tokens" not in cfg.model.generator
+            or cfg.model.generator.max_new_tokens is None
+        ):
+            raise ValueError(
+                "model.generator.max_new_tokens must be defined in config. "
+                "It is required for generation task."
+            )
+        max_new_tokens = cfg.model.generator.max_new_tokens
         input_length = max_prompt_length + max_new_tokens - 10
         max_total_length = max_prompt_length + max_new_tokens
 
@@ -160,9 +141,8 @@ def test_batch_size(
             torch.cuda.empty_cache()
 
             if task == "training":
-                effective_batch_size = cfg.get("effective_batch_size")
-                if effective_batch_size is None:
-                    effective_batch_size = batch_size
+                if "trainer" not in cfg.model or cfg.model.trainer is None:
+                    raise ValueError("Trainer not configured in model config.")
 
                 chosen_ids = torch.randint(
                     0, vocab_size, (batch_size, max_length), dtype=torch.long
@@ -179,7 +159,7 @@ def test_batch_size(
                 reject_rmask = torch.zeros((batch_size, max_length), dtype=torch.long)
                 reject_rmask[:, prompt_length:] = 1
 
-                device = torch.device(device_manager.get_device_for_model(0))
+                device = torch.device(model.device_manager.get_device_for_model(0))
                 chosen_ids = chosen_ids.to(device)
                 reject_ids = reject_ids.to(device)
                 chosen_amask = chosen_amask.to(device)
@@ -215,9 +195,8 @@ def test_batch_size(
                 )
 
             elif task == "evaluation":
-                effective_batch_size = cfg.get("effective_batch_size")
-                if effective_batch_size is None:
-                    effective_batch_size = batch_size
+                if "trainer" not in cfg.model or cfg.model.trainer is None:
+                    raise ValueError("Trainer not configured in model config.")
 
                 # Initialize trainer to handle partial and ensure optimizer
                 # creation logic is consistent
@@ -266,7 +245,7 @@ def test_batch_size(
                 reject_rmask = torch.zeros((batch_size, max_length), dtype=torch.long)
                 reject_rmask[:, prompt_length:] = 1
 
-                device = torch.device(device_manager.get_device_for_model(0))
+                device = torch.device(model.device_manager.get_device_for_model(0))
                 chosen_ids = chosen_ids.to(device)
                 reject_ids = reject_ids.to(device)
                 chosen_amask = chosen_amask.to(device)
@@ -312,7 +291,10 @@ def test_batch_size(
 
             elif task == "generation":
                 if "generator" not in cfg.model:
-                    return None, "Generator not configured in model config"
+                    raise ValueError(
+                        "Generator not configured in model config. "
+                        "Please add generator section to model config."
+                    )
 
                 generator = instantiate(cfg.model.generator)
                 model.generator = generator
@@ -324,7 +306,7 @@ def test_batch_size(
                     (batch_size, input_length), dtype=torch.long
                 )
 
-                device = torch.device(device_manager.get_device_for_model(0))
+                device = torch.device(model.device_manager.get_device_for_model(0))
                 input_ids = input_ids.to(device)
                 attention_mask = attention_mask.to(device)
 
@@ -383,37 +365,73 @@ def test_batch_size(
                 return optimal_batch_size, "OOM"
             return optimal_batch_size, error_msg
 
-    if task in ["training", "generation", "evaluation"]:
-        model.unload_models()
-
 
 @hydra.main(
     config_path="../configs",
     config_name="benchmark.yaml",
     version_base="1.1",
-)
+)  # type: ignore[untyped-decorator]
 def main(cfg: DictConfig) -> None:
     hydra_cfg = HydraConfig.get()
     original_work_dir = Path(hydra_cfg.runtime.cwd)
 
-    test_training = cfg.get("test_training", True)
-    test_generation = cfg.get("test_generation", True)
-    test_evaluation = cfg.get("test_evaluation", True)
-    max_epochs = cfg.get("max_epochs", 1)
-
+    if "log_level" not in cfg:
+        raise ValueError("log_level must be defined in config.")
     log_level_str = cfg.log_level.upper()
     logger = setup_logging(level=log_level_str)
 
+    tasks = ["train", "eval", "gen"]
+    if "tasks" in cfg:
+        tasks = cfg.tasks
+        if isinstance(tasks, str):
+            tasks = [tasks]
+        for task in tasks:
+            if task not in ["train", "eval", "gen"]:
+                logger.warning(
+                    f"Invalid task: {task}. Valid tasks are: train, eval, gen"
+                )
+                return
+    logger.info(f"Testing tasks: {tasks}")
+
+    if "seed" not in cfg:
+        raise ValueError("seed must be defined in config.")
     set_seed(cfg.seed)
+
+    if "model" not in cfg or "model_id" not in cfg.model:
+        raise ValueError("model.model_id must be defined in config.")
+    model_id = cfg.model.model_id
+
+    if "L" not in cfg:
+        raise ValueError("L must be defined in config.")
+
+    if "trainer" not in cfg.model or cfg.model.trainer is None:
+        raise ValueError("Trainer not configured in model config.")
+
+    if "generator" not in cfg.model:
+        raise ValueError(
+            "Generator not configured in model config. "
+            "Please add generator section to model config."
+        )
 
     results: Dict[str, Dict[str, Any]] = {}
 
-    if test_training:
+    device_manager = instantiate(cfg.device)
+    hub_manager = instantiate(cfg.hub)
+
+    model = instantiate(
+        cfg.model,
+        device_manager=device_manager,
+        hub_manager=hub_manager,
+    )
+    if not model._models:
+        model.load_models(init_new=True)
+
+    if "train" in tasks:
         logger.info("Testing TRAINING (starting from batch_size=1)")
         optimal_batch, error = test_batch_size(
+            model,
             cfg,
             "training",
-            max_epochs=max_epochs,
         )
         results["training"] = {
             "optimal_batch_size": optimal_batch,
@@ -422,22 +440,10 @@ def main(cfg: DictConfig) -> None:
         if error:
             logger.warning(f"Training test failed: {error}")
 
-    if test_generation:
-        logger.info("Testing GENERATION (starting from batch_size=1)")
-        optimal_batch, error = test_batch_size(
-            cfg,
-            "generation",
-        )
-        results["generation"] = {
-            "optimal_batch_size": optimal_batch,
-            "error": error,
-        }
-        if error:
-            logger.warning(f"Generation test failed: {error}")
-
-    if test_evaluation:
+    if "eval" in tasks:
         logger.info("Testing EVALUATION (starting from batch_size=1)")
         optimal_batch, error = test_batch_size(
+            model,
             cfg,
             "evaluation",
         )
@@ -448,16 +454,37 @@ def main(cfg: DictConfig) -> None:
         if error:
             logger.warning(f"Evaluation test failed: {error}")
 
-    model_id = cfg.model.get("model_id", "unknown")
+    if "gen" in tasks:
+        logger.info("Testing GENERATION (starting from batch_size=1)")
+        optimal_batch, error = test_batch_size(
+            model,
+            cfg,
+            "generation",
+        )
+        results["generation"] = {
+            "optimal_batch_size": optimal_batch,
+            "error": error,
+        }
+        if error:
+            logger.warning(f"Generation test failed: {error}")
+
+    model.unload_models()
+
     config_info = {
         "model": model_id,
         "L": cfg.L,
-        "max_length": cfg.dataset.max_length,
-        "max_prompt_length": cfg.dataset.max_prompt_length,
     }
-    if test_generation and "generator" in cfg.model:
-        config_info["max_new_tokens"] = cfg.model.generator.get("max_new_tokens", 1000)
-    if test_training and "effective_batch_size" in cfg:
+
+    if "max_length" in cfg.dataset and cfg.dataset.max_length is not None:
+        config_info["max_length"] = cfg.dataset.max_length
+
+    if "max_prompt_length" in cfg.dataset and cfg.dataset.max_prompt_length is not None:
+        config_info["max_prompt_length"] = cfg.dataset.max_prompt_length
+
+    if "generator" in cfg.model and "max_new_tokens" in cfg.model.generator:
+        config_info["max_new_tokens"] = cfg.model.generator.max_new_tokens
+
+    if "effective_batch_size" in cfg:
         config_info["effective_batch_size"] = cfg.effective_batch_size
 
     logger.info("\nConfiguration:")

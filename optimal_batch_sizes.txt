@@ -9,6 +9,6 @@ Configuration:
   max_new_tokens: 1024
 
 Optimal Batch Sizes:
-  training: 4
-  generation: 64
+  training: 32
   evaluation: 64
+  generation: 64

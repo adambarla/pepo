@@ -24,7 +24,6 @@ class HubManager:
     def __init__(
         self,
         base_dir: str,
-        load: bool = False,
         push: bool = True,
         load_trainable: bool = True,
         hf_token: Optional[str] = None,
@@ -34,12 +33,11 @@ class HubManager:
 
         Args:
             base_dir: HuggingFace username/organization (e.g., "PessimisticDPO").
-            load: Whether to load models from hub.
             push: Whether to push models to hub.
+            load_trainable: Whether to load models with trainable parameters.
             hf_token: HuggingFace token. If None, uses HF_TOKEN env var or cached token.
         """
         self.base_dir = base_dir
-        self.should_load = load
         self.should_push = push
         self.load_trainable = load_trainable
         self.api = HfApi()
@@ -48,10 +46,6 @@ class HubManager:
     @property
     def should_push_to_hub(self) -> bool:
         return self.should_push
-
-    @property
-    def should_load_from_hub(self) -> bool:
-        return self.should_load
 
     def _authenticate(self, hf_token: Optional[str] = None) -> None:
         """Authenticate with HuggingFace Hub."""
@@ -70,13 +64,6 @@ class HubManager:
                 )
 
     def model_exists(self, model_name: str, epochs: Optional[int] = None) -> bool:
-        if not self.should_load_from_hub:
-            logger.warning(
-                f"Loading from hub is disabled. Cannot check if model "
-                f"{model_name} exists."
-            )
-            return False
-
         repo_id = self.get_repo_id(model_name, epochs)
         try:
             self.api.model_info(repo_id)
@@ -97,15 +84,6 @@ class HubManager:
         model_name: str,
         epochs: Optional[int] = None,
     ) -> PeftModel:
-        if not self.should_load_from_hub:
-            logger.error(
-                f"Loading from hub is disabled. Cannot load model {model_name}. "
-            )
-            raise ValueError(
-                f"Loading from hub is disabled, "
-                f"but load_model was called for {model_name}"
-            )
-
         if not self.model_exists(model_name, epochs):
             raise ValueError(f"Model {model_name} not found in hub")
         repo_id = self.get_repo_id(model_name, epochs)
@@ -148,13 +126,6 @@ class HubManager:
             The latest epoch where all submodels exist, or None if no common
             epoch exists.
         """
-        if not self.should_load_from_hub:
-            logger.warning(
-                f"Loading from hub is disabled. Cannot find latest epoch for "
-                f"{base_model_name}."
-            )
-            return None
-
         for epoch in range(max_epoch, -1, -1):
             all_exist = True
             for model_idx in range(num_networks):
@@ -196,18 +167,13 @@ class HubManager:
             epochs: Optional number of epochs. If provided, appends "-e{epochs}"
                 to model_name. Use None for final push without epoch suffix.
         """
-        if not self.should_push_to_hub:
-            logger.warning(
-                f"Skipping push of model {model_name} to Hub because "
-                f"push_to_hub is disabled in config."
-            )
-            return
-
-        # Append epoch suffix if provided
         if epochs is not None:
-            model_name = f"{model_name}-e{epochs}"
-
+            model_name = f"{model_name}-e{epochs}"  # append epoch suffix if provided
         repo_id = f"{self.base_dir}/{model_name}"
+
+        if not self.should_push_to_hub:
+            logger.warning(f"Disabled push to Hub. Skipping push of {repo_id}.")
+            return
 
         # Generate commit message based on epochs
         if epochs is not None:
@@ -223,12 +189,12 @@ class HubManager:
         logger.info(f"Pushing model to {repo_id}...")
 
         # Push model
-        model.push_to_hub(  # type: ignore[attr-defined]
+        model.push_to_hub(
             repo_id,
             commit_message=commit_message,
             private=private,
         )
-        tokenizer.push_to_hub(  # type: ignore[attr-defined]
+        tokenizer.push_to_hub(
             repo_id,
             commit_message=commit_message,
             private=private,
