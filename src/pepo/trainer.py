@@ -249,10 +249,6 @@ class Trainer:
             for _ in range(global_step):
                 scheduler.step()
 
-        logger.info(
-            f"Model {model_idx} - Running evaluation from epoch {start_epoch}..."
-        )
-
         initial_eval_loss = float("inf")
         initial_eval_loss = self._eval_epoch(
             model_idx=model_idx,
@@ -261,7 +257,6 @@ class Trainer:
             device=device,
             epoch=start_epoch,
             n_epochs=n_epochs,
-            global_step=global_step,
             wandb_run=wandb_run,
         )
 
@@ -275,10 +270,6 @@ class Trainer:
         es_enabled = es_patience is not None
 
         for epoch in range(start_epoch + 1, n_epochs + 1):
-            logger.info(
-                f"Model {model_idx} - Starting training epoch {epoch}/{n_epochs}"
-            )
-
             self._train_epoch(
                 model_idx=model_idx,
                 model=model,
@@ -303,7 +294,6 @@ class Trainer:
                 device=device,
                 epoch=epoch,
                 n_epochs=n_epochs,
-                global_step=global_step,
                 wandb_run=wandb_run,
             )
 
@@ -339,6 +329,8 @@ class Trainer:
         grad_acc_steps: int,
         wandb_run: Optional[WandbRun],
     ) -> None:
+        logger.info(f"Model {model_idx} - Training epoch {epoch}/{n_epochs}")
+
         n_batches = len(train_loader)
         global_step = (epoch - 1) * n_batches // grad_acc_steps
 
@@ -388,7 +380,6 @@ class Trainer:
                     {
                         "loss": f"{loss_val:.4f}",
                         "margin": f"{margin_val:.4f}",
-                        "lr": f"{current_lr:.2e}",
                     }
                 )
                 pbar.update(1)
@@ -423,13 +414,16 @@ class Trainer:
         device: torch.device,
         epoch: int,
         n_epochs: int,
-        global_step: int,
         wandb_run: Optional[WandbRun] = None,
     ) -> float:
         """
         Evaluate the model on the evaluation dataset.
         """
+        logger.info(f"Model {model_idx} - Evaluating epoch {epoch}/{n_epochs}")
+
         n_batches = len(eval_loader)
+        global_step = epoch * n_batches
+
         if n_batches == 0:
             raise ValueError("Evaluation loader is empty")
 
@@ -437,7 +431,6 @@ class Trainer:
         self.model.device_manager.clear_cache(model_idx)
 
         loss_sum = torch.tensor(0.0, device=device)
-        b = 0
         lprob_chosen_sum_tensor = torch.tensor(0.0, device=device)
         lprob_reject_sum_tensor = torch.tensor(0.0, device=device)
         margin_sum_tensor = torch.tensor(0.0, device=device)
@@ -453,22 +446,20 @@ class Trainer:
         )
 
         with torch.no_grad():
-            for batch in pbar:
+            for step, batch in enumerate(pbar):
                 batch_loss, lprobs_ch, lprobs_re = self.model._loss_fn(
                     batch, model, device
                 )
 
                 loss_sum += batch_loss
-                b += 1
 
                 lprob_chosen_sum_tensor += lprobs_ch.mean()
                 lprob_reject_sum_tensor += lprobs_re.mean()
                 margin_sum_tensor += (lprobs_ch - lprobs_re).mean()
 
-                # Only update postfix periodically to reduce overhead
-                if b % max(1, n_batches // 10) == 0 or b == 1:
-                    current_avg_loss = loss_sum.item() / b
-                    margin_val = margin_sum_tensor.item() / b
+                if (step + 1) % self.log_interval == 0:
+                    current_avg_loss = loss_sum.item() / (step + 1)
+                    margin_val = margin_sum_tensor.item() / (step + 1)
 
                     pbar.set_postfix(
                         {
@@ -482,13 +473,15 @@ class Trainer:
         if wandb_run is not None:
             wandb_run.log(
                 {
-                    "eval/loss": loss_sum.item() / b,
-                    "eval/avg_lprobs_chosen": lprob_chosen_sum_tensor.item() / b,
-                    "eval/avg_lprobs_reject": lprob_reject_sum_tensor.item() / b,
-                    "eval/avg_margin": margin_sum_tensor.item() / b,
+                    "eval/loss": loss_sum.item() / n_batches,
+                    "eval/avg_lprobs_chosen": lprob_chosen_sum_tensor.item()
+                    / n_batches,
+                    "eval/avg_lprobs_reject": lprob_reject_sum_tensor.item()
+                    / n_batches,
+                    "eval/avg_margin": margin_sum_tensor.item() / n_batches,
                     "eval/epoch": epoch,
                 },
                 step=global_step,
             )
 
-        return loss_sum.item() / b
+        return loss_sum.item() / n_batches
