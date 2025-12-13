@@ -1,6 +1,5 @@
 import logging
 import threading
-from datetime import datetime
 from typing import Any, Callable, Optional
 
 import torch
@@ -135,7 +134,7 @@ class Trainer:
         # Load models if not already loaded
         if self.model._models is None:
             if continue_training:
-                model_name = model._get_model_name()
+                model_name = model.get_name()
                 latest_epoch = model.hub_manager.find_latest_epoch_for_all_submodels(
                     model_name, model.num_networks, max_epoch=max_epochs
                 )
@@ -167,8 +166,7 @@ class Trainer:
 
         logger.info("Training PEPO ensemble models...")
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        group = f"{self.model._get_model_name()}-{timestamp}"
+        group = self.model.get_name()
 
         threads = []
         for model_idx in range(self.model.num_networks):

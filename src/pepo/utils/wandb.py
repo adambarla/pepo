@@ -53,15 +53,15 @@ class WandbRun:
         if self.model:
             if hasattr(self.model, "get_run_identifier"):
                 parts.append(self.model.get_run_identifier())
-            elif hasattr(self.model, "_get_model_name"):
-                parts.append(self.model._get_model_name())
-            elif hasattr(self.model, "_get_submodel_name"):
+            elif hasattr(self.model, "get_name"):
+                parts.append(self.model.get_name())
+            elif hasattr(self.model, "get_submodel_name"):
                 model_idx = (
                     self.model_idx
                     if self.model_idx is not None
                     else getattr(self.model, "_model_idx", 0)
                 )
-                parts.append(self.model._get_submodel_name(model_idx))
+                parts.append(self.model.get_submodel_name(model_idx))
         if self.data_manager and hasattr(self.data_manager, "get_run_identifier"):
             parts.append(self.data_manager.get_run_identifier())
         if parts:
@@ -299,7 +299,7 @@ class WandbManager:
         The benchmark run will be in the same group as the training run.
 
         Args:
-            model: Model instance for benchmarking. Must have _get_model_name() method.
+            model: Model instance for benchmarking. Must have get_name() method.
 
         Returns:
             WandbRun instance for the benchmark run, or None if wandb is disabled.
@@ -313,12 +313,12 @@ class WandbManager:
         if self.wandb is None:
             raise ValueError("Wandb is not installed")
 
-        if not hasattr(model, "_get_model_name"):
+        if not hasattr(model, "get_name"):
             raise ValueError(
-                "Cannot find training run: model does not have _get_model_name() method"
+                "Cannot find training run: model does not have get_name() method"
             )
 
-        model_name = model._get_model_name()
+        model_name = model.get_name()
         training_run_id = self.find_training_run_id(model_name, model_idx=0)
 
         if training_run_id is None:

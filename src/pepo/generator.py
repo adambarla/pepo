@@ -189,9 +189,8 @@ class Generator:
         Get generator name.
         """
         parts = []
-        parts.append(f"mt{self.max_new_tokens}")
-        if self.greedy_sampling:
-            parts.append("greedy")
+        if self.max_new_tokens is not None:
+            parts.append(f"mt{self.max_new_tokens}")
         if self.top_p_sampling:
             parts.append("top-p")
             parts.append(f"t{self.temperature}")
@@ -285,5 +284,4 @@ class Generator:
                 outputs.append({"prompt": prompt, "output": response})
 
         logger.info(f"Successfully generated {len(outputs)} responses")
-
         return outputs

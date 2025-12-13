@@ -10,7 +10,7 @@ wandb:
   _target_: pepo.utils.wandb.WandbManager
   enabled: ${sync}
   project: "pepo"
-  tags: ["benchmark"]
+  tags: []
   notes: null
   entity: "pepo-team"
   mode: "online"
@@ -38,9 +38,6 @@ model:
     log_interval: 1
   debug: ${debug}
   compile: false
-
-evaluator:
-  output_dir: "eval_outputs"
 
 L: 4 # Number of submodels
 e: 3 # Epoch to evaluate at (also used as max_epochs when training)

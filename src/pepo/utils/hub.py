@@ -63,8 +63,8 @@ class HubManager:
                     f"'huggingface-cli login'"
                 )
 
-    def model_exists(self, model_name: str, epochs: Optional[int] = None) -> bool:
-        repo_id = self.get_repo_id(model_name, epochs)
+    def model_exists(self, model_name: str, epoch: Optional[int] = None) -> bool:
+        repo_id = self.get_repo_id(model_name, epoch)
         try:
             self.api.model_info(repo_id)
             return True
@@ -72,9 +72,9 @@ class HubManager:
             logger.warning(f"Failed to load {repo_id}")
             return False
 
-    def get_repo_id(self, model_name: str, epochs: Optional[int] = None) -> str:
-        if epochs is not None:
-            return f"{self.base_dir}/{model_name}-e{epochs}"
+    def get_repo_id(self, model_name: str, epoch: Optional[int] = None) -> str:
+        if epoch is not None:
+            return f"{self.base_dir}/{model_name}-e{epoch}"
         else:
             return f"{self.base_dir}/{model_name}"
 
@@ -82,11 +82,14 @@ class HubManager:
         self,
         base_model: PreTrainedModel,
         model_name: str,
-        epochs: Optional[int] = None,
+        epoch: Optional[int] = None,
     ) -> PeftModel:
-        if not self.model_exists(model_name, epochs):
-            raise ValueError(f"Model {model_name} not found in hub")
-        repo_id = self.get_repo_id(model_name, epochs)
+        if not self.model_exists(model_name, epoch):
+            logger.error(
+                f"Tried to load model non existing {model_name} (epoch {epoch})."
+            )
+            raise ValueError(f"Model {model_name} (epoch {epoch}) not found in hub")
+        repo_id = self.get_repo_id(model_name, epoch)
         model = PeftModel.from_pretrained(
             base_model,
             repo_id,
@@ -154,7 +157,7 @@ class HubManager:
         tokenizer: "AutoTokenizer",
         model_idx: int,
         private: bool = False,
-        epochs: Optional[int] = None,
+        epoch: Optional[int] = None,
     ) -> None:
         """
         Push model and tokenizer to HuggingFace Hub.
@@ -164,22 +167,22 @@ class HubManager:
             model: The model to push (PEFT model with LoRA adapters).
             model_idx: Index of the model in the ensemble.
             private: Whether to make the repository private.
-            epochs: Optional number of epochs. If provided, appends "-e{epochs}"
+            epoch: Optional number of epochs. If provided, appends "-e{epoch}"
                 to model_name. Use None for final push without epoch suffix.
         """
-        if epochs is not None:
-            model_name = f"{model_name}-e{epochs}"  # append epoch suffix if provided
+        if epoch is not None:
+            model_name = f"{model_name}-e{epoch}"  # append epoch suffix if provided
         repo_id = f"{self.base_dir}/{model_name}"
 
         if not self.should_push_to_hub:
             logger.warning(f"Disabled push to Hub. Skipping push of {repo_id}.")
             return
 
-        # Generate commit message based on epochs
-        if epochs is not None:
+        # Generate commit message based on epoch
+        if epoch is not None:
             commit_message = (
                 f"Upload PEPO ensemble model {model_idx} checkpoint after "
-                f"{epochs} epochs to {repo_id}"
+                f"{epoch} epochs to {repo_id}"
             )
         else:
             commit_message = (

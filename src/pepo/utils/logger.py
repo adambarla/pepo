@@ -168,15 +168,15 @@ class WandbHandler:
         if self.model:
             if hasattr(self.model, "get_run_identifier"):
                 parts.append(self.model.get_run_identifier())
-            elif hasattr(self.model, "_get_model_name"):
-                parts.append(self.model._get_model_name())
-            elif hasattr(self.model, "_get_submodel_name"):
+            elif hasattr(self.model, "get_name"):
+                parts.append(self.model.get_name())
+            elif hasattr(self.model, "get_submodel_name"):
                 model_idx = (
                     self.model_idx
                     if self.model_idx is not None
                     else getattr(self.model, "_model_idx", 0)
                 )
-                parts.append(self.model._get_submodel_name(model_idx))
+                parts.append(self.model.get_submodel_name(model_idx))
         if self.data_manager and hasattr(self.data_manager, "get_run_identifier"):
             parts.append(self.data_manager.get_run_identifier())
         if parts:
@@ -292,8 +292,8 @@ class WandbHandler:
             self._init_run(job_type="benchmark", resume="must", run_id=run_id)
         else:
             training_run_id = None
-            if self.model and hasattr(self.model, "_get_model_name"):
-                model_name = self.model._get_model_name()
+            if self.model and hasattr(self.model, "get_name"):
+                model_name = self.model.get_name()
                 training_run_id = self.find_training_run_id(model_name)
 
             if training_run_id:

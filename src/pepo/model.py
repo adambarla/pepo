@@ -131,8 +131,6 @@ class PEPOModel:
                 "Models are already loaded. Unload them first if you want to reload."
             )
             return
-
-        logger.info("Loading models...")
         self._models = self.factory.load_models(init_new=init_new, epoch=epoch)
         if epoch is not None:
             self.epochs_per_network = [epoch] * self.num_networks
@@ -238,7 +236,7 @@ class PEPOModel:
             False otherwise.
         """
         for model_idx in range(self.num_networks):
-            submodel_name = self._get_submodel_name(model_idx)
+            submodel_name = self.get_submodel_name(model_idx)
             if not self.hub_manager.model_exists(submodel_name, epoch):
                 logger.info(
                     f"Submodel {submodel_name} (epoch {epoch}) not found on hub."
@@ -263,10 +261,10 @@ class PEPOModel:
 
         logger.info(f"Successfully loaded models from epoch {epoch} checkpoint")
 
-    def _get_model_name(self) -> str:
-        return self.factory.get_model_name()
+    def get_name(self, epoch: Optional[int] = None) -> str:
+        return self.factory.get_model_name(epoch=epoch)
 
-    def _get_submodel_name(self, model_idx: int) -> str:
+    def get_submodel_name(self, model_idx: int) -> str:
         return self.factory.get_submodel_name(model_idx)
 
     def _get_base_model_name(self) -> str:
