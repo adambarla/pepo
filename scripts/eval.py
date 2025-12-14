@@ -4,6 +4,8 @@ import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
+from pepo.evaluator.base import BaseEvaluator
+from pepo.model import PEPOModel
 from pepo.utils import constants, setup_logging
 
 # Suppress warnings
@@ -36,9 +38,9 @@ def main(cfg: DictConfig) -> None:
 
     device_manager = instantiate(cfg.device)
     hub_manager = instantiate(cfg.hub)
-    evaluator = instantiate(cfg.evaluator)
+    evaluator: BaseEvaluator = instantiate(cfg.evaluator)
 
-    model = instantiate(
+    model: PEPOModel = instantiate(
         cfg.model,
         device_manager=device_manager,
         hub_manager=hub_manager,

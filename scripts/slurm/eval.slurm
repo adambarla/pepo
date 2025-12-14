@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=pepo_eval
-#SBATCH --output=out/pepo_eval-%j.out
-#SBATCH --error=out/pepo_eval-%j.err
+#SBATCH --output=slurm_out/eval/%j.out
+#SBATCH --error=slurm_out/eval/%j.err
 #SBATCH --time=12:00:00
 #SBATCH --gres=gpu:4
 #SBATCH --account=infra01

@@ -23,6 +23,7 @@ from hydra.core.hydra_config import HydraConfig  # noqa: E402
 from hydra.utils import instantiate  # noqa: E402
 from omegaconf import DictConfig, OmegaConf  # noqa: E402
 
+from pepo.evaluator.base import BaseEvaluator  # noqa: E402
 from pepo.utils import WandbManager, constants, set_seed, setup_logging  # noqa: E402
 
 warnings.filterwarnings(
@@ -150,27 +151,35 @@ def main(cfg: DictConfig) -> None:
         output_dir_path = original_work_dir / output_dir
         cfg.evaluator.output_dir = str(output_dir_path)
 
-    evaluator = instantiate(cfg.evaluator, model=model, wandb_run=wandb_run)
+    # Instantiate evaluator (stateless)
+    # Extract reference model config if present
+    ref_model_cfg = None
+    if "ref_model" in cfg.evaluator:
+        ref_model_cfg = cfg.evaluator.pop("ref_model")
 
-    # Debug: Log the expected filename and path
-    logger.info(f"Looking for responses file: {evaluator.responses_file}")
-    logger.info(f"Output directory: {evaluator.output_dir}")
-    logger.info(f"Responses filename: {evaluator.responses_filename}")
+    ref_epoch = None
+    if "ref_epoch" in cfg.evaluator:
+        ref_epoch = cfg.evaluator.pop("ref_epoch")
 
-    responses_exist = evaluator.responses_exist()
+    evaluator: BaseEvaluator = instantiate(cfg.evaluator, wandb_run=wandb_run)
 
-    if not responses_exist or overwrite:
-        if overwrite:
-            logger.info("Overwrite enabled. Generating responses...")
-        else:
-            logger.info("Responses not found. Generating responses...")
-        evaluator.generate_responses()
-    else:
-        logger.info("Responses file exists. Skipping generation.")
-    model.unload_models()  # Free up memory for judge if needed
+    # Instantiate reference model if configured
+    ref_model = None
+    if ref_model_cfg is not None:
+        ref_model = instantiate(
+            ref_model_cfg,
+            device_manager=device_manager,
+            hub_manager=hub_manager,
+        )
+        # Ensure generator for ref model if needed
+        if "generator" in ref_model_cfg:
+            ref_generator = instantiate(ref_model_cfg.generator)
+            ref_model.generator = ref_generator
 
-    logger.info("Running evaluation to compute leaderboard...")
-    evaluator.evaluate()
+    logger.info("Running evaluation...")
+    evaluator.evaluate(
+        model=model, epoch=evaluation_epoch, ref_model=ref_model, ref_epoch=ref_epoch
+    )
 
     if wandb_run is not None:
         wandb_run.finish()
