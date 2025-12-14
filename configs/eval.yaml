@@ -1,0 +1,65 @@
+defaults:
+  - model: llama_instruct
+  - dataset: ultrafeedback
+  - evaluator: alpaca
+  - hub: default
+  - device: default
+  - model@ref_model: null #in CLI override as model@ref_model=...
+  - _self_
+
+wandb:
+  _target_: pepo.utils.wandb.WandbManager
+  enabled: ${sync}
+  project: "pepo"
+  tags: []
+  notes: null
+  entity: "pepo-team"
+  mode: "online"
+
+hub:
+  push: ${sync} # Push trained models
+
+dataset:
+  max_length: 1024
+  max_prompt_length: 512
+  n_splits: ${L}
+  cache_dir: ${oc.env:SCRATCH}/pepo/cache # cache is $SCRATCH/pepo/cache
+  dataloader_num_workers: 4
+  dataloader_prefetch_factor: 4
+  seed: ${seed}
+  force_recompute: false
+
+model:
+  num_networks: ${L}
+  alpha: ${a}
+  generator:
+    max_new_tokens: ${mt}
+  trainer:
+    log_interval: 1
+  debug: ${debug}
+  compile: false
+
+evaluator:
+  num_samples: ${ns}
+
+ref_model:
+  num_networks: ${ref_L}
+  alpha: ${ref_a}
+  generator:
+    max_new_tokens: ${mt}
+
+e: 3
+L: 4
+a: 0.1
+ref_e: 3
+ref_L: 4
+ref_a: 0.1
+
+mt: 1024
+ns: null
+
+overwrite: false
+seed: 42
+debug: false
+log_level: "info"
+sync: true  # If false, disables wandb logging
