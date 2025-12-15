@@ -197,7 +197,7 @@ class Generator:
             parts.append(f"p{self.top_p}")
         if not self.use_ensamble:
             parts.append("single")
-        return "_".join(parts)
+        return "-".join(parts)
 
     def generate_responses(
         self,

@@ -58,6 +58,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         epoch: Optional[int] = None,
         ref_model: Optional[PEPOModel] = None,
         ref_epoch: Optional[int] = None,
+        overwrite: bool = False,
         **kwargs: Any,
     ) -> Path:
         """
@@ -70,49 +71,47 @@ class AlpacaEvalEvaluator(BaseEvaluator):
             reference_epoch: Epoch of the reference model (optional).
             **kwargs: Additional args.
         """
-        print(model)
-        print(ref_model)
+        self.check_generator_consistency(model, ref_model)
+
         model_responses_file = self._get_or_generate(model, epoch=epoch)
         logger.info(f"Model responses file: {model_responses_file}")
-
         ref_responses_file = None
         if ref_model is not None:
             ref_responses_file = self._get_or_generate(ref_model, epoch=ref_epoch)
             logger.info(f"Reference responses file: {ref_responses_file}")
 
-        # Get paths for results and leaderboard
-        results_file = self._get_file_paths(
-            model, epoch=epoch, ref_model=ref_model, ref_epoch=ref_epoch, type="results"
-        )
-        leaderboard_file = self._get_file_paths(
-            model,
-            epoch=epoch,
-            ref_model=ref_model,
-            ref_epoch=ref_epoch,
-            type="leaderboard",
-        )
+        folder = self._get_folder(ref_model, ref_epoch)
+        annotations_folder = folder / "annotations"
+        annotations_folder.mkdir(parents=True, exist_ok=True)
+        leaderboards_folder = folder / "leaderboards"
+        leaderboards_folder.mkdir(parents=True, exist_ok=True)
+        filename = self._get_filename(model, epoch)
+        annotations_file = annotations_folder / f"{filename}_annotations.json"
+        leaderboard_file = leaderboards_folder / f"{filename}_leaderboard.csv"
 
         config_path = self._prepare_annotator_config()
 
-        # Run evaluation
         df_leaderboard, all_annotations = self._run_alpaca_eval(
             model_responses_file=model_responses_file,
             ref_responses_file=ref_responses_file,
             config_path=config_path,
             leaderboard_file=leaderboard_file,
+            name=filename,
+            is_overwrite_leaderboard=overwrite,
         )
 
-        # Save and log results
         self._save_and_log(
             df_leaderboard=df_leaderboard,
             all_annotations=all_annotations,
-            results_file=results_file,
+            annotations_file=annotations_file,
             leaderboard_file=leaderboard_file,
             model=model,
             epoch=epoch,
+            consolidation_folder=folder,
+            model_name=filename,
         )
 
-        return results_file
+        return annotations_file
 
     def _run_alpaca_eval(
         self,
@@ -120,6 +119,8 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         ref_responses_file: Optional[Path],
         config_path: str,
         leaderboard_file: Path,
+        name: str,
+        is_overwrite_leaderboard: bool,
     ) -> tuple[pd.DataFrame, list[Any]]:
         """Run Alpaca Eval evaluation."""
         logger.info(f"Evaluating responses from {model_responses_file}")
@@ -128,19 +129,28 @@ class AlpacaEvalEvaluator(BaseEvaluator):
             str(leaderboard_file) if leaderboard_file.exists() else None
         )
 
-        # Determine reference outputs
-        reference_outputs = "davinci_003"
-        if ref_responses_file is not None:
-            reference_outputs = str(ref_responses_file)
-
-        df_leaderboard, all_annotations = alpaca_evaluate(
-            model_outputs=str(model_responses_file),
-            reference_outputs=reference_outputs,
-            annotators_config=config_path,
-            output_path=model_responses_file.parent,
-            precomputed_leaderboard=precomputed_leaderboard,
-            is_return_instead_of_print=True,
-        )
+        if ref_responses_file:
+            df_leaderboard, all_annotations = alpaca_evaluate(
+                model_outputs=str(model_responses_file),
+                reference_outputs=str(ref_responses_file),
+                annotators_config=config_path,
+                name=name,
+                precomputed_leaderboard=precomputed_leaderboard,
+                is_overwrite_leaderboard=is_overwrite_leaderboard,
+                is_return_instead_of_print=True,
+                output_path=None,
+            )
+        else:
+            # we don't want to override the default reference_outputs by None
+            df_leaderboard, all_annotations = alpaca_evaluate(
+                model_outputs=str(model_responses_file),
+                annotators_config=config_path,
+                name=name,
+                precomputed_leaderboard=precomputed_leaderboard,
+                is_overwrite_leaderboard=is_overwrite_leaderboard,
+                is_return_instead_of_print=True,
+                output_path=None,
+            )
 
         return df_leaderboard, all_annotations
 
@@ -148,13 +158,14 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         self,
         df_leaderboard: pd.DataFrame,
         all_annotations: list[Any],
-        results_file: Path,
+        annotations_file: Path,
         leaderboard_file: Path,
         model: PEPOModel,
         epoch: Optional[int],
+        consolidation_folder: Path,
+        model_name: str,
     ) -> None:
         """Save results to files and log to WandB."""
-        # Save results
         df_leaderboard.to_csv(leaderboard_file, index=True)
 
         if all_annotations is not None:
@@ -163,27 +174,23 @@ class AlpacaEvalEvaluator(BaseEvaluator):
                 if not isinstance(all_annotations, pd.DataFrame)
                 else all_annotations
             )
-            annotations_df.to_json(results_file, orient="records", indent=2)
+            annotations_df.to_json(annotations_file, orient="records", indent=2)
 
         logger.info(f"Saved leaderboard to {leaderboard_file}")
 
-        self.consolidate_leaderboards(self.output_dir)
+        self.consolidate_leaderboards(consolidation_folder)
 
         # Logging if model info provided
         if self.wandb_run is not None and self.wandb_run.enabled:
-            model_name = model.get_name(epoch=epoch)
-
             generator_config = "unknown"
             if hasattr(model, "generator") and model.generator:
                 generator_config = model.generator.get_name()
 
             metric_prefix = f"eval/{self.dataset_id}/{generator_config}"
 
-            # Try to find the model in the leaderboard
             target_idx = None
             if model_name in df_leaderboard.index:
                 target_idx = model_name
-            # Fallback logic if names don't match exactly could go here
 
             if target_idx:
                 model_metrics = df_leaderboard.loc[target_idx]
@@ -212,7 +219,10 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         model: PEPOModel,
         epoch: Optional[int] = None,
     ) -> Path:
-        path = self._get_file_paths(model, epoch=epoch, type="responses")
+        responses_folder = self.output_dir / "responses"
+        responses_folder.mkdir(parents=True, exist_ok=True)
+        filename = self._get_filename(model, epoch)
+        path = responses_folder / f"{filename}_responses.json"
         if not self._responses_exist(path):
             self._generate_responses(path, model, epoch=epoch)
         return path
@@ -291,7 +301,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         """
         output_dir = Path(output_dir)
 
-        leaderboard_files = sorted(output_dir.glob("*_leaderboard.csv"))
+        leaderboard_files = sorted(output_dir.glob("**/*_leaderboard.csv"))
 
         if not leaderboard_files:
             logger.warning(f"No *_leaderboard.csv files found in {output_dir}")

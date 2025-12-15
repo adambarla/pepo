@@ -29,6 +29,6 @@ def sanitize_filename(name: str) -> str:
     Returns:
         Sanitized string safe for use as a filename.
     """
-    name = re.sub(r'[<>:"/\\|?*]', "_", name)
-    name = re.sub(r"\s+", "_", name)
+    name = re.sub(r'[<>:"/\\|?*]', "-", name)
+    name = re.sub(r"\s+", "-", name)
     return name

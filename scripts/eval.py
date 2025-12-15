@@ -49,7 +49,7 @@ def main(cfg: DictConfig) -> None:
 
     model_ref = None
     epoch_ref = None
-    if cfg.get("ref_model", None) is not None:
+    if cfg.get("ref_model", None) is not None and "_target_" in cfg.ref_model:
         model_ref = instantiate(
             cfg.ref_model,
             device_manager=device_manager,
@@ -58,7 +58,11 @@ def main(cfg: DictConfig) -> None:
         epoch_ref = cfg.get("ref_e", None)
 
     evaluator.evaluate(
-        model=model, epoch=epoch, ref_model=model_ref, ref_epoch=epoch_ref
+        model=model,
+        epoch=epoch,
+        ref_model=model_ref,
+        ref_epoch=epoch_ref,
+        overwrite=cfg.get("overwrite", False),
     )
     logger.info("Evaluation complete.")
 

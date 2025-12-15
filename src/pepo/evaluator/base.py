@@ -1,7 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
 from datasets import load_dataset
 
@@ -41,6 +41,7 @@ class BaseEvaluator(ABC):
         epoch: Optional[int] = None,
         ref_model: Optional[PEPOModel] = None,
         ref_epoch: Optional[int] = None,
+        overwrite: bool = False,
         **kwargs: Any,
     ) -> Path:
         """
@@ -96,31 +97,42 @@ class BaseEvaluator(ABC):
         base_name = "_".join(parts)
         return base_name
 
+    def check_generator_consistency(
+        self,
+        model: PEPOModel,
+        ref_model: Optional[PEPOModel] = None,
+    ) -> None:
+        """
+        Check if the generator is consistent between model and reference model.
+        """
+        if ref_model is None:
+            return
+
+        if model.generator is None:
+            raise ValueError("Model does not have a generator set.")
+        if ref_model.generator is None:
+            raise ValueError("Reference Model does not have a generator set.")
+
+        gen_name = model.generator.get_name()
+        ref_gen_name = ref_model.generator.get_name()
+
+        if gen_name != ref_gen_name:
+            raise ValueError(
+                f"Generator mismatch: Model uses '{gen_name}'"
+                f" but Reference Model uses '{ref_gen_name}'. "
+            )
+
     def _get_folder(
         self,
         ref_model: Optional[PEPOModel] = None,
         ref_epoch: Optional[int] = None,
     ) -> Path:
         """
-        Generate file paths based on model name and generation configuration.
+        Generate folder path based on the reference model.
         """
-        # outpus [/ref_model_name] / file_name
         folder = self.output_dir
         if ref_model is not None:
-            folder = folder / ref_model.get_name(epoch=ref_epoch)
+            folder = folder / self._get_filename(ref_model, epoch=ref_epoch)
+        else:
+            folder = folder / "default"
         return folder
-
-    def _get_file_paths(
-        self,
-        model: PEPOModel,
-        epoch: Optional[int] = None,
-        ref_model: Optional[PEPOModel] = None,
-        ref_epoch: Optional[int] = None,
-        type: Literal["responses", "results", "leaderboard"] = "responses",
-    ) -> Path:
-        if type not in ["responses", "results", "leaderboard"]:
-            raise ValueError(f"Invalid type: {type}")
-        base_name = self._get_filename(model=model, epoch=epoch)
-        folder = self._get_folder(ref_model=ref_model, ref_epoch=ref_epoch)
-        path = folder / Path(base_name + f"_{type}.json")
-        return path
