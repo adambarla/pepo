@@ -27,6 +27,3 @@ trainer:
 
 generator:
   batch_size: 64
-
-#TODO(adam): how do we know that the model has this chat template?
-#            added a bos_token to what was in pepo_launcher.py template because it was messing up the generation
