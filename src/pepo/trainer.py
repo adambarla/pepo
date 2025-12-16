@@ -255,6 +255,7 @@ class Trainer:
             device=device,
             epoch=start_epoch,
             n_epochs=n_epochs,
+            global_step=global_step,
             wandb_run=wandb_run,
         )
 
@@ -292,6 +293,7 @@ class Trainer:
                 device=device,
                 epoch=epoch,
                 n_epochs=n_epochs,
+                global_step=epoch * len(train_loader) // grad_acc_steps,
                 wandb_run=wandb_run,
             )
 
@@ -412,6 +414,7 @@ class Trainer:
         device: torch.device,
         epoch: int,
         n_epochs: int,
+        global_step: int,
         wandb_run: Optional[WandbRun] = None,
     ) -> float:
         """
@@ -420,7 +423,6 @@ class Trainer:
         logger.info(f"Model {model_idx} - Evaluating epoch {epoch}/{n_epochs}")
 
         n_batches = len(eval_loader)
-        global_step = epoch * n_batches
 
         if n_batches == 0:
             raise ValueError("Evaluation loader is empty")
