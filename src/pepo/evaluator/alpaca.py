@@ -69,15 +69,21 @@ class AlpacaEvalEvaluator(BaseEvaluator):
             epoch: Epoch of the model (optional). Used to load a specific checkpoint.
             reference_model: PEPOModel instance (optional).
             reference_epoch: Epoch of the reference model (optional).
+            overwrite: Whether to overwrite existing outputs.
             **kwargs: Additional args.
         """
         self.check_generator_consistency(model, ref_model)
 
-        model_responses_file = self._get_or_generate(model, epoch=epoch)
+        model_responses_file = self._get_or_generate(
+            model, epoch=epoch, overwrite=overwrite
+        )
         logger.info(f"Model responses file: {model_responses_file}")
         ref_responses_file = None
         if ref_model is not None:
-            ref_responses_file = self._get_or_generate(ref_model, epoch=ref_epoch)
+            ref_responses_file = self._get_or_generate(
+                ref_model, epoch=ref_epoch, overwrite=overwrite
+            )
+
             logger.info(f"Reference responses file: {ref_responses_file}")
 
         folder = self._get_folder(ref_model, ref_epoch)
@@ -218,12 +224,13 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         self,
         model: PEPOModel,
         epoch: Optional[int] = None,
+        overwrite: bool = False,
     ) -> Path:
         responses_folder = self.output_dir / "responses"
         responses_folder.mkdir(parents=True, exist_ok=True)
         filename = self._get_filename(model, epoch)
         path = responses_folder / f"{filename}_responses.json"
-        if not self._responses_exist(path):
+        if overwrite or not self._responses_exist(path):
             self._generate_responses(path, model, epoch=epoch)
         return path
 

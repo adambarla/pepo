@@ -52,6 +52,8 @@ class BaseEvaluator(ABC):
             epoch: Epoch of the model.
             ref_model: Optional reference PEPOModel instance.
             ref_epoch: Epoch of the reference model.
+            overwrite: Whether to overwrite existing outputs.
+            **kwargs: Additional arguments.
         """
         pass
 
