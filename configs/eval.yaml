@@ -24,8 +24,6 @@ dataset:
   max_prompt_length: 512
   n_splits: ${L}
   cache_dir: ${oc.env:SCRATCH}/pepo/cache # cache is $SCRATCH/pepo/cache
-  dataloader_num_workers: 4
-  dataloader_prefetch_factor: 4
   seed: ${seed}
   force_recompute: false
 
@@ -34,6 +32,7 @@ model:
   alpha: ${a}
   generator:
     max_new_tokens: ${mt}
+    max_prompt_length: 512
   trainer:
     log_interval: 1
   debug: ${debug}
@@ -63,3 +62,7 @@ seed: 42
 debug: false
 log_level: "info"
 sync: true  # If false, disables wandb logging
+
+hydra:
+  run:
+    dir: outputs/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}

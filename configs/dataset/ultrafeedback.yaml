@@ -12,7 +12,7 @@ num_proc: null # Number of processes for preprocessing (null = use all available
 cache_dir: ${oc.env:SCRATCH}/pepo/cache # Directory to cache preprocessed datasets (null = no caching)
 force_recompute: false # If true, skip loading from cache and recompute the dataset
 # DataLoader configuration for GPU utilization optimization
-dataloader_num_workers: 4 # Number of worker processes for data loading
-dataloader_pin_memory: true # Pin memory for faster CPU->GPU transfer
-dataloader_persistent_workers: true # Keep workers alive between epochs
-dataloader_prefetch_factor: 4 # Number of batches to prefetch per worker
+dataloader_num_workers: 0 # Best for GH200/fast data. Eliminates overhead since loading is already instant.
+dataloader_pin_memory: true # Always use with GPU. Enables faster non-blocking DMA transfer to device.
+dataloader_persistent_workers: false # Ignored when workers=0. Normally keeps workers alive to avoid respawn lag.
+dataloader_prefetch_factor: null # Ignored when workers=0. Normally buffers batches to smooth out loading spikes.
