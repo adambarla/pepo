@@ -1,10 +1,29 @@
 #!/bin/bash
 
-echo "Getting interactive node with 4 GPUs for 12 hours"
+# Parse arguments
+LONG_JOB=false
+for arg in "$@"; do
+    if [[ "$arg" == "--long" ]]; then
+        LONG_JOB=true
+        break
+    fi
+done
+
+# Set partition and time based on --long flag
+if [[ "$LONG_JOB" == true ]]; then
+    PARTITION="long"
+    TIME="48:00:00"
+    echo "Getting interactive node with 4 GPUs for 48 hours (long partition)"
+else
+    PARTITION="normal"
+    TIME="12:00:00"
+    echo "Getting interactive node with 4 GPUs for 12 hours (normal partition)"
+fi
 
 # Use srun directly - this creates one interactive shell
 # To get additional shells, use: ./scripts/slurm/connect_to_node.sh
-srun --account=infra01 --nodes=1 --time=12:00:00 --gpus=4 --job-name="pepo_interactive" --pty bash -c "
+srun --account=infra01 -p $PARTITION --nodes=1 --time=$TIME --gpus=4 \
+     --exclusive --job-name="interactive" --pty bash -c "
   # Print connection info
   echo \"\" >&2
   echo \"==========================================\" >&2
