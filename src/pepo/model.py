@@ -356,6 +356,7 @@ class PEPOModel:
         self._check_models_loaded()
 
         log_probs_ensemble: list[Optional[torch.Tensor]] = [None] * self.num_networks
+        thread_exceptions: list[Optional[BaseException]] = [None] * self.num_networks
 
         def predict_log_probs(model_idx, model, input_ids, attention_mask):
             try:
@@ -363,8 +364,8 @@ class PEPOModel:
                     model.eval()
                     log_probs = self._predict_submodel(model, input_ids, attention_mask)
                     log_probs_ensemble[model_idx] = log_probs
-            except (RuntimeError, torch.cuda.OutOfMemoryError):
-                log_probs_ensemble[model_idx] = None
+            except BaseException as e:
+                thread_exceptions[model_idx] = e
 
         threads = []
         for model_idx in range(self.num_networks):
@@ -382,6 +383,13 @@ class PEPOModel:
 
         for thread in threads:
             thread.join()
+
+        # Propagate any thread exceptions to main thread
+        for model_idx, exc in enumerate(thread_exceptions):
+            if exc is not None:
+                raise RuntimeError(
+                    f"Exception in submodel {model_idx} prediction"
+                ) from exc
 
         if len(log_probs_ensemble) != self.num_networks:
             raise RuntimeError(
@@ -454,22 +462,27 @@ class PEPOModel:
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        max_length: int = 1024,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Generate using base model (single model, no ensemble).
+
+        Note: Temporarily sets generator.use_ensemble=False for this call.
         """
         self._check_models_loaded()
 
-        if self.generator is not None:
+        if self.generator is None:
+            raise ValueError(
+                "Generator not set on model. Cannot generate without generator."
+            )
+
+        # Temporarily disable ensemble for base model generation
+        original_use_ensemble = self.generator.use_ensemble
+        self.generator.use_ensemble = False
+        try:
             return self.generator.generate(
                 model=self,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_length=max_length,
-                use_ensamble=False,
             )
-        else:
-            raise ValueError(
-                "Generator not set on model. Cannot generate without generator."
-            )
+        finally:
+            self.generator.use_ensemble = original_use_ensemble
