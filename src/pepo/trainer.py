@@ -28,6 +28,8 @@ class Trainer:
         early_stopping_patience: Optional[int] = None,
         early_stopping_min_delta: float = 0.0,
         log_interval: int = 100,
+        skip_eval: bool = False,
+        max_batches_per_epoch: Optional[int] = None,
     ) -> None:
         """
         Initialize trainer.
@@ -44,6 +46,8 @@ class Trainer:
             early_stopping_patience: Number of epochs to wait before stopping
                 if no improvement. If None, early stopping is disabled.
             early_stopping_min_delta: Minimum change to qualify as an improvement.
+            max_batches_per_epoch: Limit batches per epoch (for testing).
+                None = no limit.
         """
         self.optimizer_factory = optimizer
         self.scheduler_name = scheduler_name
@@ -55,6 +59,8 @@ class Trainer:
         self.early_stopping_patience = early_stopping_patience
         self.early_stopping_min_delta = early_stopping_min_delta
         self.log_interval = log_interval
+        self.skip_eval = skip_eval
+        self.max_batches_per_epoch = max_batches_per_epoch
 
         self.optimizers: list[torch.optim.Optimizer] = []
         self.schedulers: list[torch.optim.lr_scheduler._LRScheduler] = []
@@ -169,6 +175,21 @@ class Trainer:
         group = self.model.get_name()
 
         threads = []
+        stop_event = threading.Event()  # Signal to stop all threads on error
+
+        def run_training(**kwargs: Any) -> None:
+            """Wrapper that catches exceptions from training threads."""
+            try:
+                self._train_model(**kwargs)
+            except InterruptedError:
+                pass  # Thread stopped due to error in another thread
+            except Exception as e:
+                if not stop_event.is_set():  # Only log first error
+                    logger.error(
+                        f"Training thread for model {kwargs['model_idx']} failed: {e}"
+                    )
+                stop_event.set()  # Signal other threads to stop
+
         for model_idx in range(self.model.num_networks):
             train_loader = self.data_manager.get_dataloader(
                 model_idx=model_idx,
@@ -191,18 +212,19 @@ class Trainer:
                 )
 
             thread = threading.Thread(
-                target=self._train_model,
-                args=(
-                    model_idx,
-                    train_loader,
-                    eval_loader,
-                    self.optimizers[model_idx],
-                    self.schedulers[model_idx],
-                    max_epochs,
-                    self.gradient_accumulation_steps,
-                    wandb_run,
-                    self.early_stopping_patience,
-                    self.early_stopping_min_delta,
+                target=run_training,
+                kwargs=dict(
+                    model_idx=model_idx,
+                    train_loader=train_loader,
+                    eval_loader=eval_loader,
+                    optimizer=self.optimizers[model_idx],
+                    scheduler=self.schedulers[model_idx],
+                    n_epochs=max_epochs,
+                    grad_acc_steps=self.gradient_accumulation_steps,
+                    wandb_run=wandb_run,
+                    es_patience=self.early_stopping_patience,
+                    es_min_delta=self.early_stopping_min_delta,
+                    stop_event=stop_event,
                 ),
             )
             thread.start()
@@ -210,6 +232,9 @@ class Trainer:
 
         for thread in threads:
             thread.join()
+
+        if stop_event.is_set():
+            raise RuntimeError("Training failed - see error log above")
 
         if self.model.factory:
             self.model.factory.save_model(self.model.models)
@@ -226,6 +251,7 @@ class Trainer:
         wandb_run: Optional[WandbRun],
         es_patience: Optional[int],
         es_min_delta: float,
+        stop_event: Optional[threading.Event] = None,
     ) -> None:
         """
         Train a single model in a thread. Each thread sets its CUDA device context
@@ -248,16 +274,17 @@ class Trainer:
                 scheduler.step()
 
         initial_eval_loss = float("inf")
-        initial_eval_loss = self._eval_epoch(
-            model_idx=model_idx,
-            model=model,
-            eval_loader=eval_loader,
-            device=device,
-            epoch=start_epoch,
-            n_epochs=n_epochs,
-            global_step=global_step,
-            wandb_run=wandb_run,
-        )
+        if not self.skip_eval:
+            initial_eval_loss = self._eval_epoch(
+                model_idx=model_idx,
+                model=model,
+                eval_loader=eval_loader,
+                device=device,
+                epoch=start_epoch,
+                n_epochs=n_epochs,
+                global_step=global_step,
+                wandb_run=wandb_run,
+            )
 
         is_continuing = start_epoch > 0
         if not is_continuing:
@@ -269,6 +296,13 @@ class Trainer:
         es_enabled = es_patience is not None
 
         for epoch in range(start_epoch + 1, n_epochs + 1):
+            # Check if another thread failed and we should stop
+            if stop_event is not None and stop_event.is_set():
+                logger.warning(
+                    f"Model {model_idx} stopping early due to error in another thread"
+                )
+                break
+
             self._train_epoch(
                 model_idx=model_idx,
                 model=model,
@@ -280,22 +314,25 @@ class Trainer:
                 n_epochs=n_epochs,
                 grad_acc_steps=grad_acc_steps,
                 wandb_run=wandb_run,
+                stop_event=stop_event,
             )
 
             self.model.epochs_per_network[model_idx] = epoch
             if self.model.factory:
                 self.model.factory.push_submodel(model, model_idx, epochs=epoch)
 
-            eval_loss = self._eval_epoch(
-                model_idx=model_idx,
-                model=model,
-                eval_loader=eval_loader,
-                device=device,
-                epoch=epoch,
-                n_epochs=n_epochs,
-                global_step=epoch * len(train_loader) // grad_acc_steps,
-                wandb_run=wandb_run,
-            )
+            eval_loss = best_eval_loss  # Default if skipping
+            if not self.skip_eval:
+                eval_loss = self._eval_epoch(
+                    model_idx=model_idx,
+                    model=model,
+                    eval_loader=eval_loader,
+                    device=device,
+                    epoch=epoch,
+                    n_epochs=n_epochs,
+                    global_step=epoch * len(train_loader) // grad_acc_steps,
+                    wandb_run=wandb_run,
+                )
 
             if es_enabled and es_patience is not None:
                 if eval_loss < best_eval_loss - es_min_delta:
@@ -328,6 +365,7 @@ class Trainer:
         n_epochs: int,
         grad_acc_steps: int,
         wandb_run: Optional[WandbRun],
+        stop_event: Optional[threading.Event] = None,
     ) -> None:
         logger.info(f"Model {model_idx} - Training epoch {epoch}/{n_epochs}")
 
@@ -354,6 +392,22 @@ class Trainer:
         )
 
         for step, batch in enumerate(train_loader):
+            # Check if another thread failed - stop immediately
+            if stop_event is not None and stop_event.is_set():
+                pbar.close()
+                raise InterruptedError(
+                    "Training stopped due to error in another thread"
+                )
+
+            # Check batch limit (for testing)
+            if (
+                self.max_batches_per_epoch is not None
+                and step >= self.max_batches_per_epoch
+            ):
+                pbar.close()
+                break
+
+            logger.debug(f"Batch dimensions: {batch['chosen_input_ids'].shape}")
             batch_loss, lprobs_ch, lprobs_re = self.model._loss_fn(batch, model, device)
 
             loss_sum += batch_loss.detach()
