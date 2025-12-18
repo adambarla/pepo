@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""Find optimal batch sizes for training, evaluation, and generation."""
+
+import gc
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Optional, Tuple
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+import multiprocessing
+
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
+
+import warnings
+
+import hydra
+import torch
+from hydra.core.hydra_config import HydraConfig
+from hydra.utils import instantiate
+from omegaconf import DictConfig, OmegaConf
+from transformers import AutoTokenizer
+
+from pepo.utils import (  # type: ignore[import-untyped]
+    constants,
+    set_seed,
+    setup_logging,
+)
+
+warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
+
+try:
+    OmegaConf.register_new_resolver(
+        "pepo.constants", lambda name: getattr(constants, name)
+    )
+except ValueError:
+    pass
+
+MAX_BATCH_SIZE = 4096
+
+
+def cleanup_cuda() -> None:
+    """Aggressive GPU memory cleanup."""
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+def binary_search_batch_size(
+    try_fn: Callable[[int], bool],
+    start: int,
+    logger: logging.Logger,
+) -> Optional[int]:
+    """Binary search for optimal batch size."""
+    batch_size = start
+    best = None
+
+    while batch_size <= MAX_BATCH_SIZE:
+        logger.info(f"Trying batch_size={batch_size}...")
+        if try_fn(batch_size):
+            best = batch_size
+            logger.info(f"batch_size={batch_size} OK")
+            batch_size *= 2
+        else:
+            logger.info(f"batch_size={batch_size} FAILED")
+            if best:
+                return best
+            break
+
+    if best:
+        return best
+
+    batch_size = start // 2
+    while batch_size >= 1:
+        logger.info(f"Trying batch_size={batch_size}...")
+        if try_fn(batch_size):
+            logger.info(f"batch_size={batch_size} OK")
+            return batch_size
+        logger.info(f"batch_size={batch_size} FAILED")
+        batch_size //= 2
+
+    return None
+
+
+def test_train_batch_size(
+    model: Any, cfg: DictConfig, tokenizer: AutoTokenizer, logger: logging.Logger
+) -> Tuple[Optional[int], Optional[str]]:
+    """Test training batch size with real data."""
+    logger.info("Testing TRAINING batch size...")
+
+    data_manager = instantiate(
+        cfg.dataset,
+        n_splits=model.num_networks,
+        tokenizer=tokenizer,
+        ref_model_id=model.model_id,
+        inference_batch_size=cfg.model.trainer.eval_batch_size,
+        device_manager=model.device_manager,
+        shuffle_train=False,
+    )
+
+    def try_batch_size(batch_size: int) -> bool:
+        cleanup_cuda()
+        try:
+            model.init_trainer()
+            model.trainer.batch_size = batch_size
+            model.trainer.eval_batch_size = batch_size
+            model.trainer.skip_eval = True
+            model.trainer.max_batches_per_epoch = 1
+
+            original_push = model.hub_manager.should_push
+            model.hub_manager.should_push = False
+            try:
+                model.train(
+                    data_manager=data_manager,
+                    max_epochs=1,
+                    wandb_manager=None,
+                    continue_training=False,
+                )
+            finally:
+                model.hub_manager.should_push = original_push
+                model.trainer.optimizers = []
+                model.trainer.schedulers = []
+                # Reset for next test
+                model.epochs_per_network = [0] * model.num_networks
+            return True
+        except (RuntimeError, torch.cuda.OutOfMemoryError, InterruptedError):
+            if model.trainer:
+                model.trainer.optimizers = []
+                model.trainer.schedulers = []
+            model.epochs_per_network = [0] * model.num_networks
+            cleanup_cuda()
+            return False
+
+    result = binary_search_batch_size(
+        try_batch_size, cfg.model.trainer.train_batch_size, logger
+    )
+    return (result, None) if result else (None, "OOM at batch_size=1")
+
+
+def test_eval_batch_size(
+    model: Any, cfg: DictConfig, tokenizer: AutoTokenizer, logger: logging.Logger
+) -> Tuple[Optional[int], Optional[str]]:
+    """Test evaluation batch size with real data."""
+    logger.info("Testing EVAL batch size...")
+
+    device = torch.device(model.device_manager.get_device_for_model(0))
+    data_manager = instantiate(
+        cfg.dataset,
+        n_splits=model.num_networks,
+        tokenizer=tokenizer,
+        ref_model_id=model.model_id,
+        inference_batch_size=cfg.model.trainer.eval_batch_size,
+        device_manager=model.device_manager,
+        shuffle_train=False,
+    )
+
+    def try_batch_size(batch_size: int) -> bool:
+        cleanup_cuda()
+        try:
+            loader = data_manager.get_dataloader(
+                model_idx=0, partition="eval", batch_size=batch_size
+            )
+            for batch in loader:
+                with torch.no_grad():
+                    batch = {
+                        k: v.to(device) if hasattr(v, "to") else v
+                        for k, v in batch.items()
+                    }
+                    model.models[0](
+                        batch["chosen_input_ids"],
+                        attention_mask=batch["chosen_attention_mask"],
+                    )
+                break
+            return True
+        except (RuntimeError, torch.cuda.OutOfMemoryError):
+            cleanup_cuda()
+            return False
+
+    result = binary_search_batch_size(
+        try_batch_size, cfg.model.trainer.eval_batch_size, logger
+    )
+    return (result, None) if result else (None, "OOM at batch_size=1")
+
+
+def test_gen_batch_size(
+    model: Any, cfg: DictConfig, tokenizer: AutoTokenizer, logger: logging.Logger
+) -> Tuple[Optional[int], Optional[str]]:
+    """Test generation batch size."""
+    logger.info("Testing GENERATION batch size...")
+
+    max_prompt_length = cfg.dataset.max_prompt_length
+    max_new_tokens = cfg.model.generator.max_new_tokens
+    target_len = max_prompt_length + max_new_tokens - 1
+
+    generator = instantiate(
+        cfg.model.generator, max_prompt_length=target_len, max_new_tokens=1
+    )
+    model.generator = generator
+
+    def try_batch_size(batch_size: int) -> bool:
+        cleanup_cuda()
+        try:
+            input_ids = torch.randint(
+                0, tokenizer.vocab_size, (batch_size, target_len), dtype=torch.long
+            )
+            attention_mask = torch.ones_like(input_ids)
+            generator.generate(
+                model=model, input_ids=input_ids, attention_mask=attention_mask
+            )
+            return True
+        except (RuntimeError, torch.cuda.OutOfMemoryError):
+            cleanup_cuda()
+            return False
+
+    result = binary_search_batch_size(
+        try_batch_size, cfg.model.generator.batch_size, logger
+    )
+    return (result, None) if result else (None, "OOM at batch_size=1")
+
+
+def update_model_config(
+    path: Path, results: dict[str, Any], logger: logging.Logger
+) -> None:
+    """Update model config YAML with optimal batch sizes."""
+    with open(path) as f:
+        lines = f.readlines()
+
+    mapping = {
+        "train_batch_size:": ("training", "train_batch_size"),
+        "eval_batch_size:": ("evaluation", "eval_batch_size"),
+        "batch_size:": ("generation", "generator.batch_size"),
+    }
+
+    new_lines = []
+    updates = []
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    for line in lines:
+        stripped = line.strip()
+        updated = False
+
+        for prefix, (key, name) in mapping.items():
+            if stripped.startswith(prefix) and key in results:
+                new_val = results[key].get("optimal_batch_size")
+                if not new_val:
+                    break
+                try:
+                    old_val = int(stripped.split(":")[1].split("#")[0].strip())
+                except (IndexError, ValueError):
+                    break
+                if old_val == new_val:
+                    break
+                indent = len(line) - len(line.lstrip())
+                key = prefix.rstrip(":")
+                new_lines.append(f"{' ' * indent}{key}: {new_val}  # Updated {today}\n")
+                updates.append(f"{name}: {old_val} -> {new_val}")
+                updated = True
+                break
+
+        if not updated:
+            new_lines.append(line)
+
+    if updates:
+        with open(path, "w") as f:
+            f.writelines(new_lines)
+        for u in updates:
+            logger.info(f"Updated {u}")
+
+
+@hydra.main(  # type: ignore[untyped-decorator]
+    config_path="../configs", config_name="benchmark.yaml", version_base="1.1"
+)
+def main(cfg: DictConfig) -> None:
+    hydra_cfg = HydraConfig.get()
+    work_dir = Path(hydra_cfg.runtime.cwd)
+
+    debug = cfg.get("debug", False)
+    log_level = "DEBUG" if debug else cfg.get("log_level", "INFO").upper()
+    logger = setup_logging(level=log_level)
+
+    logger.info("Finding optimal batch sizes...")
+    tasks = cfg.get("tasks", ["train", "eval", "gen"])
+    if isinstance(tasks, str):
+        tasks = [tasks]
+
+    set_seed(cfg.seed)
+    device_manager = instantiate(cfg.device)
+    hub_manager = instantiate(cfg.hub)
+    model = instantiate(
+        cfg.model, device_manager=device_manager, hub_manager=hub_manager
+    )
+    tokenizer = model.get_tokenizer()
+
+    results: dict[str, dict[str, Any]] = {}
+
+    if "train" in tasks:
+        if not model._models:
+            model.load_models(init_new=True)
+        batch, err = test_train_batch_size(model, cfg, tokenizer, logger)
+        results["training"] = {"optimal_batch_size": batch, "error": err}
+
+    if "eval" in tasks:
+        if not model._models:
+            model.load_models(init_new=True)
+        batch, err = test_eval_batch_size(model, cfg, tokenizer, logger)
+        results["evaluation"] = {"optimal_batch_size": batch, "error": err}
+
+    if "gen" in tasks:
+        if not model._models:
+            model.load_models(init_new=True)
+        batch, err = test_gen_batch_size(model, cfg, tokenizer, logger)
+        results["generation"] = {"optimal_batch_size": batch, "error": err}
+
+    model.unload_models()
+
+    logger.info("=" * 40)
+    logger.info("RESULTS")
+    for task, r in results.items():
+        if r["optimal_batch_size"]:
+            logger.info(f"{task}: {r['optimal_batch_size']}")
+        else:
+            logger.info(f"{task}: FAILED ({r['error']})")
+
+    for yaml_file in (work_dir / "configs" / "model").glob("*.yaml"):
+        if cfg.model.model_id in yaml_file.read_text():
+            update_model_config(yaml_file, results, logger)
+            break
+
+
+if __name__ == "__main__":
+    main()

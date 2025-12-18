@@ -9,7 +9,7 @@ _target_: pepo.model.PEPOModel
 alpha: 0.1
 beta: 0.1
 num_networks: 8 # placeholder, will be overridden by L
-model_id: "allenai/Llama-3.1-Tulu-3-8B-SFT"
+model_id: "01-ai/Yi-34B-Chat"
 tokenizer_id: null
 chat_template: null # use the provided one
 lora_r: 16
@@ -21,9 +21,9 @@ lora_target_modules: "all-linear"
 compile: false
 
 trainer:
-  train_batch_size: 32  # Updated 2025-12-18 by find_optimal_batch_sizes.py
-  eval_batch_size: 256  # Updated 2025-12-18
+  train_batch_size: 4  # Updated 2025-12-18 by find_optimal_batch_sizes.py
+  eval_batch_size: 32  # Updated 2025-12-18 by find_optimal_batch_sizes.py
   gradient_accumulation_steps: 1
 
 generator:
-  batch_size: 128  # Updated 2025-12-18
+  batch_size: 16  # Updated 2025-12-18 by find_optimal_batch_sizes.py

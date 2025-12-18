@@ -21,9 +21,9 @@ lora_target_modules: "all-linear"
 compile: false
 
 trainer:
-  train_batch_size: 32
-  eval_batch_size: 64
+  train_batch_size: 64  # Updated 2025-12-18
+  eval_batch_size: 256  # Updated 2025-12-18 by find_optimal_batch_sizes.py
   gradient_accumulation_steps: 1
 
 generator:
-  batch_size: 64
+  batch_size: 128  # Updated 2025-12-18 by find_optimal_batch_sizes.py
