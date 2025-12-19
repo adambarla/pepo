@@ -257,6 +257,10 @@ class Trainer:
         Train a single model in a thread. Each thread sets its CUDA device context
         to ensure proper GPU isolation.
         """
+        # Explicitly set CUDA device for this thread
+        gpu_id = self.model.device_manager._get_gpu_id_for_model(model_idx)
+        torch.cuda.set_device(gpu_id)
+
         device = torch.device(self.model.device_manager.get_device_for_model(model_idx))
         model = self.model.models[model_idx]
 
@@ -372,8 +376,6 @@ class Trainer:
         n_batches = len(train_loader)
         global_step = (epoch - 1) * n_batches // grad_acc_steps
 
-        self.model.device_manager.clear_cache(model_idx)
-
         model.train()
         optimizer.zero_grad()
         loss_sum = torch.tensor(0.0, device=device)
@@ -482,7 +484,6 @@ class Trainer:
             raise ValueError("Evaluation loader is empty")
 
         model.eval()
-        self.model.device_manager.clear_cache(model_idx)
 
         loss_sum = torch.tensor(0.0, device=device)
         lprob_chosen_sum_tensor = torch.tensor(0.0, device=device)

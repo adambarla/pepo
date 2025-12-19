@@ -1,3 +1,4 @@
+import os
 import warnings
 
 import hydra
@@ -7,6 +8,9 @@ from omegaconf import DictConfig, OmegaConf
 from pepo.evaluator.base import BaseEvaluator
 from pepo.model import PEPOModel
 from pepo.utils import constants, setup_logging
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Suppress warnings
 warnings.filterwarnings(

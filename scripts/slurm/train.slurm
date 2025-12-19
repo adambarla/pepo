@@ -11,4 +11,4 @@
 
 cd ~/PEPO
 
-uv --no-sync run scripts/train.py "$@"
+uv  run --no-sync scripts/train.py "$@"

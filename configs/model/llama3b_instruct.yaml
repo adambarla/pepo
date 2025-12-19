@@ -26,4 +26,4 @@ trainer:
   gradient_accumulation_steps: 1
 
 generator:
-  batch_size: 64  # Updated 2025-12-18 by find_optimal_batch_sizes.py
+  batch_size: 128  # Updated 2025-12-19

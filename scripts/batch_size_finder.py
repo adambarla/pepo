@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
+# Prevent CUDA memory fragmentation (must be set before any CUDA operations)
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import multiprocessing
@@ -26,11 +28,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from transformers import AutoTokenizer
 
-from pepo.utils import (  # type: ignore[import-untyped]
-    constants,
-    set_seed,
-    setup_logging,
-)
+from pepo.utils import constants, set_seed, setup_logging
 
 warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
 
@@ -89,9 +87,12 @@ def binary_search_batch_size(
 
 
 def test_train_batch_size(
-    model: Any, cfg: DictConfig, tokenizer: AutoTokenizer, logger: logging.Logger
+    model: Any,
+    cfg: DictConfig,
+    tokenizer: AutoTokenizer,
+    logger: logging.Logger,
 ) -> Tuple[Optional[int], Optional[str]]:
-    """Test training batch size with real data."""
+    """Test training batch size with real data (without eval)."""
     logger.info("Testing TRAINING batch size...")
 
     data_manager = instantiate(
@@ -126,7 +127,6 @@ def test_train_batch_size(
                 model.hub_manager.should_push = original_push
                 model.trainer.optimizers = []
                 model.trainer.schedulers = []
-                # Reset for next test
                 model.epochs_per_network = [0] * model.num_networks
             return True
         except (RuntimeError, torch.cuda.OutOfMemoryError, InterruptedError):
@@ -146,10 +146,12 @@ def test_train_batch_size(
 def test_eval_batch_size(
     model: Any, cfg: DictConfig, tokenizer: AutoTokenizer, logger: logging.Logger
 ) -> Tuple[Optional[int], Optional[str]]:
-    """Test evaluation batch size with real data."""
+    """Test evaluation batch size with optimizer states loaded (1 batch only).
+
+    Sets up training (to load optimizer states), then tests 1 eval batch.
+    """
     logger.info("Testing EVAL batch size...")
 
-    device = torch.device(model.device_manager.get_device_for_model(0))
     data_manager = instantiate(
         cfg.dataset,
         n_splits=model.num_networks,
@@ -163,22 +165,35 @@ def test_eval_batch_size(
     def try_batch_size(batch_size: int) -> bool:
         cleanup_cuda()
         try:
+            # Setup trainer to load optimizer states (matches real training)
+            model.init_trainer()
+            model.trainer.model = model  # _setup_training needs this
+            model.trainer._setup_training(
+                data_manager, max_epochs=1, wandb_manager=None
+            )
+
+            # Get device and model for first network
+            device = torch.device(model.device_manager.get_device_for_model(0))
+            submodel = model.models[0]
+            submodel.eval()
+
+            # Run 1 eval batch
             loader = data_manager.get_dataloader(
                 model_idx=0, partition="eval", batch_size=batch_size
             )
             for batch in loader:
                 with torch.no_grad():
-                    batch = {
-                        k: v.to(device) if hasattr(v, "to") else v
-                        for k, v in batch.items()
-                    }
-                    model.models[0](
-                        batch["chosen_input_ids"],
-                        attention_mask=batch["chosen_attention_mask"],
-                    )
-                break
+                    model._loss_fn(batch, submodel, device)
+                break  # Only 1 batch
+
+            # Cleanup
+            model.trainer.optimizers = []
+            model.trainer.schedulers = []
             return True
         except (RuntimeError, torch.cuda.OutOfMemoryError):
+            if model.trainer:
+                model.trainer.optimizers = []
+                model.trainer.schedulers = []
             cleanup_cuda()
             return False
 
@@ -299,17 +314,19 @@ def main(cfg: DictConfig) -> None:
 
     results: dict[str, dict[str, Any]] = {}
 
-    if "train" in tasks:
-        if not model._models:
-            model.load_models(init_new=True)
-        batch, err = test_train_batch_size(model, cfg, tokenizer, logger)
-        results["training"] = {"optimal_batch_size": batch, "error": err}
-
+    # Test eval first (with optimizer states loaded for realistic memory usage)
     if "eval" in tasks:
         if not model._models:
             model.load_models(init_new=True)
         batch, err = test_eval_batch_size(model, cfg, tokenizer, logger)
         results["evaluation"] = {"optimal_batch_size": batch, "error": err}
+
+    # Test training (without eval)
+    if "train" in tasks:
+        if not model._models:
+            model.load_models(init_new=True)
+        batch, err = test_train_batch_size(model, cfg, tokenizer, logger)
+        results["training"] = {"optimal_batch_size": batch, "error": err}
 
     if "gen" in tasks:
         if not model._models:

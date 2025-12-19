@@ -276,7 +276,7 @@ class PEPOModel:
         model: AutoModelForCausalLM,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+        batch = {k: v.to(device) for k, v in batch.items()}
 
         chosen_ids = batch["chosen_input_ids"]
         chosen_amask = batch["chosen_attention_mask"]
