@@ -1,5 +1,6 @@
 import os
 import warnings
+from typing import Any, cast
 
 import hydra
 from hydra.utils import instantiate
@@ -7,7 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from pepo.evaluator.base import BaseEvaluator
 from pepo.model import PEPOModel
-from pepo.utils import constants, setup_logging
+from pepo.utils import constants, setup_logging, strip_hydra_targets
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -42,7 +43,6 @@ def main(cfg: DictConfig) -> None:
 
     device_manager = instantiate(cfg.device)
     hub_manager = instantiate(cfg.hub)
-    evaluator: BaseEvaluator = instantiate(cfg.evaluator)
 
     model: PEPOModel = instantiate(
         cfg.model,
@@ -50,6 +50,34 @@ def main(cfg: DictConfig) -> None:
         hub_manager=hub_manager,
     )
     epoch = cfg.get("e", None)
+
+    if model.generator is None:
+        raise ValueError("Generator not found in model")
+
+    wandb_config = cfg.get("wandb", OmegaConf.create({"enabled": False}))
+    wandb_manager = None
+    wandb_run = None
+    if wandb_config.enabled:
+        resolved_cfg_plain = OmegaConf.to_container(
+            cfg,
+            resolve=True,
+            structured_config_mode=False,  # type: ignore[arg-type]
+        )
+        # Strip Hydra _target_ keys to prevent recursive instantiation
+        resolved_cfg_plain = strip_hydra_targets(resolved_cfg_plain)
+        wandb_manager = instantiate(
+            wandb_config,
+            cfg=cast("dict[str, Any] | None", resolved_cfg_plain),
+        )
+    if wandb_manager is not None:
+        wandb_run = wandb_manager.get_evaluation_handler(
+            model=model, generator=model.generator
+        )
+    if wandb_run is not None:
+        wandb_run.init_eval_run()
+        logger.info(f"WandB evaluation run initialized: {wandb_run.run_id}")
+
+    evaluator: BaseEvaluator = instantiate(cfg.evaluator, wandb_run=wandb_run)
 
     model_ref = None
     epoch_ref = None
@@ -68,6 +96,10 @@ def main(cfg: DictConfig) -> None:
         ref_epoch=epoch_ref,
         overwrite=cfg.get("overwrite", False),
     )
+
+    if wandb_run is not None:
+        wandb_run.finish()
+
     logger.info("Evaluation complete.")
 
 

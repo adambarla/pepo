@@ -77,3 +77,9 @@ module = [
 ]
 ignore_missing_imports = true
 follow_imports = "skip"
+
+[tool.ruff]
+src = ["src"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pepo"]

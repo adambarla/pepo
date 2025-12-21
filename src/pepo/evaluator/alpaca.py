@@ -6,10 +6,9 @@ from typing import Any, Dict, Optional, Union
 
 import pandas as pd
 import yaml
+from alpaca_eval import evaluate as alpaca_evaluate
 from alpaca_eval.constants import EVALUATORS_CONFIG_DIR
 from omegaconf import DictConfig, OmegaConf
-
-from alpaca_eval import evaluate as alpaca_evaluate
 
 from ..model import PEPOModel
 from ..utils import WandbRun
