@@ -1,120 +1,106 @@
 import os
-from pathlib import Path
+import warnings
+from typing import Any, cast
 
 import hydra
-import pandas as pd
-from dotenv import load_dotenv
-from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-from pepo.utils import constants, set_seed, setup_logging
+from pepo.evaluator.base import BaseEvaluator
+from pepo.model import PEPOModel
+from pepo.utils import constants, setup_logging, strip_hydra_targets
 
-OmegaConf.register_new_resolver(
-    "pepo.constants",
-    lambda name: getattr(constants, name),
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Suppress warnings
+warnings.filterwarnings(
+    "ignore", message=".*pkg_resources is deprecated.*", category=UserWarning
 )
 
-load_dotenv()
+# Register resolvers if not already registered
+# (benchmark.py does this too, but for cleanliness)
+try:
+    OmegaConf.register_new_resolver(
+        "pepo.constants",
+        lambda name: getattr(constants, name),
+    )
+except ValueError:
+    pass  # Already registered
 
 
-@hydra.main(config_path="../configs", config_name="eval.yaml", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="eval", version_base="1.1")  # type: ignore
 def main(cfg: DictConfig) -> None:
-    hydra_cfg = HydraConfig.get()
-    original_work_dir = Path(hydra_cfg.runtime.cwd)
-
+    # Setup logging
+    debug = cfg.get("debug", False)
     log_level_str = cfg.get("log_level", "INFO").upper()
+    if debug:
+        log_level_str = "DEBUG"
     logger = setup_logging(level=log_level_str)
 
-    resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
-    logger.info("PEPO Evaluation - Starting")
-    logger.debug(f"Configuration:\n{OmegaConf.to_yaml(resolved_cfg)}")
-
-    set_seed(cfg.seed)
-    logger.info(f"Random seed set to: {cfg.seed}")
-
-    if not os.getenv("HF_TOKEN"):
-        logger.warning(
-            "HF_TOKEN environment variable not set. "
-            "Model loading may fail if models are private."
-        )
+    logger.debug(f"Config: \n{OmegaConf.to_yaml(cfg, resolve=True)}")
+    logger.info("PEPO Evaluation Script - Starting")
 
     device_manager = instantiate(cfg.device)
     hub_manager = instantiate(cfg.hub)
 
-    model = instantiate(
+    model: PEPOModel = instantiate(
         cfg.model,
         device_manager=device_manager,
         hub_manager=hub_manager,
     )
+    epoch = cfg.get("e", None)
 
-    generator = None
-    if "generator" in cfg.model:
-        generator = instantiate(cfg.model.generator)
-        model.generator = generator
-    else:
-        raise ValueError(
-            "Generator not configured in model config. "
-            "Please add generator section to model config."
+    if model.generator is None:
+        raise ValueError("Generator not found in model")
+
+    wandb_config = cfg.get("wandb", OmegaConf.create({"enabled": False}))
+    wandb_manager = None
+    wandb_run = None
+    if wandb_config.enabled:
+        resolved_cfg_plain = OmegaConf.to_container(
+            cfg,
+            resolve=True,
+            structured_config_mode=False,  # type: ignore[arg-type]
         )
+        # Strip Hydra _target_ keys to prevent recursive instantiation
+        resolved_cfg_plain = strip_hydra_targets(resolved_cfg_plain)
+        wandb_manager = instantiate(
+            wandb_config,
+            cfg=cast("dict[str, Any] | None", resolved_cfg_plain),
+        )
+    if wandb_manager is not None:
+        wandb_run = wandb_manager.get_evaluation_handler(
+            model=model, generator=model.generator
+        )
+    if wandb_run is not None:
+        wandb_run.init_eval_run()
+        logger.info(f"WandB evaluation run initialized: {wandb_run.run_id}")
 
-    output_dir = cfg.get("output_dir", "outputs")
-    if output_dir:
-        output_dir_path = original_work_dir / output_dir
-        cfg.evaluator.output_dir = str(output_dir_path)
-        logger.info(f"Output directory set to: {output_dir_path}")
+    evaluator: BaseEvaluator = instantiate(cfg.evaluator, wandb_run=wandb_run)
 
-    evaluator = instantiate(cfg.evaluator, model=model)
+    model_ref = None
+    epoch_ref = None
+    if cfg.get("ref_model", None) is not None and "_target_" in cfg.ref_model:
+        model_ref = instantiate(
+            cfg.ref_model,
+            device_manager=device_manager,
+            hub_manager=hub_manager,
+        )
+        epoch_ref = cfg.get("ref_e", None)
 
-    responses_exist = evaluator.responses_exist()
-    force_generate = cfg.get("force_generate", False)
-
-    if not responses_exist or force_generate:
-        if not responses_exist:
-            logger.info("Responses file not found - Generating responses")
-        else:
-            logger.info("force_generate=True - Regenerating responses")
-        evaluator.generate_responses()
-        model.unload_models()
-    else:
-        logger.info("Responses file found - Skipping generation")
-
-    logger.info("Running evaluation")
-    evaluator.evaluate()
-
-    logger.info("Consolidating leaderboard files")
-    from pepo.evaluator.alpaca import AlpacaEvalEvaluator
-
-    consolidated_path = AlpacaEvalEvaluator.consolidate_leaderboards(
-        output_dir=output_dir_path
+    evaluator.evaluate(
+        model=model,
+        epoch=epoch,
+        ref_model=model_ref,
+        ref_epoch=epoch_ref,
+        overwrite=cfg.get("overwrite", False),
     )
-    logger.info(f"Consolidated leaderboard saved to: {consolidated_path}")
 
-    # Display the full leaderboard
-    if consolidated_path.exists():
-        df_leaderboard = pd.read_csv(consolidated_path, index_col=0)
+    if wandb_run is not None:
+        wandb_run.finish()
 
-        print("\n" + "=" * 80)
-        print("CONSOLIDATED LEADERBOARD")
-        print("=" * 80)
-
-        with pd.option_context(
-            "display.max_rows",
-            None,
-            "display.max_columns",
-            None,
-            "display.width",
-            None,
-            "display.max_colwidth",
-            None,
-            "display.precision",
-            4,
-        ):
-            print(df_leaderboard.to_string())
-
-        print("=" * 80 + "\n")
-
-        logger.info("Leaderboard displayed above")
+    logger.info("Evaluation complete.")
 
 
 if __name__ == "__main__":

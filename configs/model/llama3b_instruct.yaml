@@ -1,4 +1,4 @@
-# SmolLM2 Model Configuration for PEPO
+# Llama Model Configuration for PEPO
 # Note: If L > num_gpus, divide batch_size by ceil(L/num_gpus) and multiply gradient_accumulation_steps by ceil(L/num_gpus)
 defaults:
   - /trainer@trainer: default
@@ -9,9 +9,9 @@ _target_: pepo.model.PEPOModel
 alpha: 0.1
 beta: 0.1
 num_networks: 8 # placeholder, will be overridden by L
-model_id: "HuggingFaceTB/SmolLM2-1.7B"
+model_id: "meta-llama/Llama-3.2-3B-Instruct"
 tokenizer_id: null
-chat_template: ${pepo.constants:SMOLLM_CHAT_TEMPLATE}
+chat_template: null # use the provided one
 lora_r: 16
 lora_alpha: 16
 lora_dropout: 0.05
@@ -21,9 +21,9 @@ lora_target_modules: "all-linear"
 compile: false
 
 trainer:
-  train_batch_size: 128  # Updated 2025-12-19
-  eval_batch_size: 256  # Updated 2025-12-18 by find_optimal_batch_sizes.py
+  train_batch_size: 32  # Updated 2025-12-18 by find_optimal_batch_sizes.py
+  eval_batch_size: 64  # Updated 2025-12-18 by find_optimal_batch_sizes.py
   gradient_accumulation_steps: 1
 
 generator:
-  batch_size: 256  # Updated 2025-12-18 by find_optimal_batch_sizes.py
+  batch_size: 128  # Updated 2025-12-19

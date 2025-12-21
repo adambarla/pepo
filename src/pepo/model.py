@@ -10,7 +10,7 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM
 
 from .factory import PEPOFactory
-from .generate import Generator
+from .generator import Generator
 from .trainer import Trainer
 from .utils import DeviceManager, HubManager
 from .utils.model_utils import get_log_probs
@@ -131,8 +131,6 @@ class PEPOModel:
                 "Models are already loaded. Unload them first if you want to reload."
             )
             return
-
-        logger.info("Loading models...")
         self._models = self.factory.load_models(init_new=init_new, epoch=epoch)
         if epoch is not None:
             self.epochs_per_network = [epoch] * self.num_networks
@@ -238,11 +236,8 @@ class PEPOModel:
             False otherwise.
         """
         for model_idx in range(self.num_networks):
-            submodel_name = self._get_submodel_name(model_idx)
+            submodel_name = self.get_submodel_name(model_idx)
             if not self.hub_manager.model_exists(submodel_name, epoch):
-                logger.info(
-                    f"Submodel {submodel_name} (epoch {epoch}) not found on hub."
-                )
                 return False
         return True
 
@@ -263,10 +258,10 @@ class PEPOModel:
 
         logger.info(f"Successfully loaded models from epoch {epoch} checkpoint")
 
-    def _get_model_name(self) -> str:
-        return self.factory.get_model_name()
+    def get_name(self, epoch: Optional[int] = None) -> str:
+        return self.factory.get_model_name(epoch=epoch)
 
-    def _get_submodel_name(self, model_idx: int) -> str:
+    def get_submodel_name(self, model_idx: int) -> str:
         return self.factory.get_submodel_name(model_idx)
 
     def _get_base_model_name(self) -> str:
@@ -278,7 +273,7 @@ class PEPOModel:
         model: AutoModelForCausalLM,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+        batch = {k: v.to(device) for k, v in batch.items()}
 
         chosen_ids = batch["chosen_input_ids"]
         chosen_amask = batch["chosen_attention_mask"]
@@ -308,12 +303,6 @@ class PEPOModel:
                 )
                 _warned_missing_ref_logprobs = True
             # if we don't have reference logprobs, we need to compute them
-            raise ValueError(
-                "Precomputed reference logprobs not found in batch. "
-                "Computing on-the-fly (2x slower). "
-                "Consider preprocessing dataset with ref_model_id "
-                "to cache them."
-            )
             with model.disable_adapter():
                 with torch.no_grad():
                     lprobs_chosen_ref = get_log_probs(
@@ -347,7 +336,7 @@ class PEPOModel:
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)  # type: ignore[operator]
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
         logits = outputs.logits  # (B, T, V)
         last_logits = logits[:, -1, :]
         log_probs = F.log_softmax(last_logits, dim=-1)
@@ -364,6 +353,7 @@ class PEPOModel:
         self._check_models_loaded()
 
         log_probs_ensemble: list[Optional[torch.Tensor]] = [None] * self.num_networks
+        thread_exceptions: list[Optional[BaseException]] = [None] * self.num_networks
 
         def predict_log_probs(model_idx, model, input_ids, attention_mask):
             try:
@@ -371,8 +361,8 @@ class PEPOModel:
                     model.eval()
                     log_probs = self._predict_submodel(model, input_ids, attention_mask)
                     log_probs_ensemble[model_idx] = log_probs
-            except (RuntimeError, torch.cuda.OutOfMemoryError):
-                log_probs_ensemble[model_idx] = None
+            except BaseException as e:
+                thread_exceptions[model_idx] = e
 
         threads = []
         for model_idx in range(self.num_networks):
@@ -390,6 +380,13 @@ class PEPOModel:
 
         for thread in threads:
             thread.join()
+
+        # Propagate any thread exceptions to main thread
+        for model_idx, exc in enumerate(thread_exceptions):
+            if exc is not None:
+                raise RuntimeError(
+                    f"Exception in submodel {model_idx} prediction"
+                ) from exc
 
         if len(log_probs_ensemble) != self.num_networks:
             raise RuntimeError(
@@ -462,22 +459,27 @@ class PEPOModel:
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        max_length: int = 1024,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Generate using base model (single model, no ensemble).
+
+        Note: Temporarily sets generator.use_ensemble=False for this call.
         """
         self._check_models_loaded()
 
-        if self.generator is not None:
+        if self.generator is None:
+            raise ValueError(
+                "Generator not set on model. Cannot generate without generator."
+            )
+
+        # Temporarily disable ensemble for base model generation
+        original_use_ensemble = self.generator.use_ensemble
+        self.generator.use_ensemble = False
+        try:
             return self.generator.generate(
                 model=self,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_length=max_length,
-                use_ensamble=False,
             )
-        else:
-            raise ValueError(
-                "Generator not set on model. Cannot generate without generator."
-            )
+        finally:
+            self.generator.use_ensemble = original_use_ensemble

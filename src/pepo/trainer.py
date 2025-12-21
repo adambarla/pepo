@@ -1,6 +1,5 @@
 import logging
 import threading
-from datetime import datetime
 from typing import Any, Callable, Optional
 
 import torch
@@ -29,6 +28,8 @@ class Trainer:
         early_stopping_patience: Optional[int] = None,
         early_stopping_min_delta: float = 0.0,
         log_interval: int = 100,
+        skip_eval: bool = False,
+        max_batches_per_epoch: Optional[int] = None,
     ) -> None:
         """
         Initialize trainer.
@@ -45,6 +46,8 @@ class Trainer:
             early_stopping_patience: Number of epochs to wait before stopping
                 if no improvement. If None, early stopping is disabled.
             early_stopping_min_delta: Minimum change to qualify as an improvement.
+            max_batches_per_epoch: Limit batches per epoch (for testing).
+                None = no limit.
         """
         self.optimizer_factory = optimizer
         self.scheduler_name = scheduler_name
@@ -56,6 +59,8 @@ class Trainer:
         self.early_stopping_patience = early_stopping_patience
         self.early_stopping_min_delta = early_stopping_min_delta
         self.log_interval = log_interval
+        self.skip_eval = skip_eval
+        self.max_batches_per_epoch = max_batches_per_epoch
 
         self.optimizers: list[torch.optim.Optimizer] = []
         self.schedulers: list[torch.optim.lr_scheduler._LRScheduler] = []
@@ -135,7 +140,7 @@ class Trainer:
         # Load models if not already loaded
         if self.model._models is None:
             if continue_training:
-                model_name = model._get_model_name()
+                model_name = model.get_name()
                 latest_epoch = model.hub_manager.find_latest_epoch_for_all_submodels(
                     model_name, model.num_networks, max_epoch=max_epochs
                 )
@@ -167,10 +172,24 @@ class Trainer:
 
         logger.info("Training PEPO ensemble models...")
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        group = f"{self.model._get_model_name()}-{timestamp}"
+        group = self.model.get_name()
 
         threads = []
+        stop_event = threading.Event()  # Signal to stop all threads on error
+
+        def run_training(**kwargs: Any) -> None:
+            """Wrapper that catches exceptions from training threads."""
+            try:
+                self._train_model(**kwargs)
+            except InterruptedError:
+                pass  # Thread stopped due to error in another thread
+            except Exception as e:
+                if not stop_event.is_set():  # Only log first error
+                    logger.error(
+                        f"Training thread for model {kwargs['model_idx']} failed: {e}"
+                    )
+                stop_event.set()  # Signal other threads to stop
+
         for model_idx in range(self.model.num_networks):
             train_loader = self.data_manager.get_dataloader(
                 model_idx=model_idx,
@@ -193,18 +212,19 @@ class Trainer:
                 )
 
             thread = threading.Thread(
-                target=self._train_model,
-                args=(
-                    model_idx,
-                    train_loader,
-                    eval_loader,
-                    self.optimizers[model_idx],
-                    self.schedulers[model_idx],
-                    max_epochs,
-                    self.gradient_accumulation_steps,
-                    wandb_run,
-                    self.early_stopping_patience,
-                    self.early_stopping_min_delta,
+                target=run_training,
+                kwargs=dict(
+                    model_idx=model_idx,
+                    train_loader=train_loader,
+                    eval_loader=eval_loader,
+                    optimizer=self.optimizers[model_idx],
+                    scheduler=self.schedulers[model_idx],
+                    n_epochs=max_epochs,
+                    grad_acc_steps=self.gradient_accumulation_steps,
+                    wandb_run=wandb_run,
+                    es_patience=self.early_stopping_patience,
+                    es_min_delta=self.early_stopping_min_delta,
+                    stop_event=stop_event,
                 ),
             )
             thread.start()
@@ -212,6 +232,9 @@ class Trainer:
 
         for thread in threads:
             thread.join()
+
+        if stop_event.is_set():
+            raise RuntimeError("Training failed - see error log above")
 
         if self.model.factory:
             self.model.factory.save_model(self.model.models)
@@ -228,25 +251,22 @@ class Trainer:
         wandb_run: Optional[WandbRun],
         es_patience: Optional[int],
         es_min_delta: float,
+        stop_event: Optional[threading.Event] = None,
     ) -> None:
         """
         Train a single model in a thread. Each thread sets its CUDA device context
         to ensure proper GPU isolation.
         """
+        # Explicitly set CUDA device for this thread
+        gpu_id = self.model.device_manager._get_gpu_id_for_model(model_idx)
+        torch.cuda.set_device(gpu_id)
+
         device = torch.device(self.model.device_manager.get_device_for_model(model_idx))
         model = self.model.models[model_idx]
 
         if wandb_run is not None and wandb_run.enabled:
             wandb_run.init_train_run()
 
-        logger = logging.getLogger(__name__)
-        train_size = len(train_loader.dataset)  # type: ignore[arg-type]
-        eval_size = len(eval_loader.dataset)  # type: ignore[arg-type]
-        logger.info(
-            f"Model {model_idx} - Train: size={train_size}, "
-            f"batches={len(train_loader)} - Eval: size={eval_size}, "
-            f"batches={len(eval_loader)}"
-        )
         n_batches = len(train_loader)
 
         start_epoch = self.model.epochs_per_network[model_idx] or 0
@@ -257,127 +277,66 @@ class Trainer:
             for _ in range(global_step):
                 scheduler.step()
 
-        logger.info(
-            f"Model {model_idx} - Running evaluation from epoch {start_epoch}..."
-        )
-
         initial_eval_loss = float("inf")
-        initial_eval_loss = self._eval_model(
-            model_idx=model_idx,
-            model=model,
-            eval_loader=eval_loader,
-            device=device,
-            epoch=0,
-            n_epochs=n_epochs,
-            global_step=global_step,
-            wandb_run=wandb_run,
-        )
+        if not self.skip_eval:
+            initial_eval_loss = self._eval_epoch(
+                model_idx=model_idx,
+                model=model,
+                eval_loader=eval_loader,
+                device=device,
+                epoch=start_epoch,
+                n_epochs=n_epochs,
+                global_step=global_step,
+                wandb_run=wandb_run,
+            )
 
         is_continuing = start_epoch > 0
         if not is_continuing:
             if self.model.factory:
-                self.model.factory.push_submodel(model, model_idx, epochs=0)
+                self.model.factory.push_submodel(model, model_idx, epochs=start_epoch)
 
         best_eval_loss = initial_eval_loss
         patience_counter = 0
         es_enabled = es_patience is not None
 
         for epoch in range(start_epoch + 1, n_epochs + 1):
-            logger.info(
-                f"Model {model_idx} - Starting training epoch {epoch}/{n_epochs}"
-            )
-
-            model.train()
-            optimizer.zero_grad()
-            loss_sum = torch.tensor(0.0, device=device)
-            lprob_chosen_sum_tensor = torch.tensor(0.0, device=device)
-            lprob_reject_sum_tensor = torch.tensor(0.0, device=device)
-            margin_sum_tensor = torch.tensor(0.0, device=device)
-            ebatch = 0
-
-            desc = f"Model {model_idx} - Epoch {epoch}/{n_epochs}"
-            pbar = tqdm(
-                total=n_batches // self.log_interval,
-                desc=desc,
-                position=model_idx,
-                leave=False,
-                mininterval=1.0,  # Update at most once per second
-            )
-
-            for step, batch in enumerate(train_loader):
-                batch_loss, lprobs_ch, lprobs_re = self.model._loss_fn(
-                    batch, model, device
+            # Check if another thread failed and we should stop
+            if stop_event is not None and stop_event.is_set():
+                logger.warning(
+                    f"Model {model_idx} stopping early due to error in another thread"
                 )
+                break
 
-                loss_sum += batch_loss.detach()
-                lprob_chosen_sum_tensor += lprobs_ch.mean().detach()
-                lprob_reject_sum_tensor += lprobs_re.mean().detach()
-                margin_sum_tensor += (lprobs_ch - lprobs_re).mean().detach()
-
-                batch_loss = batch_loss / grad_acc_steps
-                batch_loss.backward()
-
-                if (step + 1) % grad_acc_steps == 0:
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
-                    global_step += 1
-                    ebatch += 1
-
-                if (step + 1) % self.log_interval == 0:
-                    current_lr = scheduler.get_last_lr()[0]
-                    loss_val = loss_sum.item() / (step + 1)
-                    margin_val = margin_sum_tensor.item() / (step + 1)
-
-                    pbar.set_postfix(
-                        {
-                            "loss": f"{loss_val:.4f}",
-                            "margin": f"{margin_val:.4f}",
-                            "lr": f"{current_lr:.2e}",
-                        }
-                    )
-                    pbar.update(1)
-
-                    if wandb_run is not None:
-                        wandb_run.log(
-                            {
-                                "train/learning_rate": current_lr,
-                                "train/step": global_step,
-                                "train/curr_avg_loss": loss_val,
-                                "train/curr_avg_margin": margin_val,
-                            },
-                            step=global_step,
-                        )
-
-            pbar.close()
-
-            if wandb_run is not None:
-                wandb_run.log(
-                    {
-                        "train/avg_lprobs_chosen": lprob_chosen_sum_tensor.item()
-                        / ebatch,
-                        "train/avg_lprobs_reject": lprob_reject_sum_tensor.item()
-                        / ebatch,
-                        "train/avg_margin": margin_sum_tensor.item() / ebatch,
-                        "train/epoch": epoch,
-                    },
-                    step=global_step,
-                )
+            self._train_epoch(
+                model_idx=model_idx,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                train_loader=train_loader,
+                device=device,
+                epoch=epoch,
+                n_epochs=n_epochs,
+                grad_acc_steps=grad_acc_steps,
+                wandb_run=wandb_run,
+                stop_event=stop_event,
+            )
 
             self.model.epochs_per_network[model_idx] = epoch
             if self.model.factory:
                 self.model.factory.push_submodel(model, model_idx, epochs=epoch)
 
-            eval_loss = self._eval_model(
-                model_idx=model_idx,
-                model=model,
-                eval_loader=eval_loader,
-                device=device,
-                epoch=epoch,
-                n_epochs=n_epochs,
-                global_step=global_step,
-                wandb_run=wandb_run,
-            )
+            eval_loss = best_eval_loss  # Default if skipping
+            if not self.skip_eval:
+                eval_loss = self._eval_epoch(
+                    model_idx=model_idx,
+                    model=model,
+                    eval_loader=eval_loader,
+                    device=device,
+                    epoch=epoch,
+                    n_epochs=n_epochs,
+                    global_step=epoch * len(train_loader) // grad_acc_steps,
+                    wandb_run=wandb_run,
+                )
 
             if es_enabled and es_patience is not None:
                 if eval_loss < best_eval_loss - es_min_delta:
@@ -398,7 +357,112 @@ class Trainer:
         if wandb_run is not None:
             wandb_run.finish()
 
-    def _eval_model(
+    def _train_epoch(
+        self,
+        model_idx: int,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler._LRScheduler,
+        train_loader: DataLoader[dict[str, torch.Tensor]],
+        device: torch.device,
+        epoch: int,  # 1-indexed epoch number
+        n_epochs: int,
+        grad_acc_steps: int,
+        wandb_run: Optional[WandbRun],
+        stop_event: Optional[threading.Event] = None,
+    ) -> None:
+        logger.info(f"Model {model_idx} - Training epoch {epoch}/{n_epochs}")
+
+        n_batches = len(train_loader)
+        global_step = (epoch - 1) * n_batches // grad_acc_steps
+
+        model.train()
+        optimizer.zero_grad()
+        loss_sum = torch.tensor(0.0, device=device)
+        lprob_chosen_sum_tensor = torch.tensor(0.0, device=device)
+        lprob_reject_sum_tensor = torch.tensor(0.0, device=device)
+        margin_sum_tensor = torch.tensor(0.0, device=device)
+        ebatch = 0
+
+        desc = f"Model {model_idx} - Epoch {epoch}/{n_epochs}"
+        pbar = tqdm(
+            total=n_batches // self.log_interval,
+            desc=desc,
+            position=model_idx,
+            leave=False,
+            mininterval=1.0,  # Update at most once per second
+        )
+
+        for step, batch in enumerate(train_loader):
+            # Check if another thread failed - stop immediately
+            if stop_event is not None and stop_event.is_set():
+                pbar.close()
+                raise InterruptedError(
+                    "Training stopped due to error in another thread"
+                )
+
+            # Check batch limit (for testing)
+            if (
+                self.max_batches_per_epoch is not None
+                and step >= self.max_batches_per_epoch
+            ):
+                pbar.close()
+                break
+
+            logger.debug(f"Batch dimensions: {batch['chosen_input_ids'].shape}")
+            batch_loss, lprobs_ch, lprobs_re = self.model._loss_fn(batch, model, device)
+
+            loss_sum += batch_loss.detach()
+            lprob_chosen_sum_tensor += lprobs_ch.mean().detach()
+            lprob_reject_sum_tensor += lprobs_re.mean().detach()
+            margin_sum_tensor += (lprobs_ch - lprobs_re).mean().detach()
+
+            batch_loss = batch_loss / grad_acc_steps
+            batch_loss.backward()
+
+            if (step + 1) % grad_acc_steps == 0:
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                global_step += 1
+                ebatch += 1
+
+            if (step + 1) % self.log_interval == 0:
+                current_lr = scheduler.get_last_lr()[0]
+                loss_val = loss_sum.item() / (step + 1)
+                margin_val = margin_sum_tensor.item() / (step + 1)
+
+                pbar.set_postfix(
+                    {
+                        "loss": f"{loss_val:.4f}",
+                        "margin": f"{margin_val:.4f}",
+                    }
+                )
+                pbar.update(1)
+
+                if wandb_run is not None:
+                    wandb_run.log(
+                        {
+                            "train/learning_rate": current_lr,
+                            "train/step": global_step,
+                            "train/curr_avg_loss": loss_val,
+                            "train/curr_avg_margin": margin_val,
+                        },
+                        step=global_step,
+                    )
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "train/avg_lprobs_chosen": lprob_chosen_sum_tensor.item() / ebatch,
+                    "train/avg_lprobs_reject": lprob_reject_sum_tensor.item() / ebatch,
+                    "train/avg_margin": margin_sum_tensor.item() / ebatch,
+                    "train/epoch": epoch,
+                },
+                step=global_step,
+            )
+        pbar.close()
+
+    def _eval_epoch(
         self,
         model_idx: int,
         model: torch.nn.Module,
@@ -412,16 +476,16 @@ class Trainer:
         """
         Evaluate the model on the evaluation dataset.
         """
+        logger.info(f"Model {model_idx} - Evaluating epoch {epoch}/{n_epochs}")
+
         n_batches = len(eval_loader)
+
         if n_batches == 0:
             raise ValueError("Evaluation loader is empty")
 
         model.eval()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
 
         loss_sum = torch.tensor(0.0, device=device)
-        b = 0
         lprob_chosen_sum_tensor = torch.tensor(0.0, device=device)
         lprob_reject_sum_tensor = torch.tensor(0.0, device=device)
         margin_sum_tensor = torch.tensor(0.0, device=device)
@@ -437,22 +501,20 @@ class Trainer:
         )
 
         with torch.no_grad():
-            for batch in pbar:
+            for step, batch in enumerate(pbar):
                 batch_loss, lprobs_ch, lprobs_re = self.model._loss_fn(
                     batch, model, device
                 )
 
                 loss_sum += batch_loss
-                b += 1
 
                 lprob_chosen_sum_tensor += lprobs_ch.mean()
                 lprob_reject_sum_tensor += lprobs_re.mean()
                 margin_sum_tensor += (lprobs_ch - lprobs_re).mean()
 
-                # Only update postfix periodically to reduce overhead
-                if b % max(1, n_batches // 10) == 0 or b == 1:
-                    current_avg_loss = loss_sum.item() / b
-                    margin_val = margin_sum_tensor.item() / b
+                if (step + 1) % self.log_interval == 0:
+                    current_avg_loss = loss_sum.item() / (step + 1)
+                    margin_val = margin_sum_tensor.item() / (step + 1)
 
                     pbar.set_postfix(
                         {
@@ -466,13 +528,15 @@ class Trainer:
         if wandb_run is not None:
             wandb_run.log(
                 {
-                    "eval/loss": loss_sum.item() / b,
-                    "eval/avg_lprobs_chosen": lprob_chosen_sum_tensor.item() / b,
-                    "eval/avg_lprobs_reject": lprob_reject_sum_tensor.item() / b,
-                    "eval/avg_margin": margin_sum_tensor.item() / b,
+                    "eval/loss": loss_sum.item() / n_batches,
+                    "eval/avg_lprobs_chosen": lprob_chosen_sum_tensor.item()
+                    / n_batches,
+                    "eval/avg_lprobs_reject": lprob_reject_sum_tensor.item()
+                    / n_batches,
+                    "eval/avg_margin": margin_sum_tensor.item() / n_batches,
                     "eval/epoch": epoch,
                 },
                 step=global_step,
             )
 
-        return loss_sum.item() / b
+        return loss_sum.item() / n_batches

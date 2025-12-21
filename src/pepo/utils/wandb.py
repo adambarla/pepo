@@ -2,18 +2,17 @@ import dataclasses
 import logging
 from typing import Any, Dict, List, Optional
 
+import wandb
 from omegaconf import OmegaConf
+from wandb.util import generate_id
 
-try:
-    import wandb
-except ImportError:
-    wandb = None  # type: ignore[assignment]
+logger = logging.getLogger(__name__)
 
 
 class WandbRun:
     """
     Handler for a single Weights & Biases run.
-    Created by WandbManager for each training or benchmark run.
+    Created by WandbManager for each training or evaluation run.
     """
 
     def __init__(
@@ -24,6 +23,7 @@ class WandbRun:
         model_idx: Optional[int] = None,
         group: Optional[str] = None,
         run_id: Optional[str] = None,
+        generator: Optional[Any] = None,
     ):
         """
         Initialize wandb handler for a single run.
@@ -35,6 +35,7 @@ class WandbRun:
             model_idx: Model index for this run.
             group: Group name for organizing related runs.
             run_id: Optional run ID to resume an existing run.
+            generator: Optional generator instance for evaluation run naming.
         """
         self.manager = manager
         self.enabled = manager.enabled
@@ -44,11 +45,10 @@ class WandbRun:
         self.model = model
         self.data_manager = data_manager
         self.model_idx = model_idx
+        self.generator = generator
+        self.group = group
 
-        if wandb is not None:
-            self.run_id = run_id or wandb.util.generate_id()
-        else:
-            self.run_id = None
+        self.run_id = run_id or generate_id()
 
     def _generate_run_name(self) -> Optional[str]:
         """Generate run name from model and data manager identifiers."""
@@ -56,15 +56,15 @@ class WandbRun:
         if self.model:
             if hasattr(self.model, "get_run_identifier"):
                 parts.append(self.model.get_run_identifier())
-            elif hasattr(self.model, "_get_model_name"):
-                parts.append(self.model._get_model_name())
-            elif hasattr(self.model, "_get_submodel_name"):
+            elif hasattr(self.model, "get_name"):
+                parts.append(self.model.get_name())
+            elif hasattr(self.model, "get_submodel_name"):
                 model_idx = (
                     self.model_idx
                     if self.model_idx is not None
                     else getattr(self.model, "_model_idx", 0)
                 )
-                parts.append(self.model._get_submodel_name(model_idx))
+                parts.append(self.model.get_submodel_name(model_idx))
         if self.data_manager and hasattr(self.data_manager, "get_run_identifier"):
             parts.append(self.data_manager.get_run_identifier())
         if parts:
@@ -74,19 +74,29 @@ class WandbRun:
             return name
         return None
 
+    def _generate_eval_run_name(self) -> Optional[str]:
+        """Generate run name for evaluation runs: {model_name}-{generator_name}-eval."""
+        parts = []
+        if self.model and hasattr(self.model, "get_name"):
+            parts.append(self.model.get_name())
+        if self.generator and hasattr(self.generator, "get_name"):
+            parts.append(self.generator.get_name())
+        parts.append("eval")
+        return "-".join(parts) if len(parts) > 1 else None
+
     def init_train_run(self) -> None:
         """Initialize a training run. Sets job_type='train' automatically."""
         if not self.enabled:
             return
         self._init_run(job_type="train")
 
-    def init_bench_run(self) -> None:
-        """Initialize a benchmark run that continues an existing training run."""
+    def init_eval_run(self) -> None:
+        """Initialize an evaluation run (separate from training run but same group)."""
         if not self.enabled:
             return
         if self.run_id is None:
-            raise ValueError("Cannot initialize benchmark run: run_id is None")
-        self._init_run(job_type="benchmark", resume="must")
+            raise ValueError("Cannot initialize evaluation run: run_id is None")
+        self._init_run(job_type="evaluation", resume="allow")
 
     def _init_run(
         self,
@@ -106,7 +116,12 @@ class WandbRun:
         if self.run_id is None:
             raise ValueError("Wandb run_id is None")
 
-        run_name = self._generate_run_name()
+        # Use appropriate name generation based on job type
+        if job_type == "evaluation":
+            run_name = self._generate_eval_run_name()
+        else:
+            run_name = self._generate_run_name()
+
         if run_name is None:
             run_name = f"run-{self.run_id}"
 
@@ -128,7 +143,9 @@ class WandbRun:
         if resume is not None:
             init_kwargs["resume"] = resume
 
-        if self.manager.group is not None:
+        if self.group is not None:
+            init_kwargs["group"] = self.group
+        elif self.manager.group is not None:
             init_kwargs["group"] = self.manager.group
 
         if self.manager.cfg is not None:
@@ -139,6 +156,8 @@ class WandbRun:
                 init_kwargs["config"] = dataclasses.asdict(cfg_obj)
             else:
                 init_kwargs["config"] = cfg_obj
+
+        init_kwargs["settings"] = self.wandb.Settings(console="wrap")
 
         self.run = self.wandb.init(**init_kwargs)
         self.initialized = True
@@ -228,24 +247,22 @@ class WandbManager:
         )
         return handler
 
-    def find_training_run_id(
+    def find_training_run_group(
         self, model_name: str, model_idx: int = 0
     ) -> Optional[str]:
         """
-        Find the most recent training run_id for a given model name with specified idx.
+        Find the group of the most recent training run for a given model name.
 
         Args:
             model_name: Model name to search for (base name without epoch suffix).
             model_idx: Model index (default 0 for l0).
 
         Returns:
-            Run ID of the most recent training run matching
-            {model_name}-l{model_idx}, or None if not found.
+            Group name of the most recent training run, or None if not found.
         """
         if not self.enabled or self.wandb is None:
             return None
 
-        logger = logging.getLogger(__name__)
         expected_name = f"{model_name}-l{model_idx}"
 
         try:
@@ -262,54 +279,118 @@ class WandbManager:
 
                 if run_name == expected_name:
                     if run_job_type == "train":
+                        group = getattr(run, "group", None)
                         logger.debug(
                             f"Found training run {expected_name}: {run.id} "
-                            "(job_type=train)"
+                            f"(job_type=train, group={group})"
                         )
-                        return str(run.id)
-                    elif (
-                        run_job_type is None
-                        or run_job_type == ""
-                        or run_job_type == "benchmark"
-                    ):
-                        logger.debug(
-                            f"Found run {expected_name}: {run.id} "
-                            f"(job_type={run_job_type}, "
-                            f"may be resumed training run)"
-                        )
-                        return str(run.id)
+                        return group
 
+            # Fallback: search with filter
             runs = api.runs(
                 project_path,
-                filters={"display_name": expected_name},
+                filters={"display_name": expected_name, "jobType": "train"},
                 order="-created_at",
                 per_page=10,
             )
             if runs:
-                logger.debug(f"Found run {expected_name} via filter: {runs[0].id}")
-                return str(runs[0].id)
+                group = getattr(runs[0], "group", None)
+                logger.debug(
+                    f"Found run {expected_name} via filter: {runs[0].id}, group={group}"
+                )
+                return group
         except Exception as e:
             logger.warning(f"Error finding training run for {expected_name}: {e}")
 
         return None
 
-    def get_benchmark_handler(
-        self,
-        model: Any,
-    ) -> Optional["WandbRun"]:
+    def find_evaluation_run_id(
+        self, group: str, model_name: str, generator_name: str
+    ) -> Optional[str]:
         """
-        Get a wandb handler for benchmarking that continues an existing training run.
-        Automatically finds the most recent training run for the model.
-        The benchmark run will be in the same group as the training run.
+        Find an existing evaluation run for the given group.
+
+        Searches for runs with:
+        - Same group
+        - job_type="evaluation"
+        - Name matching {model_name}-{generator_name}-eval
 
         Args:
-            model: Model instance for benchmarking. Must have _get_model_name() method.
+            group: Group name to search within.
+            model_name: Model name (base name without epoch suffix).
+            generator_name: Generator name.
 
         Returns:
-            WandbRun instance for the benchmark run, or None if wandb is disabled.
+            Run ID if found, None otherwise.
+        """
+        if not self.enabled or self.wandb is None:
+            return None
 
-        Raises:
-            ValueError: If the training run cannot be found.
+        expected_name = f"{model_name}-{generator_name}-eval"
+
+        try:
+            api = self.wandb.Api()
+            entity = self.entity or "wandb"
+            project_path = f"{entity}/{self.project}"
+
+            # Search for evaluation runs in the same group
+            runs = api.runs(
+                project_path,
+                filters={
+                    "group": group,
+                    "jobType": "evaluation",
+                },
+                order="-created_at",
+                per_page=50,
+            )
+
+            for run in runs:
+                run_name = getattr(run, "name", None) or getattr(
+                    run, "display_name", None
+                )
+                if run_name == expected_name:
+                    logger.debug(
+                        f"Found existing evaluation run {expected_name}: {run.id}"
+                    )
+                    return str(run.id)
+
+            # Fallback: search without group filter in case group wasn't indexed
+            runs = api.runs(
+                project_path,
+                filters={"display_name": expected_name, "jobType": "evaluation"},
+                order="-created_at",
+                per_page=10,
+            )
+            for run in runs:
+                run_group = getattr(run, "group", None)
+                if run_group == group:
+                    logger.debug(
+                        f"Found evaluation run {expected_name} via fallback: {run.id}"
+                    )
+                    return str(run.id)
+
+        except Exception as e:
+            logger.warning(f"Error finding evaluation run for {expected_name}: {e}")
+
+        return None
+
+    def get_evaluation_handler(
+        self,
+        model: Any,
+        generator: Any,
+    ) -> Optional["WandbRun"]:
+        """
+        Get a wandb handler for evaluation that shares group with training run.
+
+        If an evaluation run already exists for this group, it will be resumed.
+        Otherwise, a new evaluation run will be created.
+
+        Args:
+            model: Model instance for evaluation. Must have get_name() method.
+            generator: Generator instance. Must have get_name() method.
+
+        Returns:
+            WandbRun instance for the evaluation run, or None if wandb disabled.
         """
         if not self.enabled:
             return None
@@ -317,56 +398,39 @@ class WandbManager:
         if self.wandb is None:
             raise ValueError("Wandb is not installed")
 
-        if not hasattr(model, "_get_model_name"):
+        if not hasattr(model, "get_name"):
             raise ValueError(
-                "Cannot find training run: model does not have _get_model_name() method"
+                "Cannot find training run: model does not have get_name() method"
             )
 
-        model_name = model._get_model_name()
-        training_run_id = self.find_training_run_id(model_name, model_idx=0)
-
-        if training_run_id is None:
+        if not hasattr(generator, "get_name"):
             raise ValueError(
-                f"Cannot find training run for model {model_name}. "
-                f"Please ensure the training run completed successfully."
+                "Cannot create evaluation run: generator does not have get_name() "
+                "method"
             )
 
-        try:
-            api = self.wandb.Api()
-            run_path = f"{self.entity or 'wandb'}/{self.project}/{training_run_id}"
-            run = api.run(run_path)  # type: ignore[no-untyped-call]
+        model_name = model.get_name()
+        generator_name = generator.get_name()
 
-            if run is None:
-                raise ValueError(
-                    f"Wandb run {training_run_id} does not exist in project "
-                    f"{self.project}"
-                )
+        # Find the training run's group
+        group = self.find_training_run_group(model_name, model_idx=0)
 
-            group = None
-            if hasattr(run, "group") and run.group:
-                group = run.group
-                self.group = group
+        if group is None:
+            logger.warning(
+                f"Cannot find training run group for model {model_name}. "
+                f"Creating evaluation run without group."
+            )
+            # Still create the evaluation run, just without a group
+            group = model_name  # Use model name as fallback group
 
-            if hasattr(run, "tags") and run.tags:
-                existing_tags = set(self.tags)
-                new_tags = [tag for tag in run.tags if tag not in existing_tags]
-                self.tags.extend(new_tags)
-            if hasattr(run, "notes") and run.notes and not self.notes:
-                self.notes = run.notes
+        self.group = group
 
-        except Exception as e:
-            error_str = str(e).lower()
-            if (
-                "does not exist" in error_str
-                or "not found" in error_str
-                or "no such" in error_str
-            ):
-                raise ValueError(
-                    f"Cannot resume wandb run {training_run_id}: run does not "
-                    f"exist in project {self.project}. "
-                    f"Please ensure the training run completed successfully."
-                ) from e
-            raise
+        # Look for existing evaluation run in this group
+        existing_run_id = self.find_evaluation_run_id(
+            group=group,
+            model_name=model_name,
+            generator_name=generator_name,
+        )
 
         handler = WandbRun(
             manager=self,
@@ -374,6 +438,7 @@ class WandbManager:
             data_manager=None,
             model_idx=0,
             group=group,
-            run_id=training_run_id,
+            run_id=existing_run_id,  # None if creating new, ID if resuming
+            generator=generator,
         )
         return handler

@@ -1,31 +1,68 @@
-# General Evaluation Configuration
 defaults:
   - model: llama_instruct
+  - dataset: ultrafeedback
   - evaluator: alpaca
-  - hub: eval
+  - hub: default
   - device: default
+  - model@ref_model: null #in CLI override as model@ref_model=...
   - _self_
+
+wandb:
+  _target_: pepo.utils.wandb.WandbManager
+  enabled: ${sync}
+  project: "pepo"
+  tags: []
+  notes: null
+  entity: "pepo-team"
+  mode: "online"
+
+hub:
+  push: ${sync} # Push trained models
+
+dataset:
+  max_length: 1024
+  max_prompt_length: 512
+  n_splits: ${L}
+  cache_dir: ${oc.env:SCRATCH}/pepo/cache # cache is $SCRATCH/pepo/cache
+  seed: ${seed}
+  force_recompute: false
 
 model:
   num_networks: ${L}
+  alpha: ${a}
+  generator:
+    max_new_tokens: ${mt}
+    max_prompt_length: 512
+  trainer:
+    log_interval: 1
+  debug: ${debug}
+  compile: false
 
 evaluator:
-  num_samples: ${num_samples}
-  output_dir: ${output_dir}
+  num_samples: ${ns}
 
-hub:
-  load: true
-  push: false
+ref_model:
+  num_networks: ${ref_L}
+  alpha: ${ref_a}
+  generator:
+    max_new_tokens: ${mt}
 
-log_level: "info"  # Options: "debug", "info", "warning", "error", "critical" (case-insensitive)
+e: 3
+L: 4
+a: 0.1
+ref_e: 3
+ref_L: 4
+ref_a: 0.1
 
-L: 4 # Number of submodels in the ensemble
+mt: 1024
+ns: null
 
-output_dir: "eval_outputs"  # Directory to save generated responses (relative to project root)
-force_generate: false  # If true, regenerate responses even if they exist
-num_samples: null # null = use full dataset
-max_new_tokens: 1000
-batch_size: 100
-epochs: 2
-
+overwrite: false
 seed: 42
+debug: false
+log_level: "info"
+sync: true  # If false, disables wandb logging
+
+hydra:
+  run:
+    dir: outputs/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}

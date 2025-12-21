@@ -6,17 +6,19 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+logger = logging.getLogger(__name__)
+
 
 class Generator:
     """Simple generator class for producing model responses from instructions."""
 
     def __init__(
         self,
-        max_new_tokens: int = 1000,
-        use_ensamble: bool = True,
+        max_prompt_length: int = 512,
+        max_new_tokens: int = 1024,
         batch_size: int = 10,
+        use_ensemble: bool = True,
         greedy_sampling: bool = True,
-        top_p_sampling: bool = False,
         temperature: float = 1.0,
         top_p: float = 0.9,
     ):
@@ -24,38 +26,75 @@ class Generator:
         Initialize generator.
 
         Args:
+            max_prompt_length: Maximum length for input prompts (truncation).
             max_new_tokens: Maximum number of new tokens to generate.
-            use_ensamble: Whether to use ensemble generation.
             batch_size: Batch size for generation.
-            greedy_sampling: Whether to use greedy sampling.
-            top_p_sampling: Whether to use top-p sampling.
-            temperature: Sampling temperature for top-p sampling.
-            top_p: Top-p sampling parameter (nucleus sampling).
+            use_ensemble: Whether to use ensemble generation (pessimistic).
+            greedy_sampling: If True, use greedy (argmax). If False, use top-p.
+            temperature: Sampling temperature (only used if greedy_sampling=False).
+            top_p: Top-p nucleus sampling threshold
+                (only used if greedy_sampling=False).
         """
-        if greedy_sampling and top_p_sampling:
-            raise ValueError(
-                "Greedy sampling and top-p sampling cannot be used together"
-            )
-        if not greedy_sampling and not top_p_sampling:
-            raise ValueError("Either greedy sampling or top-p sampling must be used")
+        self.max_prompt_length = max_prompt_length
         self.max_new_tokens = max_new_tokens
-        self.use_ensamble = use_ensamble
         self.batch_size = batch_size
+        self.use_ensemble = use_ensemble
         self.greedy_sampling = greedy_sampling
-        self.top_p_sampling = top_p_sampling
         self.temperature = temperature
         self.top_p = top_p
 
-    def _top_p_sampling(
-        self, logits: torch.Tensor, top_p: float = 0.9, temperature: float = 1.0
-    ) -> torch.Tensor:
-        scaled_logits = logits / temperature
+    def _process_prompts(
+        self,
+        prompts: list[str],
+        tokenizer: Any,
+        apply_chat_template: bool = True,
+    ) -> tuple[list[str], list[str]]:
+        """
+        Apply chat template, filter long prompts, and sort by length.
+
+        Returns:
+            Tuple of (original_prompts, formatted_prompts) sorted by length descending.
+        """
+        processed: list[tuple[str, str, int]] = []  # (original, formatted, length)
+
+        for prompt in prompts:
+            if apply_chat_template:
+                formatted = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            else:
+                formatted = prompt
+
+            tokens = tokenizer(formatted, truncation=False, add_special_tokens=False)
+            length = len(tokens["input_ids"])
+
+            if length <= self.max_prompt_length:
+                processed.append((prompt, formatted, length))
+
+        if len(processed) < len(prompts):
+            logger.warning(
+                f"Filtered {len(prompts) - len(processed)}/{len(prompts)} prompts "
+                f"exceeding {self.max_prompt_length} tokens."
+            )
+
+        processed.sort(key=lambda x: x[2], reverse=True)
+
+        original_prompts = [p[0] for p in processed]
+        formatted_prompts = [p[1] for p in processed]
+
+        return original_prompts, formatted_prompts
+
+    def _top_p_sample(self, logits: torch.Tensor) -> torch.Tensor:
+        """Sample from logits using top-p (nucleus) sampling."""
+        scaled_logits = logits / self.temperature
         probs = F.softmax(scaled_logits, dim=-1)
 
         sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
         cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
 
-        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove = cumulative_probs > self.top_p
         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
         sorted_indices_to_remove[..., 0] = 0
 
@@ -72,26 +111,26 @@ class Generator:
         model: Any,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        max_length: int = 1024,
-        use_ensamble: bool = True,
-        sample_missing_token: bool = False,
-        greedy_sampling: bool = False,
-        top_p_sampling: bool = True,
-        temperature: float = 1.0,
-        top_p: float = 0.9,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Generate tokens from input_ids using the model.
+
+        Args:
+            model: PEPOModel instance.
+            input_ids: Input token IDs (B, T).
+            attention_mask: Attention mask (B, T). If None, inferred from pad tokens.
+
+        Returns:
+            Tuple of (output_ids, output_mask) tensors.
         """
-        if greedy_sampling and top_p_sampling:
-            raise ValueError(
-                "Greedy sampling and top-p sampling cannot be used together"
-            )
+        logger.debug(f"Generate input size: {input_ids.shape}")
         if attention_mask is None:
             attention_mask = (input_ids != model.tokenizer.pad_token_id).float()
 
         batch_size = input_ids.shape[0]
+        max_length = input_ids.shape[1] + self.max_new_tokens
 
+        # Prepare inputs on each device
         device_input_ids = []
         device_attention_masks = []
         for model_idx in range(model.num_networks):
@@ -107,7 +146,7 @@ class Generator:
             if i > 0 and i % 100 == 0:
                 model.device_manager.clear_cache()
 
-            if use_ensamble:
+            if self.use_ensemble:
                 log_probs = model.predict(device_input_ids, device_attention_masks)
             else:
                 submodel = model.models[0]
@@ -117,42 +156,18 @@ class Generator:
                         log_probs = model._predict_submodel(
                             submodel, device_input_ids[0], device_attention_masks[0]
                         )
-            min_probs = torch.exp(log_probs)
 
-            if sample_missing_token:
-                missing_token_id = model.tokenizer.vocab_size
-                missing_probs = torch.clamp(1 - torch.sum(min_probs, dim=-1), min=0.0)
-                min_probs = torch.cat([min_probs, missing_probs.unsqueeze(-1)], dim=-1)
-                missing_mask = torch.ones(
-                    batch_size, dtype=torch.bool, device=min_probs.device
-                )
-                sampled_token_ids = torch.zeros(
-                    batch_size, dtype=torch.long, device=min_probs.device
-                )
-                while True:
-                    new_sampled_token_ids = torch.multinomial(
-                        min_probs[missing_mask], num_samples=1
-                    ).squeeze(-1)
-                    sampled_token_ids[missing_mask] = new_sampled_token_ids
-                    missing_mask = sampled_token_ids == missing_token_id
-                    if not torch.any(missing_mask):
-                        break
+            if self.greedy_sampling:
+                # argmax is equivalent to resampling until not missing token
+                # missing token has prob 1-sum(exp(logprobs))
+                sampled_token_ids = torch.argmax(log_probs, dim=-1)
             else:
-                if greedy_sampling:
-                    sampled_token_ids = torch.argmax(min_probs, dim=-1)
-                elif top_p_sampling:
-                    sampled_token_ids = self._top_p_sampling(
-                        log_probs,
-                        top_p=top_p,
-                        temperature=temperature,
-                    )
-                else:
-                    min_probs = min_probs / torch.sum(min_probs, dim=-1, keepdim=True)
-                    sampled_token_ids = torch.multinomial(min_probs, num_samples=1)
+                sampled_token_ids = self._top_p_sample(log_probs)
 
             stop_signal = stop_signal.to(device=sampled_token_ids.device) | (
                 sampled_token_ids == model.tokenizer.eos_token_id
             )
+
             for model_idx in range(model.num_networks):
                 device = torch.device(
                     model.device_manager.get_device_for_model(model_idx)
@@ -170,13 +185,9 @@ class Generator:
                 )
 
             pbar.set_postfix({"stopped": f"{stop_signal.sum().item()}/{batch_size}"})
-
-            if sampled_token_ids[0] == model.tokenizer.eos_token_id:
-                logger = logging.getLogger(__name__)
-                logger.debug(f"Generated EOS token at step {i}")
             if torch.all(stop_signal):
                 break
-        logger = logging.getLogger(__name__)
+
         decoded = model.tokenizer.decode(
             device_input_ids[0].cpu()[0], skip_special_tokens=True
         )
@@ -185,20 +196,15 @@ class Generator:
         return device_input_ids[0].cpu(), device_attention_masks[0].cpu()
 
     def get_name(self) -> str:
-        """
-        Get generator name.
-        """
-        parts = []
-        parts.append(f"mt{self.max_new_tokens}")
-        if self.greedy_sampling:
-            parts.append("greedy")
-        if self.top_p_sampling:
+        """Get generator name for file naming."""
+        parts = [f"mt{self.max_new_tokens}"]
+        if not self.greedy_sampling:
             parts.append("top-p")
             parts.append(f"t{self.temperature}")
             parts.append(f"p{self.top_p}")
-        if not self.use_ensamble:
+        if not self.use_ensemble:
             parts.append("single")
-        return "_".join(parts)
+        return "-".join(parts)
 
     def generate_responses(
         self,
@@ -207,10 +213,10 @@ class Generator:
         apply_chat_template: bool = True,
     ) -> list[dict[str, Any]]:
         """
-        Generate responses for a list of instructions.
+        Generate responses for a list of prompts.
 
         Args:
-            model: Model instance with generate() method and get_tokenizer() method.
+            model: PEPOModel instance.
             prompts: List of prompt strings.
             apply_chat_template: Whether to apply chat template to prompts.
 
@@ -218,19 +224,19 @@ class Generator:
             List of dictionaries with 'prompt' and 'output' keys.
         """
         tokenizer = model.get_tokenizer()
+        prompts, formatted_prompts = self._process_prompts(
+            prompts, tokenizer, apply_chat_template
+        )
         outputs = []
-        logger = logging.getLogger(__name__)
 
         logger.info(f"Generating responses for {len(prompts)} prompts")
         logger.info("Generation parameters:")
+        logger.info(f"  max_prompt_length: {self.max_prompt_length}")
         logger.info(f"  max_new_tokens: {self.max_new_tokens}")
         logger.info(f"  batch_size: {self.batch_size}")
-        logger.info(f"  use_ensamble: {self.use_ensamble}")
-        logger.info(f"  apply_chat_template: {apply_chat_template}")
-        if self.greedy_sampling:
-            logger.info("  greedy_sampling: true")
-        if self.top_p_sampling:
-            logger.info("  top_p_sampling: true")
+        logger.info(f"  use_ensemble: {self.use_ensemble}")
+        logger.info(f"  greedy_sampling: {self.greedy_sampling}")
+        if not self.greedy_sampling:
             logger.info(f"  temperature: {self.temperature}")
             logger.info(f"  top_p: {self.top_p}")
 
@@ -240,41 +246,22 @@ class Generator:
             logger.info(f"Generating batch {batch_num}/{total_batches}")
 
             batch_prompts = prompts[i : i + self.batch_size]
-
-            if apply_chat_template:
-                formatted_batch_prompts = [
-                    tokenizer.apply_chat_template(
-                        [{"role": "user", "content": prompt}],
-                        tokenize=False,
-                        add_generation_prompt=True,
-                    )
-                    for prompt in batch_prompts
-                ]
-            else:
-                formatted_batch_prompts = batch_prompts
+            batch_formatted = formatted_prompts[i : i + self.batch_size]
 
             tokenizer.padding_side = "left"
             tokenized = tokenizer(
-                formatted_batch_prompts,
+                batch_formatted,
                 return_tensors="pt",
                 padding=True,
-                truncation=True,
-                max_length=512,
+                truncation=False,  # already filtered out the long prompts
             )
             input_ids = tokenized["input_ids"]
             attention_mask = tokenized["attention_mask"]
 
-            max_total_length = input_ids.shape[1] + self.max_new_tokens
             output_ids, output_mask = self.generate(
                 model=model,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_length=max_total_length,
-                use_ensamble=self.use_ensamble,
-                top_p_sampling=self.top_p_sampling,
-                greedy_sampling=self.greedy_sampling,
-                temperature=self.temperature,
-                top_p=self.top_p,
             )
 
             starting_idx = input_ids.shape[1]
@@ -286,5 +273,4 @@ class Generator:
                 outputs.append({"prompt": prompt, "output": response})
 
         logger.info(f"Successfully generated {len(outputs)} responses")
-
         return outputs

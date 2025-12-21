@@ -1,7 +1,0 @@
-# Hub Manager Configuration for Evaluation
-_target_: pepo.utils.hub.HubManager
-
-base_dir: "PessimisticDPO"
-load: true
-push: false
-load_trainable: false

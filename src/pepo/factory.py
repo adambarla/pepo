@@ -82,14 +82,12 @@ class PEPOFactory:
             model=model,
             tokenizer=self.tokenizer,
             model_idx=model_idx,
-            epochs=epochs,
+            epoch=epochs,
         )
 
     def _init_tokenizer(self) -> AutoTokenizer:
         tokenizer_id = self.tokenizer_id or self.model_id
-        tokenizer = AutoTokenizer.from_pretrained(  # type: ignore[no-untyped-call]
-            tokenizer_id
-        )
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
 
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -105,7 +103,7 @@ class PEPOFactory:
                 "Consider providing one in the model config."
             )
 
-        return tokenizer  # type: ignore[no-any-return]
+        return tokenizer
 
     def get_repo_name(self, epoch: Optional[int] = None) -> str:
         model_name = self.model_id.rsplit("/", 1)[-1]
@@ -114,9 +112,11 @@ class PEPOFactory:
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
 
-    def get_model_name(self) -> str:
+    def get_model_name(self, epoch: Optional[int] = None) -> str:
         model_name = self.model_id.rsplit("/", 1)[-1]
-        repo_name = f"{model_name}-pepo-a{self.alpha}-b{self.beta}-L{self.num_networks}"
+        repo_name = f"{model_name}-a{self.alpha}-b{self.beta}-L{self.num_networks}"
+        if epoch is not None:
+            repo_name = f"{repo_name}-e{epoch}"
         return repo_name
 
     def get_submodel_name(self, model_idx: int) -> str:
@@ -140,18 +140,15 @@ class PEPOFactory:
             ),
         )
         base_model.config.use_cache = False
-        base_model.gradient_checkpointing_enable()  # type: ignore[no-untyped-call]
+        base_model.gradient_checkpointing_enable()
         if hasattr(base_model, "enable_input_require_grads"):
-            base_model.enable_input_require_grads()  # type: ignore[no-untyped-call]
+            base_model.enable_input_require_grads()
 
         model_name = self.get_submodel_name(model_idx)
 
         if load_from_hub:
-            if not self.hub_manager.model_exists(model_name, epoch):
-                raise ValueError(f"Model {model_name} (epoch {epoch}) not found in hub")
-
             model: PeftModel = self.hub_manager.load_model(
-                base_model, model_name, epochs=epoch
+                base_model, model_name, epoch=epoch
             )
 
         else:
@@ -159,7 +156,7 @@ class PEPOFactory:
                 r=self.lora_r,
                 lora_alpha=self.lora_alpha,
                 lora_dropout=self.lora_dropout,
-                bias=self.lora_bias,  # type: ignore[arg-type]
+                bias=self.lora_bias,
                 task_type=self.lora_task_type,
                 target_modules=self.lora_target_modules,
             )

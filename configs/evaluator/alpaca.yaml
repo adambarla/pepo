@@ -1,12 +1,7 @@
-# AlpacaEval Evaluator Configuration
 _target_: pepo.evaluator.alpaca.AlpacaEvalEvaluator
 
-# Generator is now provided by the model (model.generator)
-# Dataset configuration
 dataset_id: "tatsu-lab/alpaca_eval"
-dataset_name: "alpaca_eval"  # Dataset configuration name
 dataset_split: "eval"
-instruction_key: "instruction"  # Key to extract instruction from dataset items
 annotators_config:
   llama3_70b_judge:
     prompt_template: alpaca_eval_llama3_70b_fn
@@ -20,8 +15,5 @@ annotators_config:
     fn_completions: "huggingface_local_completions"
     fn_completion_parser: "ranking_parser"
 
-# Output configuration
-output_dir: "outputs"
-
-# Optional configuration
-num_samples: null  # null = use full dataset
+output_dir: "${hydra:runtime.cwd}/eval_outputs"
+num_samples: null

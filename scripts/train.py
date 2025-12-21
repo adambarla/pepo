@@ -1,8 +1,8 @@
-# script to train the pepo model, using a hydra config file,
-# log the training process to wb and save the model to huggingface
 import os
 
-os.environ["TOKENIZERS_PARALLELISM"] = "true"
+# Prevent CUDA memory fragmentation (must be set before any CUDA operations)
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import multiprocessing
 
@@ -15,38 +15,73 @@ except RuntimeError:
         "with CUDA and threading."
     )
 
-
+import warnings
 from typing import Any, cast
 
 import hydra
 from hydra.utils import instantiate
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, SCMode
 
 from pepo.utils import WandbManager, constants, set_seed, setup_logging
 
-OmegaConf.register_new_resolver(
-    "pepo.constants",
-    lambda name: getattr(constants, name),
+warnings.filterwarnings(
+    "ignore", message=".*pkg_resources is deprecated.*", category=UserWarning
 )
 
+try:
+    OmegaConf.register_new_resolver(
+        "pepo.constants",
+        lambda name: getattr(constants, name),
+    )
+except ValueError:
+    pass  # Already registered
 
-@hydra.main(config_path="../configs", config_name="train.yaml", version_base="1.1")
+
+@hydra.main(config_path="../configs", config_name="train", version_base="1.1")  # type: ignore
 def main(cfg: DictConfig) -> None:
+    # Setup logging
+    debug = cfg.get("debug", False)
     log_level_str = cfg.get("log_level", "INFO").upper()
+    if debug:
+        log_level_str = "DEBUG"
     logger = setup_logging(level=log_level_str)
 
     resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
-    logger.info("PEPO Training - Starting")
-    logger.info(f"Configuration:\n{OmegaConf.to_yaml(resolved_cfg)}")
+    logger.info("PEPO Training Script - Starting")
+    logger.debug(f"Configuration:\n{OmegaConf.to_yaml(resolved_cfg)}")
 
-    wandb_config = cfg.wandb
+    set_seed(cfg.seed)
+
+    # Instantiate managers
+    device_manager = instantiate(cfg.device)
+    hub_manager = instantiate(cfg.hub)
+
+    model = instantiate(
+        cfg.model,
+        device_manager=device_manager,
+        hub_manager=hub_manager,
+    )
+
+    if model.trainer is None:
+        raise ValueError("Trainer not configured in model config.")
+
+    # Setup Data Manager
+    data_manager = instantiate(
+        cfg.dataset,
+        tokenizer=model.get_tokenizer(),
+        ref_model_id=model.model_id,
+        inference_batch_size=cfg.model.trainer.eval_batch_size,
+        device_manager=device_manager,
+    )
+
+    # Setup WandB
+    wandb_config = cfg.get("wandb", OmegaConf.create({"enabled": False}))
     wandb_manager = None
-    resolved_cfg_plain = None
     if wandb_config.enabled:
         resolved_cfg_plain = OmegaConf.to_container(
             cfg,
             resolve=True,
-            structured_config_mode=False,  # type: ignore[arg-type]
+            structured_config_mode=SCMode.DICT,
         )
         wandb_manager = WandbManager(
             enabled=True,
@@ -57,46 +92,19 @@ def main(cfg: DictConfig) -> None:
             mode=wandb_config.mode,
             cfg=cast("dict[str, Any] | None", resolved_cfg_plain),
         )
-        logger.info("Weights & Biases logging enabled")
 
-    set_seed(cfg.seed)
-    logger.info(f"Random seed set to: {cfg.seed}")
+    continue_training = cfg.get("continue", False)
+    max_epochs = cfg.get("e", 3)
 
-    device_manager = instantiate(cfg.device)
-
-    hub_manager = instantiate(cfg.hub)
-
-    model = instantiate(
-        cfg.model,
-        device_manager=device_manager,
-        hub_manager=hub_manager,
-    )
-
-    generator = None
-    if "generator" in cfg.model:
-        generator = instantiate(cfg.model.generator)
-        model.generator = generator
-
-    data_manager = instantiate(
-        cfg.dataset,
-        tokenizer=model.get_tokenizer(),
-        ref_model_id=model.model_id,
-        inference_batch_size=cfg.model.trainer.eval_batch_size,
-        device_manager=device_manager,
-    )
-
-    if model.trainer is None:
-        raise ValueError("Trainer not configured in model config.")
-
-    if cfg.get("continue", False):
-        model.trainer.continue_training = True
-
-    max_epochs = cfg.max_epochs
+    logger.info(f"Starting training for {max_epochs} epochs...")
     model.train(
         data_manager=data_manager,
         max_epochs=max_epochs,
         wandb_manager=wandb_manager,
+        continue_training=continue_training,
     )
+
+    logger.info("Training complete.")
 
 
 if __name__ == "__main__":

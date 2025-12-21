@@ -1,10 +1,6 @@
-out/*
 logs/*
-outputs/
-outputs
-out/
 logs/
-**/*outputs/
+**/*out*
 .venv/
 .venv
 arena-hard-auto/logs/*

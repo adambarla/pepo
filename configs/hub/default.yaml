@@ -2,6 +2,5 @@
 _target_: pepo.utils.hub.HubManager
 
 base_dir: "PessimisticDPO"  # HuggingFace username/organization
-load: false
 push: false
 load_trainable: true

@@ -1,10 +1,11 @@
+import copy
 import hashlib
 import logging
 import os
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, cast
+from typing import Any, Dict, List, Optional, cast
 
 import numpy as np
 import torch
@@ -68,21 +69,21 @@ class DataCollator:
         chosen_texts = [f["chosen_text"] for f in features]
         reject_texts = [f["rejected_text"] for f in features]
 
-        prompt_encoded = self.tokenizer(  # type: ignore[operator]
+        prompt_encoded = self.tokenizer(
             prompt_texts,
             padding=True,
             truncation=self.max_prompt_length is not None,
             max_length=self.max_prompt_length,
             return_tensors="pt",
         )
-        chosen_encoded = self.tokenizer(  # type: ignore[operator]
+        chosen_encoded = self.tokenizer(
             chosen_texts,
             padding=True,
             truncation=self.max_length is not None,
             max_length=self.max_length,
             return_tensors="pt",
         )
-        reject_encoded = self.tokenizer(  # type: ignore[operator]
+        reject_encoded = self.tokenizer(
             reject_texts,
             padding=True,
             truncation=self.max_length is not None,
@@ -151,6 +152,7 @@ class DataManager:
         ref_model_id: Optional[str] = None,
         inference_batch_size: int = 8,
         device_manager: Optional[DeviceManager] = None,
+        shuffle_train: bool = True,
     ):
         """
         Args:
@@ -205,6 +207,7 @@ class DataManager:
         self.dataloader_prefetch_factor = (
             dataloader_prefetch_factor if self.dataloader_num_workers > 0 else None
         )
+        self.shuffle_train = shuffle_train
 
         logger.info(f"Dataloader num workers: {self.dataloader_num_workers}")
         logger.info(f"Dataloader pin memory: {self.dataloader_pin_memory}")
@@ -237,7 +240,7 @@ class DataManager:
             "max_length": self.max_length,
             "max_prompt_length": self.max_prompt_length,
             "tokenizer": tokenizer_name,
-            "pad_token_id": self.tokenizer.pad_token_id,  # type: ignore[attr-defined]
+            "pad_token_id": self.tokenizer.pad_token_id,
             "chat_template": chat_template_hash,
             "ref_model_id": self.ref_model_id or "none",
         }
@@ -316,17 +319,17 @@ class DataManager:
             return True
 
         if self.max_prompt_length is not None:
-            prompt_tokens = self.tokenizer(prompt_str, truncation=False)  # type: ignore[operator]
+            prompt_tokens = self.tokenizer(prompt_str, truncation=False)
             prompt_len = len(prompt_tokens["input_ids"])
             if prompt_len > self.max_prompt_length:
                 return False
 
         if self.max_length is not None:
-            chosen_tokens = self.tokenizer(chosen_str, truncation=False)  # type: ignore[operator]
+            chosen_tokens = self.tokenizer(chosen_str, truncation=False)
             chosen_len = len(chosen_tokens["input_ids"])
             if chosen_len > self.max_length:
                 return False
-            reject_tokens = self.tokenizer(reject_str, truncation=False)  # type: ignore[operator]
+            reject_tokens = self.tokenizer(reject_str, truncation=False)
             reject_len = len(reject_tokens["input_ids"])
             if reject_len > self.max_length:
                 return False
@@ -356,16 +359,16 @@ class DataManager:
             if curr_prompt is None or curr_chosen is None or curr_reject is None:
                 continue
 
-            prompt_str = self.tokenizer.apply_chat_template(  # type: ignore[attr-defined]
+            prompt_str = self.tokenizer.apply_chat_template(
                 curr_prompt, tokenize=False, add_generation_prompt=True
             )
             chosen_str = (
-                self.tokenizer.apply_chat_template(curr_chosen, tokenize=False)  # type: ignore[attr-defined]
-                + self.tokenizer.eos_token  # type: ignore[attr-defined]
+                self.tokenizer.apply_chat_template(curr_chosen, tokenize=False)
+                + self.tokenizer.eos_token
             )
             reject_str = (
-                self.tokenizer.apply_chat_template(curr_reject, tokenize=False)  # type: ignore[attr-defined]
-                + self.tokenizer.eos_token  # type: ignore[attr-defined]
+                self.tokenizer.apply_chat_template(curr_reject, tokenize=False)
+                + self.tokenizer.eos_token
             )
 
             if not self._is_valid_length(prompt_str, chosen_str, reject_str):
@@ -504,9 +507,11 @@ class DataManager:
                     self.ref_model_id,
                     dtype=self.device_manager.dtype,
                     device_map=device_str,
+                    attn_implementation="sdpa",  # Match training config
                 ),
             )
-            model.eval()  # type: ignore[attr-defined]
+            model.config.use_cache = False  # Match training config
+            model.eval()
             models.append(model)
 
         total_size = len(dataset)
@@ -617,8 +622,9 @@ class DataManager:
     def get_dataloader(
         self,
         model_idx: int,
-        partition: Literal["train", "eval"],
+        partition: str,
         batch_size: int,
+        shuffle: Optional[bool] = None,
     ) -> DataLoader[dict[str, torch.Tensor]]:
         """
         Get DataLoader for a specific model and partition.
@@ -627,6 +633,7 @@ class DataManager:
             model_idx: Index of the model in the ensemble (0 to n_splits-1).
             partition: Either "train" or "eval".
             batch_size: Batch size for the DataLoader.
+            shuffle: Override shuffle behavior. None uses default (True for train).
 
         Returns:
             DataLoader for the specified model and partition.
@@ -638,15 +645,17 @@ class DataManager:
 
         if partition == "train":
             dataset = self.train_datasets[model_idx]
-            shuffle_batches = True
+            shuffle_batches = self.shuffle_train if shuffle is None else shuffle
         elif partition == "eval":
             dataset = self.eval_dataset
-            shuffle_batches = False
+            shuffle_batches = False if shuffle is None else shuffle
         else:
             raise ValueError(f"Partition must be 'train' or 'eval', got '{partition}'")
 
+        tokenizer_copy = copy.deepcopy(self.tokenizer)
+
         collator = DataCollator(
-            tokenizer=self.tokenizer,
+            tokenizer=tokenizer_copy,
             max_length=self.max_length,
             max_prompt_length=self.max_prompt_length,
         )

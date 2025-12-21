@@ -9,9 +9,9 @@ _target_: pepo.model.PEPOModel
 alpha: 0.1
 beta: 0.1
 num_networks: 8 # placeholder, will be overridden by L
-model_id: "HuggingFaceTB/SmolLM2-1.7B"
+model_id: "alignment-handbook/zephyr-7b-sft-full"
 tokenizer_id: null
-chat_template: ${pepo.constants:SMOLLM_CHAT_TEMPLATE}
+chat_template: null # use the provided one
 lora_r: 16
 lora_alpha: 16
 lora_dropout: 0.05
@@ -21,9 +21,9 @@ lora_target_modules: "all-linear"
 compile: false
 
 trainer:
-  train_batch_size: 128  # Updated 2025-12-19
+  train_batch_size: 64  # Updated 2025-12-19
   eval_batch_size: 256  # Updated 2025-12-18 by find_optimal_batch_sizes.py
   gradient_accumulation_steps: 1
 
 generator:
-  batch_size: 256  # Updated 2025-12-18 by find_optimal_batch_sizes.py
+  batch_size: 128  # Updated 2025-12-18
