@@ -238,9 +238,6 @@ class PEPOModel:
         for model_idx in range(self.num_networks):
             submodel_name = self.get_submodel_name(model_idx)
             if not self.hub_manager.model_exists(submodel_name, epoch):
-                logger.info(
-                    f"Submodel {submodel_name} (epoch {epoch}) not found on hub."
-                )
                 return False
         return True
 

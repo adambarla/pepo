@@ -35,7 +35,7 @@ def get_log_probs(
     attention_mask = attention_mask.to(device)
     response_mask = response_mask.to(device)
 
-    outputs = model(input_ids=input_ids, attention_mask=attention_mask)  # type: ignore[operator]
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
     logits = outputs.logits
 
     shift_logits = logits[:, :-1, :].contiguous()

@@ -202,18 +202,28 @@ class AlpacaEvalEvaluator(BaseEvaluator):
                 model_metrics = df_leaderboard.loc[target_idx]
                 metrics_to_log = {}
 
-                if "length_controlled_winrate" in model_metrics:
-                    metrics_to_log[f"{metric_prefix}/length_controlled_winrate"] = (
-                        model_metrics["length_controlled_winrate"]
-                    )
-                if "win_rate" in model_metrics:
-                    metrics_to_log[f"{metric_prefix}/win_rate"] = model_metrics[
-                        "win_rate"
+                metric_names = [
+                    "length_controlled_winrate",
+                    "lc_standard_error",
+                    "win_rate",
+                    "standard_error",
+                    "avg_length",
+                    "n_wins",
+                    "n_wins_base",
+                    "n_draws",
+                    "n_total",
+                    "discrete_win_rate",
+                ]
+                for metric_name in metric_names:
+                    if metric_name not in model_metrics:
+                        logger.warning(
+                            f"Metric '{metric_name}' not found in leaderboard"
+                        )
+                        continue
+                    metrics_to_log[f"{metric_prefix}/{metric_name}"] = model_metrics[
+                        metric_name
                     ]
-                if "avg_length" in model_metrics:
-                    metrics_to_log[f"{metric_prefix}/avg_length"] = model_metrics[
-                        "avg_length"
-                    ]
+
                 if epoch is not None:
                     metrics_to_log[f"{metric_prefix}/epoch"] = epoch
 
