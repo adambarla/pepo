@@ -274,7 +274,7 @@ class DEPPOTrainer(BaseTrainer):
         model = self.model.models[model_idx]
 
         if wandb_run is not None and wandb_run.enabled:
-            wandb_run.init_train_run()
+            wandb_run.init_run()
 
         n_batches = len(train_loader)
 

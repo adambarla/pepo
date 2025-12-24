@@ -22,6 +22,7 @@ import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf, SCMode
 
+from pepo.base_model import BaseModel
 from pepo.utils import WandbManager, constants, set_seed, setup_logging
 
 warnings.filterwarnings(
@@ -56,20 +57,20 @@ def main(cfg: DictConfig) -> None:
     device_manager = instantiate(cfg.device)
     hub_manager = instantiate(cfg.hub)
 
-    model = instantiate(
+    model: BaseModel = instantiate(
         cfg.model,
         device_manager=device_manager,
         hub_manager=hub_manager,
     )
 
-    if model.trainer is None:
+    if model._trainer is None:
         raise ValueError("Trainer not configured in model config.")
 
     # Setup Data Manager
     data_manager = instantiate(
         cfg.dataset,
         tokenizer=model.get_tokenizer(),
-        ref_model_id=model.model_id,
+        ref_model_id=cfg.model.model_id,
         inference_batch_size=cfg.model.trainer.eval_batch_size,
         device_manager=device_manager,
     )

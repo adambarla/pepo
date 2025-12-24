@@ -6,8 +6,8 @@ import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
+from pepo.base_model import BaseModel
 from pepo.evaluator.base import BaseEvaluator
-from pepo.model import PEPOModel
 from pepo.utils import constants, setup_logging, strip_hydra_targets
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -44,7 +44,7 @@ def main(cfg: DictConfig) -> None:
     device_manager = instantiate(cfg.device)
     hub_manager = instantiate(cfg.hub)
 
-    model: PEPOModel = instantiate(
+    model: BaseModel = instantiate(
         cfg.model,
         device_manager=device_manager,
         hub_manager=hub_manager,
@@ -71,10 +71,10 @@ def main(cfg: DictConfig) -> None:
         )
     if wandb_manager is not None:
         wandb_run = wandb_manager.get_evaluation_handler(
-            model=model, generator=model.generator
+            model=model, generator=model.generator, epoch=epoch
         )
     if wandb_run is not None:
-        wandb_run.init_eval_run()
+        wandb_run.init_run()
         logger.info(f"WandB evaluation run initialized: {wandb_run.run_id}")
 
     evaluator: BaseEvaluator = instantiate(cfg.evaluator, wandb_run=wandb_run)
