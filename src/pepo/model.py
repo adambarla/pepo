@@ -7,11 +7,12 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn.functional as F
 from peft import PeftModel
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .factory import PEPOFactory
+from .base_model import BaseModel
+from .factory import DEPPOFactory
 from .generator import Generator
-from .trainer import Trainer
+from .trainer import DEPPOTrainer
 from .utils import DeviceManager, HubManager
 from .utils.model_utils import get_log_probs
 
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 _warned_missing_ref_logprobs = False
 
 
-class PEPOModel:
+class DEPPOModel(BaseModel):
     def __init__(
         self,
         alpha: float,
@@ -39,7 +40,7 @@ class PEPOModel:
         lora_task_type: str = "CAUSAL_LM",
         lora_target_modules: str = "all-linear",
         compile: bool = False,
-        trainer: Optional[Trainer] = None,
+        trainer: Optional[DEPPOTrainer] = None,
         generator: Optional[Generator] = None,
         debug: bool = False,
     ):
@@ -48,21 +49,21 @@ class PEPOModel:
         """
         self.alpha = alpha
         self.beta = beta
-        self.num_networks = num_networks
+        self._num_models = num_networks
         self.model_id = model_id
-        self.device_manager = device_manager
-        self.hub_manager = hub_manager
+        self._device_manager = device_manager
+        self._hub_manager = hub_manager
         self.tokenizer_id = tokenizer_id
         self.chat_template = chat_template
-        self.trainer = trainer
+        self._trainer = trainer
         self.generator = generator
         self.debug = debug
 
         # Initialize Factory
-        self.factory = PEPOFactory(
+        self.factory = DEPPOFactory(
             alpha=alpha,
             beta=beta,
-            num_networks=num_networks,
+            num_networks=self._num_models,
             model_id=model_id,
             device_manager=device_manager,
             hub_manager=hub_manager,
@@ -77,19 +78,35 @@ class PEPOModel:
             compile=compile,
         )
 
-        self.tokenizer = self.factory.tokenizer
+        self._tokenizer = self.factory.tokenizer
         self._models: list[PeftModel] | None = None  # lazy loaded
-        self.epochs_per_network: list[Optional[int]] = [0] * self.num_networks
+        self.epochs_per_model: list[Optional[int]] = [0] * self._num_models
 
         logger.info(
-            f"PEPOModel initialized with alpha={self.alpha}, "
-            f"beta={self.beta}, L={self.num_networks}"
+            f"DEPPOModel initialized with alpha={self.alpha}, "
+            f"beta={self.beta}, L={self._num_models}"
         )
+
+    @property
+    def num_models(self) -> int:
+        return self._num_models
+
+    @property
+    def tokenizer(self) -> AutoTokenizer:
+        return self._tokenizer
+
+    @property
+    def device_manager(self) -> DeviceManager:
+        return self._device_manager
+
+    @property
+    def hub_manager(self) -> HubManager:
+        return self._hub_manager
 
     def init_trainer(self) -> None:
         """Initialize the trainer if it's a partial."""
-        if isinstance(self.trainer, functools.partial):
-            self.trainer = self.trainer()
+        if isinstance(self._trainer, functools.partial):
+            self._trainer = self._trainer()
 
     def train(
         self,
@@ -106,11 +123,11 @@ class PEPOModel:
             max_epochs: Maximum number of epochs to train for.
             wandb_manager: Optional WandbManager instance for logging.
         """
-        if self.trainer is None:
+        if self._trainer is None:
             raise ValueError("Trainer not configured in model config.")
 
         self.init_trainer()
-        self.trainer.train(
+        self._trainer.train(
             model=self,
             data_manager=data_manager,
             max_epochs=max_epochs,
@@ -118,7 +135,7 @@ class PEPOModel:
             continue_training=continue_training,
         )
 
-    def load_models(self, init_new: bool = False, epoch: Optional[int] = None) -> None:
+    def load(self, init_new: bool = False, epoch: Optional[int] = None) -> None:
         """
         Load models into memory.
 
@@ -133,7 +150,7 @@ class PEPOModel:
             return
         self._models = self.factory.load_models(init_new=init_new, epoch=epoch)
         if epoch is not None:
-            self.epochs_per_network = [epoch] * self.num_networks
+            self.epochs_per_model = [epoch] * self._num_models
 
     def _check_models_loaded(self, expected_epoch: Optional[int] = None) -> None:
         """
@@ -152,28 +169,25 @@ class PEPOModel:
                 else ""
             )
             raise RuntimeError(
-                "Models are not loaded. Call model.load_models() "
+                "Models are not loaded. Call model.load() "
                 f"before using the model. {epoch_msg}"
             )
 
         if expected_epoch is not None:
-            current_epoch = (
-                self.epochs_per_network[0] if self.epochs_per_network else None
-            )
+            current_epoch = self.epochs_per_model[0] if self.epochs_per_model else None
             if current_epoch != expected_epoch:
                 raise RuntimeError(
                     f"Models are loaded from epoch {current_epoch}, "
                     f"but expected epoch {expected_epoch}. "
-                    f"Call model.load_models(epoch={expected_epoch}) "
+                    f"Call model.load(epoch={expected_epoch}) "
                     "to load the correct checkpoint."
                 )
 
     @property
-    def models(self):
+    def models(self) -> list[PeftModel]:
         if self._models is None:
             raise RuntimeError(
-                "Models are not loaded. Call model.load_models() "
-                "before accessing model.models"
+                "Models are not loaded. Call model.load() before accessing model.models"
             )
         return self._models
 
@@ -181,7 +195,7 @@ class PEPOModel:
     def models(self, value):
         self._models = value
 
-    def unload_models(self) -> None:
+    def unload(self) -> None:
         """
         Unload all submodels from GPU memory to free up resources.
         """
@@ -195,8 +209,8 @@ class PEPOModel:
             del model
 
         self._models = None
-        self.device_manager.clear_cache()
-        self.epochs_per_network = [0] * self.num_networks
+        self._device_manager.clear_cache()
+        self.epochs_per_model = [0] * self._num_models
 
         logger.info("All submodels unloaded from GPU memory")
 
@@ -213,16 +227,8 @@ class PEPOModel:
         """
         self.factory.push_submodel(self.models[model_idx], model_idx, epochs)
 
-    def get_tokenizer(self):
-        return self.tokenizer
-
-    def get_min_epochs(self) -> Optional[int]:
-        if not self.epochs_per_network:
-            return 0
-        epochs_list = [e for e in self.epochs_per_network if e is not None]
-        if not epochs_list:
-            return None
-        return min(epochs_list)
+    def get_tokenizer(self) -> AutoTokenizer:
+        return self._tokenizer
 
     def can_load_from_epoch(self, epoch: int) -> bool:
         """
@@ -235,9 +241,9 @@ class PEPOModel:
             True if all submodels have checkpoints at the specified epoch,
             False otherwise.
         """
-        for model_idx in range(self.num_networks):
+        for model_idx in range(self._num_models):
             submodel_name = self.get_submodel_name(model_idx)
-            if not self.hub_manager.model_exists(submodel_name, epoch):
+            if not self._hub_manager.model_exists(submodel_name, epoch):
                 return False
         return True
 
@@ -252,9 +258,9 @@ class PEPOModel:
 
         if self._models is not None:
             logger.info("Unloading existing models before loading from checkpoint...")
-            self.unload_models()
+            self.unload()
 
-        self.load_models(init_new=False, epoch=epoch)
+        self.load(init_new=False, epoch=epoch)
 
         logger.info(f"Successfully loaded models from epoch {epoch} checkpoint")
 
@@ -267,10 +273,10 @@ class PEPOModel:
     def _get_base_model_name(self) -> str:
         return self.model_id.rsplit("/", 1)[-1]
 
-    def _loss_fn(
+    def loss_fn(
         self,
         batch: Dict[str, torch.Tensor],
-        model: AutoModelForCausalLM,
+        model: PeftModel,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch = {k: v.to(device) for k, v in batch.items()}
@@ -352,8 +358,8 @@ class PEPOModel:
         """
         self._check_models_loaded()
 
-        log_probs_ensemble: list[Optional[torch.Tensor]] = [None] * self.num_networks
-        thread_exceptions: list[Optional[BaseException]] = [None] * self.num_networks
+        log_probs_ensemble: list[Optional[torch.Tensor]] = [None] * self._num_models
+        thread_exceptions: list[Optional[BaseException]] = [None] * self._num_models
 
         def predict_log_probs(model_idx, model, input_ids, attention_mask):
             try:
@@ -365,7 +371,7 @@ class PEPOModel:
                 thread_exceptions[model_idx] = e
 
         threads = []
-        for model_idx in range(self.num_networks):
+        for model_idx in range(self._num_models):
             thread = threading.Thread(
                 target=predict_log_probs,
                 args=(
@@ -388,9 +394,9 @@ class PEPOModel:
                     f"Exception in submodel {model_idx} prediction"
                 ) from exc
 
-        if len(log_probs_ensemble) != self.num_networks:
+        if len(log_probs_ensemble) != self._num_models:
             raise RuntimeError(
-                f"Expected {self.num_networks} log prob tensors, "
+                f"Expected {self._num_models} log prob tensors, "
                 f"got {len(log_probs_ensemble)}"
             )
         if len(log_probs_ensemble) == 1:
@@ -454,32 +460,3 @@ class PEPOModel:
             prompts=prompts,
             apply_chat_template=apply_chat_template,
         )
-
-    def generate_base_model(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Generate using base model (single model, no ensemble).
-
-        Note: Temporarily sets generator.use_ensemble=False for this call.
-        """
-        self._check_models_loaded()
-
-        if self.generator is None:
-            raise ValueError(
-                "Generator not set on model. Cannot generate without generator."
-            )
-
-        # Temporarily disable ensemble for base model generation
-        original_use_ensemble = self.generator.use_ensemble
-        self.generator.use_ensemble = False
-        try:
-            return self.generator.generate(
-                model=self,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            )
-        finally:
-            self.generator.use_ensemble = original_use_ensemble

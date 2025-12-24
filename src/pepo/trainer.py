@@ -1,6 +1,9 @@
 import logging
 import threading
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
+
+if TYPE_CHECKING:
+    from .base_model import BaseModel
 
 import torch
 from omegaconf import DictConfig
@@ -8,13 +11,14 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import get_scheduler
 
+from .base_trainer import BaseTrainer
 from .utils import DataManager, WandbManager, WandbRun
 
 logger = logging.getLogger(__name__)
 
 
-class Trainer:
-    """Trainer class for PEPO ensemble models."""
+class DEPPOTrainer(BaseTrainer):
+    """Trainer class for DEPPO ensemble models."""
 
     def __init__(
         self,
@@ -86,7 +90,7 @@ class Trainer:
 
         self.data_manager = data_manager
 
-        for model_idx in range(self.model.num_networks):
+        for model_idx in range(self.model.num_models):
             model_params = self.model.models[model_idx].parameters()
 
             optimizer = self.optimizer_factory(params=model_params)
@@ -119,37 +123,42 @@ class Trainer:
 
     def train(
         self,
-        model: Any,
+        model: "BaseModel",
         data_manager: DataManager,
         max_epochs: int,
         wandb_manager: Optional[WandbManager] = None,
         continue_training: bool = False,
     ) -> None:
         """
-        Train the PEPO ensemble models and save the models to the hub.
+        Train the DEPPO ensemble models and save the models to the hub.
         Uses threading to run models in parallel on different GPUs.
 
         Args:
-            model: PEPOModel instance to train.
+            model: DEPPOModel instance to train (typed as BaseModel for Liskov).
             data_manager: Data manager for training data.
             max_epochs: Maximum number of epochs to train for.
             wandb_manager: Optional WandbManager instance for logging.
         """
-        self.model = model
+        # Cast to DEPPOModel - this trainer requires DEPPOModel-specific attributes
+        from .model import DEPPOModel  # Local import to avoid circular import
+
+        if not isinstance(model, DEPPOModel):
+            raise TypeError(f"DEPPOTrainer requires DEPPOModel, got {type(model)}")
+        self.model: DEPPOModel = model
 
         # Load models if not already loaded
         if self.model._models is None:
             if continue_training:
                 model_name = model.get_name()
                 latest_epoch = model.hub_manager.find_latest_epoch_for_all_submodels(
-                    model_name, model.num_networks, max_epoch=max_epochs
+                    model_name, model.num_models, max_epoch=max_epochs
                 )
                 if latest_epoch is None:
                     logger.warning(
                         "Continue training enabled but no checkpoint found. "
                         "Starting training from scratch with new models."
                     )
-                    self.model.load_models(init_new=True)
+                    self.model.load(init_new=True)
                 elif self.model.can_load_from_epoch(latest_epoch):
                     logger.info(
                         f"Continuing training from checkpoint: epoch {latest_epoch}"
@@ -161,10 +170,10 @@ class Trainer:
                         f"epoch {latest_epoch}. "
                         "Starting training from scratch with new models."
                     )
-                    self.model.load_models(init_new=True)
+                    self.model.load(init_new=True)
             else:
                 logger.info("Initializing new models for training...")
-                self.model.load_models(init_new=True)
+                self.model.load(init_new=True)
         else:
             logger.info("Models already loaded. Using existing models for training.")
 
@@ -190,7 +199,7 @@ class Trainer:
                     )
                 stop_event.set()  # Signal other threads to stop
 
-        for model_idx in range(self.model.num_networks):
+        for model_idx in range(self.model.num_models):
             train_loader = self.data_manager.get_dataloader(
                 model_idx=model_idx,
                 partition="train",
@@ -269,7 +278,7 @@ class Trainer:
 
         n_batches = len(train_loader)
 
-        start_epoch = self.model.epochs_per_network[model_idx] or 0
+        start_epoch = self.model.epochs_per_model[model_idx] or 0
         global_step = (
             0 if start_epoch == 0 else start_epoch * n_batches // grad_acc_steps
         )
@@ -321,7 +330,7 @@ class Trainer:
                 stop_event=stop_event,
             )
 
-            self.model.epochs_per_network[model_idx] = epoch
+            self.model.epochs_per_model[model_idx] = epoch
             if self.model.factory:
                 self.model.factory.push_submodel(model, model_idx, epochs=epoch)
 
@@ -410,7 +419,7 @@ class Trainer:
                 break
 
             logger.debug(f"Batch dimensions: {batch['chosen_input_ids'].shape}")
-            batch_loss, lprobs_ch, lprobs_re = self.model._loss_fn(batch, model, device)
+            batch_loss, lprobs_ch, lprobs_re = self.model.loss_fn(batch, model, device)
 
             loss_sum += batch_loss.detach()
             lprob_chosen_sum_tensor += lprobs_ch.mean().detach()
@@ -418,7 +427,7 @@ class Trainer:
             margin_sum_tensor += (lprobs_ch - lprobs_re).mean().detach()
 
             batch_loss = batch_loss / grad_acc_steps
-            batch_loss.backward()
+            batch_loss.backward()  # type: ignore[no-untyped-call]
 
             if (step + 1) % grad_acc_steps == 0:
                 optimizer.step()
@@ -502,7 +511,7 @@ class Trainer:
 
         with torch.no_grad():
             for step, batch in enumerate(pbar):
-                batch_loss, lprobs_ch, lprobs_re = self.model._loss_fn(
+                batch_loss, lprobs_ch, lprobs_re = self.model.loss_fn(
                     batch, model, device
                 )
 

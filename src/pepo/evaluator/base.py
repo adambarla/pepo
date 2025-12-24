@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 from datasets import load_dataset
 
-from ..model import PEPOModel
+from ..base_model import BaseModel
 from ..utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -37,9 +37,9 @@ class BaseEvaluator(ABC):
     @abstractmethod
     def evaluate(
         self,
-        model: PEPOModel,
+        model: BaseModel,
         epoch: Optional[int] = None,
-        ref_model: Optional[PEPOModel] = None,
+        ref_model: Optional[BaseModel] = None,
         ref_epoch: Optional[int] = None,
         overwrite: bool = False,
         **kwargs: Any,
@@ -48,9 +48,9 @@ class BaseEvaluator(ABC):
         Evaluate responses.
 
         Args:
-            model: PEPOModel instance.
+            model: BaseModel instance.
             epoch: Epoch of the model.
-            ref_model: Optional reference PEPOModel instance.
+            ref_model: Optional reference BaseModel instance.
             ref_epoch: Epoch of the reference model.
             overwrite: Whether to overwrite existing outputs.
             **kwargs: Additional arguments.
@@ -75,14 +75,14 @@ class BaseEvaluator(ABC):
 
     def _get_filename(
         self,
-        model: PEPOModel,
+        model: BaseModel,
         epoch: Optional[int] = None,
     ) -> str:
         """
         Generate file names based on model name and generation configuration.
 
         Args:
-            model: PEPOModel instance.
+            model: BaseModel instance.
             epoch: Epoch of the model.
             **kwargs: Additional generation parameters.
 
@@ -101,8 +101,8 @@ class BaseEvaluator(ABC):
 
     def check_generator_consistency(
         self,
-        model: PEPOModel,
-        ref_model: Optional[PEPOModel] = None,
+        model: BaseModel,
+        ref_model: Optional[BaseModel] = None,
     ) -> None:
         """
         Check if the generator is consistent between model and reference model.
@@ -126,7 +126,7 @@ class BaseEvaluator(ABC):
 
     def _get_folder(
         self,
-        ref_model: Optional[PEPOModel] = None,
+        ref_model: Optional[BaseModel] = None,
         ref_epoch: Optional[int] = None,
     ) -> Path:
         """

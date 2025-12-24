@@ -10,7 +10,7 @@ from alpaca_eval import evaluate as alpaca_evaluate
 from alpaca_eval.constants import EVALUATORS_CONFIG_DIR
 from omegaconf import DictConfig, OmegaConf
 
-from ..model import PEPOModel
+from ..base_model import BaseModel
 from ..utils import WandbRun
 from .base import BaseEvaluator
 
@@ -53,9 +53,9 @@ class AlpacaEvalEvaluator(BaseEvaluator):
 
     def evaluate(
         self,
-        model: PEPOModel,
+        model: BaseModel,
         epoch: Optional[int] = None,
-        ref_model: Optional[PEPOModel] = None,
+        ref_model: Optional[BaseModel] = None,
         ref_epoch: Optional[int] = None,
         overwrite: bool = False,
         **kwargs: Any,
@@ -64,9 +64,9 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         Evaluate responses using AlpacaEval.
 
         Args:
-            model: PEPOModel instance (required).
+            model: BaseModel instance (required).
             epoch: Epoch of the model (optional). Used to load a specific checkpoint.
-            reference_model: PEPOModel instance (optional).
+            reference_model: BaseModel instance (optional).
             reference_epoch: Epoch of the reference model (optional).
             overwrite: Whether to overwrite existing outputs.
             **kwargs: Additional args.
@@ -165,7 +165,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         all_annotations: list[Any],
         annotations_file: Path,
         leaderboard_file: Path,
-        model: PEPOModel,
+        model: BaseModel,
         epoch: Optional[int],
         consolidation_folder: Path,
         model_name: str,
@@ -231,7 +231,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
 
     def _get_or_generate(
         self,
-        model: PEPOModel,
+        model: BaseModel,
         epoch: Optional[int] = None,
         overwrite: bool = False,
     ) -> Path:
@@ -255,7 +255,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
     def _generate_responses(
         self,
         save_path: Path,
-        model: PEPOModel,
+        model: BaseModel,
         epoch: Optional[int] = None,
     ) -> None:
         logger.info(
@@ -265,9 +265,9 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         instructions = [item["instruction"] for item in self.dataset]
         save_path.parent.mkdir(exist_ok=True, parents=True)
 
-        model.load_models(epoch=epoch)
+        model.load(epoch=epoch)
         outputs = model.generate_responses(prompts=instructions)
-        model.unload_models()
+        model.unload()
 
         model_name = model.get_name(epoch=epoch)
         formatted_outputs = []

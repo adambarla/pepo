@@ -1,5 +1,5 @@
 import logging
-from typing import Any, List, Optional, cast
+from typing import List, Optional, cast
 
 import torch
 from peft import LoraConfig, PeftModel, get_peft_model
@@ -10,7 +10,7 @@ from .utils import DeviceManager, HubManager
 logger = logging.getLogger(__name__)
 
 
-class PEPOFactory:
+class DEPPOFactory:
     def __init__(
         self,
         alpha: float,
@@ -58,7 +58,7 @@ class PEPOFactory:
 
         return models
 
-    def save_model(self, models: List[Any], epochs: Optional[int] = None) -> None:
+    def save_model(self, models: List[PeftModel], epochs: Optional[int] = None) -> None:
         """
         Push the model to the hub.
         """
@@ -66,7 +66,7 @@ class PEPOFactory:
             self.push_submodel(submodel, i, epochs)
 
     def push_submodel(
-        self, model: Any, model_idx: int, epochs: Optional[int] = None
+        self, model: PeftModel, model_idx: int, epochs: Optional[int] = None
     ) -> None:
         """
         Push a single model to Hub.
