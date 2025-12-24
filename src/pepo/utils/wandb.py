@@ -6,8 +6,8 @@ import wandb
 from omegaconf import OmegaConf
 from wandb.util import generate_id
 
-from ..base_model import BaseModel
 from ..generator import Generator
+from ..model import BaseModel
 
 logger = logging.getLogger(__name__)
 

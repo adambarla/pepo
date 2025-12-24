@@ -10,7 +10,7 @@ from alpaca_eval import evaluate as alpaca_evaluate
 from alpaca_eval.constants import EVALUATORS_CONFIG_DIR
 from omegaconf import DictConfig, OmegaConf
 
-from ..base_model import BaseModel
+from ..model import BaseModel
 from ..utils import WandbRun
 from .base import BaseEvaluator
 

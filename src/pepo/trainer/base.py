@@ -5,8 +5,8 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from .base_model import BaseModel
-    from .utils import DataManager, WandbManager
+    from ..model import BaseModel
+    from ..utils import DataManager, WandbManager
 
 logger = logging.getLogger(__name__)
 

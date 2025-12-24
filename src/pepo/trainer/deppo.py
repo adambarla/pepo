@@ -1,9 +1,11 @@
+"""DEPPO Trainer for ensemble models."""
+
 import logging
 import threading
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
-    from .base_model import BaseModel
+    from ..model import BaseModel
 
 import torch
 from omegaconf import DictConfig
@@ -11,8 +13,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import get_scheduler
 
-from .base_trainer import BaseTrainer
-from .utils import DataManager, WandbManager, WandbRun
+from ..utils import DataManager, WandbManager, WandbRun
+from .base import BaseTrainer
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +142,7 @@ class DEPPOTrainer(BaseTrainer):
             wandb_manager: Optional WandbManager instance for logging.
         """
         # Cast to DEPPOModel - this trainer requires DEPPOModel-specific attributes
-        from .model import DEPPOModel  # Local import to avoid circular import
+        from ..model import DEPPOModel  # Local import to avoid circular import
 
         if not isinstance(model, DEPPOModel):
             raise TypeError(f"DEPPOTrainer requires DEPPOModel, got {type(model)}")
@@ -179,7 +181,7 @@ class DEPPOTrainer(BaseTrainer):
 
         self._setup_training(data_manager, max_epochs, wandb_manager)
 
-        logger.info("Training PEPO ensemble models...")
+        logger.info("Training DEPPO ensemble models...")
 
         group = self.model.get_name()
 

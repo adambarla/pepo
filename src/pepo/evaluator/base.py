@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 from datasets import load_dataset
 
-from ..base_model import BaseModel
+from ..model import BaseModel
 from ..utils import sanitize_filename
 
 logger = logging.getLogger(__name__)

@@ -1,3 +1,5 @@
+"""DEPPO (Direct Ensemble Pessimistic Preference Optimization) Model."""
+
 import functools
 import logging
 import math
@@ -9,12 +11,12 @@ import torch.nn.functional as F
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .base_model import BaseModel
-from .factory import DEPPOFactory
-from .generator import Generator
-from .trainer import DEPPOTrainer
-from .utils import DeviceManager, HubManager
-from .utils.model_utils import get_log_probs
+from ..factory import DEPPOFactory
+from ..generator import Generator
+from ..trainer import DEPPOTrainer
+from ..utils import DeviceManager, HubManager
+from ..utils.model_utils import get_log_probs
+from .base import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +47,7 @@ class DEPPOModel(BaseModel):
         debug: bool = False,
     ):
         """
-        Initialize PEPO Model.
+        Initialize DEPPO Model.
         """
         self.alpha = alpha
         self.beta = beta
@@ -214,7 +216,7 @@ class DEPPOModel(BaseModel):
 
         logger.info("All submodels unloaded from GPU memory")
 
-    def _push_models(self):
+    def _push_models(self) -> None:
         """
         Push all ensemble models to Hub.
         Delegates to factory.
@@ -361,7 +363,12 @@ class DEPPOModel(BaseModel):
         log_probs_ensemble: list[Optional[torch.Tensor]] = [None] * self._num_models
         thread_exceptions: list[Optional[BaseException]] = [None] * self._num_models
 
-        def predict_log_probs(model_idx, model, input_ids, attention_mask):
+        def predict_log_probs(
+            model_idx: int,
+            model: PeftModel,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+        ) -> None:
             try:
                 with torch.no_grad():
                     model.eval()

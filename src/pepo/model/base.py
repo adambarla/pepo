@@ -10,9 +10,9 @@ from peft import PeftModel
 from transformers import AutoTokenizer
 
 if TYPE_CHECKING:
-    from .base_trainer import BaseTrainer
-    from .generator import Generator
-    from .utils import DeviceManager, HubManager
+    from ..generator import Generator
+    from ..trainer import BaseTrainer
+    from ..utils import DeviceManager, HubManager
 
 logger = logging.getLogger(__name__)
 

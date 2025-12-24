@@ -1,4 +1,4 @@
-_target_: pepo.trainer.Trainer
+_target_: pepo.trainer.deppo.DEPPOTrainer
 _partial_: true
 train_batch_size: 4
 eval_batch_size: 32

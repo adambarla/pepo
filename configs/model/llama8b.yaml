@@ -5,7 +5,7 @@ defaults:
   - /generator@generator: greedy
   - _self_
 
-_target_: pepo.model.PEPOModel
+_target_: pepo.model.deppo.DEPPOModel
 alpha: 0.1
 beta: 0.1
 num_networks: 8 # placeholder, will be overridden by L

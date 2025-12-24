@@ -1,14 +1,22 @@
 import os
 import warnings
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-from pepo.base_model import BaseModel
 from pepo.evaluator.base import BaseEvaluator
-from pepo.utils import constants, setup_logging, strip_hydra_targets
+from pepo.model import BaseModel
+from pepo.utils import (
+    DeviceManager,
+    HubManager,
+    WandbManager,
+    WandbRun,
+    constants,
+    setup_logging,
+    strip_hydra_targets,
+)
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -41,22 +49,22 @@ def main(cfg: DictConfig) -> None:
     logger.debug(f"Config: \n{OmegaConf.to_yaml(cfg, resolve=True)}")
     logger.info("PEPO Evaluation Script - Starting")
 
-    device_manager = instantiate(cfg.device)
-    hub_manager = instantiate(cfg.hub)
+    device_manager: DeviceManager = instantiate(cfg.device)
+    hub_manager: HubManager = instantiate(cfg.hub)
 
     model: BaseModel = instantiate(
         cfg.model,
         device_manager=device_manager,
         hub_manager=hub_manager,
     )
-    epoch = cfg.get("e", None)
+    epoch: Optional[int] = cfg.get("e", None)
 
     if model.generator is None:
         raise ValueError("Generator not found in model")
 
     wandb_config = cfg.get("wandb", OmegaConf.create({"enabled": False}))
-    wandb_manager = None
-    wandb_run = None
+    wandb_manager: Optional[WandbManager] = None
+    wandb_run: Optional[WandbRun] = None
     if wandb_config.enabled:
         resolved_cfg_plain = OmegaConf.to_container(
             cfg,
@@ -79,8 +87,8 @@ def main(cfg: DictConfig) -> None:
 
     evaluator: BaseEvaluator = instantiate(cfg.evaluator, wandb_run=wandb_run)
 
-    model_ref = None
-    epoch_ref = None
+    model_ref: Optional[BaseModel] = None
+    epoch_ref: Optional[int] = None
     if cfg.get("ref_model", None) is not None and "_target_" in cfg.ref_model:
         model_ref = instantiate(
             cfg.ref_model,

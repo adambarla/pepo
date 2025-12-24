@@ -22,8 +22,16 @@ import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf, SCMode
 
-from pepo.base_model import BaseModel
-from pepo.utils import WandbManager, constants, set_seed, setup_logging
+from pepo.model import BaseModel
+from pepo.utils import (
+    DataManager,
+    DeviceManager,
+    HubManager,
+    WandbManager,
+    constants,
+    set_seed,
+    setup_logging,
+)
 
 warnings.filterwarnings(
     "ignore", message=".*pkg_resources is deprecated.*", category=UserWarning
@@ -54,8 +62,8 @@ def main(cfg: DictConfig) -> None:
     set_seed(cfg.seed)
 
     # Instantiate managers
-    device_manager = instantiate(cfg.device)
-    hub_manager = instantiate(cfg.hub)
+    device_manager: DeviceManager = instantiate(cfg.device)
+    hub_manager: HubManager = instantiate(cfg.hub)
 
     model: BaseModel = instantiate(
         cfg.model,
@@ -67,7 +75,7 @@ def main(cfg: DictConfig) -> None:
         raise ValueError("Trainer not configured in model config.")
 
     # Setup Data Manager
-    data_manager = instantiate(
+    data_manager: DataManager = instantiate(
         cfg.dataset,
         tokenizer=model.get_tokenizer(),
         ref_model_id=cfg.model.model_id,

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 if TYPE_CHECKING:
-    from .base_model import BaseModel
+    from .model import BaseModel
 
 logger = logging.getLogger(__name__)
 
