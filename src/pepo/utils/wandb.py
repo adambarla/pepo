@@ -64,7 +64,8 @@ class WandbRun:
 
         self.initialized = False
         self.run: Optional[Any] = None
-        self.run_id = run_id or generate_id()
+        self.run_id = run_id
+        self.resume = run_id is not None  # Resume if existing run_id provided
 
     def init_run(self) -> None:
         """Initialize the wandb run."""
@@ -78,7 +79,7 @@ class WandbRun:
             raise ValueError("Wandb is not installed")
 
         if self.run_id is None:
-            raise ValueError("Wandb run_id is None")
+            self.run_id = generate_id()
 
         init_kwargs: Dict[str, Any] = {
             "project": self.project,
@@ -90,6 +91,9 @@ class WandbRun:
             "id": self.run_id,
             "job_type": self.job_type,
         }
+
+        if self.resume:
+            init_kwargs["resume"] = "allow"
 
         if self.group is not None:
             init_kwargs["group"] = self.group
@@ -297,6 +301,44 @@ class WandbManager:
 
         return None
 
+    def find_run_by_name(self, run_name: str) -> Optional[str]:
+        """
+        Find an existing run by name and return its ID.
+
+        Args:
+            run_name: Name of the run to search for.
+
+        Returns:
+            Run ID if found, None otherwise.
+        """
+        if not self.enabled or self.wandb is None:
+            return None
+
+        try:
+            api = self.wandb.Api()
+            entity = self.entity or "wandb"
+            project_path = f"{entity}/{self.project}"
+
+            runs = api.runs(
+                project_path,
+                filters={"display_name": run_name},
+                order="-created_at",
+                per_page=10,
+            )
+            for run in runs:
+                found_name = getattr(run, "name", None) or getattr(
+                    run, "display_name", None
+                )
+                if found_name == run_name:
+                    logger.info(
+                        f"Found existing run '{run_name}' with id {run.id}, will resume"
+                    )
+                    return str(run.id)
+        except Exception as e:
+            logger.debug(f"Could not search for existing runs: {e}")
+
+        return None
+
     def get_evaluation_handler(
         self,
         model: BaseModel,
@@ -307,6 +349,7 @@ class WandbManager:
         Get a wandb handler for evaluation that shares group with training run.
 
         Each epoch gets its own separate evaluation run to allow parallel execution.
+        If a run with the same name exists, it will be resumed.
 
         Args:
             model: Model instance for evaluation. Must have get_name() method.
@@ -326,6 +369,7 @@ class WandbManager:
         generator_name = generator.get_name()
         group = self.find_training_run_group(model_name, model_idx=0)
         run_name = self._generate_eval_run_name(model_name, generator_name, epoch)
+        existing_run_id = self.find_run_by_name(run_name)
 
         handler = WandbRun(
             enabled=self.enabled,
@@ -339,5 +383,6 @@ class WandbManager:
             run_name=run_name,
             job_type="evaluation",
             group=group,
+            run_id=existing_run_id,  # Will resume if existing run found
         )
         return handler

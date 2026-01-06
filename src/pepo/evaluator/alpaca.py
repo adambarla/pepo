@@ -114,6 +114,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
             epoch=epoch,
             consolidation_folder=folder,
             model_name=filename,
+            ref_model=ref_model,
         )
 
         return annotations_file
@@ -169,6 +170,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         epoch: Optional[int],
         consolidation_folder: Path,
         model_name: str,
+        ref_model: Optional[BaseModel] = None,
     ) -> None:
         """Save results to files and log to WandB."""
         df_leaderboard.to_csv(leaderboard_file, index=True)
@@ -192,6 +194,8 @@ class AlpacaEvalEvaluator(BaseEvaluator):
                 generator_config = model.generator.get_name()
 
             metric_prefix = f"eval/{self.dataset_id}/{generator_config}"
+            if ref_model is not None:
+                metric_prefix = f"{metric_prefix}/{ref_model.get_name()}"
 
             target_idx = None
             if model_name in df_leaderboard.index:
@@ -224,7 +228,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
                     ]
 
                 if epoch is not None:
-                    metrics_to_log[f"{metric_prefix}/epoch"] = epoch
+                    metrics_to_log["eval/epoch"] = epoch
 
                 if metrics_to_log:
                     self.wandb_run.log(metrics_to_log)
