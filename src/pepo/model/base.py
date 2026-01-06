@@ -31,16 +31,6 @@ class BaseModel(ABC):
 
     @property
     @abstractmethod
-    def num_models(self) -> int:
-        """Number of models (L for ensemble, 1 for single)."""
-
-    @property
-    @abstractmethod
-    def models(self) -> list[PeftModel]:
-        """List of loaded models. Raises if not loaded."""
-
-    @property
-    @abstractmethod
     def tokenizer(self) -> AutoTokenizer:
         """Tokenizer for the model."""
 
@@ -131,6 +121,20 @@ class BaseModel(ABC):
             wandb_manager: Optional WandbManager instance for logging.
             continue_training: Whether to continue from checkpoint.
         """
+
+    @property
+    def num_models(self) -> int:
+        """Number of models (L for ensemble, 1 for single)."""
+        if self._models is None:
+            raise ValueError("Models not loaded. Call load() first.")
+        return len(self.models)
+
+    @property
+    def models(self) -> list[PeftModel]:
+        """List of loaded models. Raises if not loaded."""
+        if self._models is None:
+            raise ValueError("Models not loaded. Call load() first.")
+        return self._models
 
     def generate_responses(
         self,
