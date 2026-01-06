@@ -8,11 +8,11 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch.nn.functional as F
-from peft import PeftModel
+from peft import LoraConfig, PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from ..factory import DEPPOFactory
 from ..generator import Generator
+from ..loader import ModelLoader
 from ..trainer import DEPPOTrainer
 from ..utils import DeviceManager, HubManager
 from ..utils.model_utils import get_log_probs
@@ -25,6 +25,8 @@ _warned_missing_ref_logprobs = False
 
 
 class DEPPOModel(BaseModel):
+    """Direct Ensemble Pessimistic Preference Optimization Model."""
+
     def __init__(
         self,
         alpha: float,
@@ -45,6 +47,7 @@ class DEPPOModel(BaseModel):
         trainer: Optional[DEPPOTrainer] = None,
         generator: Optional[Generator] = None,
         debug: bool = False,
+        **kwargs: Any,
     ):
         """
         Initialize DEPPO Model.
@@ -61,26 +64,30 @@ class DEPPOModel(BaseModel):
         self.generator = generator
         self.debug = debug
 
-        # Initialize Factory
-        self.factory = DEPPOFactory(
-            alpha=alpha,
-            beta=beta,
-            num_networks=self._num_models,
-            model_id=model_id,
+        self.compile_model = compile
+
+        # Initialize Loader
+        self.loader = ModelLoader(
             device_manager=device_manager,
             hub_manager=hub_manager,
-            tokenizer_id=tokenizer_id,
-            chat_template=chat_template,
-            lora_r=lora_r,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            lora_bias=lora_bias,
-            lora_task_type=lora_task_type,
-            lora_target_modules=lora_target_modules,
-            compile=compile,
+            compile_model=compile,
         )
 
-        self._tokenizer = self.factory.tokenizer
+        self.lora_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            bias=lora_bias,
+            task_type=lora_task_type,
+            target_modules=lora_target_modules,
+        )
+
+        self._tokenizer = self.loader.load_tokenizer(
+            model_id=model_id,
+            tokenizer_id=tokenizer_id,
+            chat_template=chat_template,
+        )
+
         self._models: list[PeftModel] | None = None  # lazy loaded
         self.epochs_per_model: list[Optional[int]] = [0] * self._num_models
 
@@ -150,9 +157,28 @@ class DEPPOModel(BaseModel):
                 "Models are already loaded. Unload them first if you want to reload."
             )
             return
-        self._models = self.factory.load_models(init_new=init_new, epoch=epoch)
+        self._models = self._load_models(init_new=init_new, epoch=epoch)
         if epoch is not None:
             self.epochs_per_model = [epoch] * self._num_models
+
+    def _load_models(
+        self, init_new: bool = False, epoch: Optional[int] = None
+    ) -> list[PeftModel]:
+        models = []
+        logger.info(f"Loading {self._num_models} models...")
+
+        for model_idx in range(self._num_models):
+            models.append(
+                self.loader.load_model(
+                    model_id=self.model_id,
+                    model_name=self.get_submodel_name(model_idx),
+                    model_idx=model_idx,
+                    lora_config=self.lora_config,
+                    init_new=init_new,
+                    epoch=epoch,
+                )
+            )
+        return models
 
     def _check_models_loaded(self, expected_epoch: Optional[int] = None) -> None:
         """
@@ -221,13 +247,19 @@ class DEPPOModel(BaseModel):
         Push all ensemble models to Hub.
         Delegates to factory.
         """
-        self.factory.save_model(self.models)
+        for i, submodel in enumerate(self.models):
+            self._push_model(i)
 
     def _push_model(self, model_idx: int, epochs: Optional[int] = None) -> None:
         """
         Push single model to hub.
         """
-        self.factory.push_submodel(self.models[model_idx], model_idx, epochs)
+        self.loader.push_model(
+            model=self.models[model_idx],
+            model_name=self.get_submodel_name(model_idx),
+            tokenizer=self.tokenizer,
+            epochs=epochs,
+        )
 
     def get_tokenizer(self) -> AutoTokenizer:
         return self._tokenizer
@@ -267,10 +299,14 @@ class DEPPOModel(BaseModel):
         logger.info(f"Successfully loaded models from epoch {epoch} checkpoint")
 
     def get_name(self, epoch: Optional[int] = None) -> str:
-        return self.factory.get_model_name(epoch=epoch)
+        model_name = self.model_id.rsplit("/", 1)[-1]
+        repo_name = f"{model_name}-a{self.alpha}-b{self.beta}-L{self._num_models}"
+        if epoch is not None:
+            repo_name = f"{repo_name}-e{epoch}"
+        return repo_name
 
     def get_submodel_name(self, model_idx: int) -> str:
-        return self.factory.get_submodel_name(model_idx)
+        return f"{self.get_name()}-l{model_idx}"
 
     def _get_base_model_name(self) -> str:
         return self.model_id.rsplit("/", 1)[-1]

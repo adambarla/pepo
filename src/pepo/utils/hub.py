@@ -155,7 +155,6 @@ class HubManager:
         model_name: str,
         model: AutoModelForCausalLM,
         tokenizer: "AutoTokenizer",
-        model_idx: int,
         private: bool = False,
         epoch: Optional[int] = None,
     ) -> None:
@@ -181,13 +180,10 @@ class HubManager:
         # Generate commit message based on epoch
         if epoch is not None:
             commit_message = (
-                f"Upload PEPO ensemble model {model_idx} checkpoint after "
-                f"{epoch} epochs to {repo_id}"
+                f"Upload PEPO model checkpoint after {epoch} epochs to {repo_id}"
             )
         else:
-            commit_message = (
-                f"Upload final PEPO ensemble model {model_idx} to {repo_id}"
-            )
+            commit_message = f"Upload final PEPO model to {repo_id}"
 
         logger.info(f"Pushing model to {repo_id}...")
 

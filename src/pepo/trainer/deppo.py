@@ -247,8 +247,7 @@ class DEPPOTrainer(BaseTrainer):
         if stop_event.is_set():
             raise RuntimeError("Training failed - see error log above")
 
-        if self.model.factory:
-            self.model.factory.save_model(self.model.models)
+        self.model._push_models()
 
     def _train_model(
         self,
@@ -303,8 +302,12 @@ class DEPPOTrainer(BaseTrainer):
 
         is_continuing = start_epoch > 0
         if not is_continuing:
-            if self.model.factory:
-                self.model.factory.push_submodel(model, model_idx, epochs=start_epoch)
+            self.model.loader.push_model(
+                model=model,
+                model_name=self.model.get_submodel_name(model_idx),
+                tokenizer=self.model._tokenizer,
+                epochs=start_epoch,
+            )
 
         best_eval_loss = initial_eval_loss
         patience_counter = 0
@@ -333,8 +336,13 @@ class DEPPOTrainer(BaseTrainer):
             )
 
             self.model.epochs_per_model[model_idx] = epoch
-            if self.model.factory:
-                self.model.factory.push_submodel(model, model_idx, epochs=epoch)
+            if self.model.loader:
+                self.model.loader.push_model(
+                    model=model,
+                    model_name=self.model.get_submodel_name(model_idx),
+                    tokenizer=self.model._tokenizer,
+                    epochs=epoch,
+                )
 
             eval_loss = best_eval_loss  # Default if skipping
             if not self.skip_eval:
