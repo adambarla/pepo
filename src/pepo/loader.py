@@ -54,6 +54,7 @@ class ModelLoader:
         lora_config: Optional[LoraConfig],
         init_new: bool = False,
         epoch: Optional[int] = None,
+        custom_modules: Optional[dict[str, torch.nn.Module]] = None,
     ) -> PeftModel:
         """
         Load a single model (base + LoRA).
@@ -67,6 +68,9 @@ class ModelLoader:
             init_new: If True, initialize new LoRA adapters.
                 If False, try to load from Hub.
             epoch: If provided, load from specific epoch checkpoint.
+            custom_modules: Optional dictionary of modules to attach to the base model
+                under given attribute names before wrapping with PEFT.
+                Useful for 'modules_to_save'.
         """
         load_from_hub = not init_new and epoch is not None
         device_map = self.device_manager.get_device_for_model(model_idx)
@@ -90,6 +94,11 @@ class ModelLoader:
         if hasattr(base_model, "enable_input_require_grads"):
             base_model.enable_input_require_grads()
 
+        # Attach custom modules to base model before wrapping with PEFT
+        if custom_modules:
+            for attr_name, module in custom_modules.items():
+                setattr(base_model, attr_name, module)
+
         if load_from_hub:
             logger.info(f"Loading adapter for {model_name} from hub (epoch={epoch})...")
             model: PeftModel = self.hub_manager.load_model(
@@ -103,8 +112,8 @@ class ModelLoader:
             model = cast(PeftModel, get_peft_model(base_model, lora_config))
 
             trainable, total = model.get_nb_trainable_parameters()
-            trainable_m = trainable // 1000000
-            total_m = total // 1000000
+            trainable_m = trainable / 1000000
+            total_m = total / 1000000
             logger.info(
                 f"Model {model_name} has {trainable_m:.2f}M trainable "
                 f"parameters out of {total_m:.2f}M total parameters "

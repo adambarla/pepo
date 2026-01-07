@@ -132,6 +132,7 @@ class REPPORewardModel:
             bias=lora_bias,
             task_type=lora_task_type,
             target_modules=lora_target_modules,
+            modules_to_save=["reward_head"],
         )
 
         self._tokenizer = self.loader.load_tokenizer(
@@ -140,7 +141,6 @@ class REPPORewardModel:
             chat_template=chat_template,
         )
         self._models: list[PeftModel] | None = None
-        self._reward_heads: list[RewardHead] | None = None
         self.epochs_per_model: list[Optional[int]] = [0] * self._num_models
 
         logger.info(
@@ -150,12 +150,15 @@ class REPPORewardModel:
 
     @property
     def reward_heads(self) -> list[RewardHead]:
-        """List of reward heads. Raises if not loaded."""
-        if self._reward_heads is None:
-            raise RuntimeError("Reward heads not loaded. Call load() first.")
-        if self._reward_heads is None:
-            raise RuntimeError("Reward heads not loaded. Call load() first.")
-        return self._reward_heads
+        """List of reward heads (extracted from PeftModels)."""
+        if self._models is None:
+            raise RuntimeError("Models not loaded. Call load() first.")
+        heads = []
+        for model in self._models:
+            if not hasattr(model, "reward_head"):
+                raise AttributeError("Model missing 'reward_head' attribute")
+            heads.append(model.reward_head)
+        return heads
 
     @property
     def num_models(self) -> int:
@@ -182,8 +185,21 @@ class REPPORewardModel:
             logger.warning("Models already loaded. Unload first to reload.")
             return
 
+        # We need to know hidden_size to init reward heads if init_new=True
+        # For simplicity, we load the first model to get the config
+        # This is a bit redundant but ensures we have the right hidden_size
+        from transformers import AutoConfig
+
+        config = AutoConfig.from_pretrained(self.model_id)
+        hidden_size = config.hidden_size
+        model_dtype = self._device_manager.dtype
+
         self._models = []
         for model_idx in range(self._num_models):
+            device = torch.device(self._device_manager.get_device_for_model(model_idx))
+            # Always create a head; if loading from hub, PEFT will overwrite its weights
+            reward_head = RewardHead(hidden_size).to(device=device, dtype=model_dtype)
+
             self._models.append(
                 self.loader.load_model(
                     model_id=self.model_id,
@@ -192,23 +208,14 @@ class REPPORewardModel:
                     lora_config=self.lora_config,
                     init_new=init_new,
                     epoch=epoch,
+                    custom_modules={"reward_head": reward_head},
                 )
             )
-
-        # Initialize reward heads with same dtype as model
-        hidden_size = self._models[0].config.hidden_size
-        model_dtype = next(self._models[0].parameters()).dtype
-        self._reward_heads = []
-
-        for model_idx in range(self._num_models):
-            device = torch.device(self._device_manager.get_device_for_model(model_idx))
-            reward_head = RewardHead(hidden_size).to(device=device, dtype=model_dtype)
-            self._reward_heads.append(reward_head)
 
         if epoch is not None:
             self.epochs_per_model = [epoch] * self._num_models
 
-        logger.info(f"Loaded {self._num_models} reward models with heads")
+        logger.info(f"Loaded {self._num_models} reward models with heads via PEFT")
 
     def unload(self) -> None:
         """Unload all models and reward heads from GPU memory."""
@@ -218,12 +225,8 @@ class REPPORewardModel:
 
         for model in self._models:
             del model
-        if self._reward_heads:
-            for head in self._reward_heads:
-                del head
 
         self._models = None
-        self._reward_heads = None
         self._device_manager.clear_cache()
         self.epochs_per_model = [0] * self._num_models
         logger.info("All reward models unloaded")
@@ -288,8 +291,8 @@ class REPPORewardModel:
         device_input_ids: list[torch.Tensor],
         device_attention_masks: list[torch.Tensor],
     ) -> torch.Tensor:
-        """Compute rewards using device-resident tensors (pessimistic aggregation)."""
-        if self._models is None or self._reward_heads is None:
+        """Compute rewards using device-resident tensors (pessimistic aggregation).."""
+        if self._models is None:
             raise RuntimeError("Models not loaded. Call load() first.")
 
         rewards_ensemble: list[Optional[torch.Tensor]] = [None] * self._num_models
@@ -298,11 +301,11 @@ class REPPORewardModel:
         def predict_reward(
             model_idx: int,
             model: PeftModel,
-            reward_head: RewardHead,
             input_ids: torch.Tensor,
             attention_mask: torch.Tensor,
         ) -> None:
             try:
+                reward_head = model.reward_head  # type: ignore[attr-defined]
                 device = input_ids.device
                 with torch.no_grad():
                     model.eval()
@@ -320,7 +323,6 @@ class REPPORewardModel:
                 args=(
                     model_idx,
                     self.models[model_idx],
-                    self.reward_heads[model_idx],
                     device_input_ids[model_idx],
                     device_attention_masks[model_idx],
                 ),
