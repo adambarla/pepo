@@ -14,16 +14,22 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 if TYPE_CHECKING:
     from ..trainer import BaseTrainer
 
+import copy
+import threading
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from peft import LoraConfig, PeftModel
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from ..loader import CheckpointManager
 from ..utils import DeviceManager, HubManager
+from ..utils.data import DataCollator
 from .base import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -374,6 +380,141 @@ class REPPORewardModel(BaseModel):
         """Inference prediction (unused for reward model training)."""
         raise NotImplementedError("Predict not implemented for Reward Model")
 
+    def annotate_dataset(
+        self,
+        dataset: Any,
+        dataset_name: str,
+        semaphore_limit: Optional[int] = None,
+        batch_size: int = 8,
+    ) -> Any:
+        """
+        Annotate dataset with rewards from all ensemble models.
+
+        Uses parallel threads (up to semaphore_limit or num_gpus) to run inference.
+        Updates the dataset gradually as models finish.
+
+        Args:
+            dataset: The dataset to annotate (HuggingFace Dataset).
+            dataset_name: Name for pushing to Hub.
+            semaphore_limit: Max concurrent threads (defaults to num_gpus).
+            batch_size: Batch size for inference.
+
+        Returns:
+            The annotated dataset.
+        """
+        if self._hub_manager.dataset_exists(dataset_name):
+            logger.info(
+                f"Dataset {dataset_name} already exists on Hub. Skipping annotation."
+            )
+            # We return the original dataset; robust training might fetch from Hub
+            # independently or we could return None to signal "done".
+            return dataset
+
+        if self._models is None:
+            raise RuntimeError("Models not loaded. Call load() first.")
+
+        limit = semaphore_limit or self._device_manager.num_available_gpus
+        gpu_semaphore = threading.Semaphore(value=limit)
+        dataset_lock = threading.Lock()
+
+        logger.info(f"Starting dataset annotation with {limit} concurrent threads...")
+
+        threads = []
+        # We need a shared reference to the dataset that threads can update
+        # Using a container list to allow 'pass-by-reference' update of the
+        # dataset object safely within the lock if the library returns a new
+        # object on add_column
+        shared_dataset = [dataset]
+
+        def _annotate_single_model(model_idx: int) -> None:
+            gpu_semaphore.acquire()
+            try:
+                # 1. Load Model
+                device = torch.device(
+                    self._device_manager.get_device_for_model(model_idx)
+                )
+                # Ensure model is on correct device (it should be if loaded via load())
+                # Explicit check for mypy
+                if self._models is None:
+                    raise RuntimeError("Models not loaded.")
+                model = self._models[model_idx]
+                reward_head = self.reward_heads[model_idx]
+
+                # 2. Prepare DataLoader
+                tokenizer_copy = copy.deepcopy(self.tokenizer)
+                collator = DataCollator(
+                    tokenizer=tokenizer_copy,
+                    # We assume max_length etc are handled by the dataset's
+                    # preprocessing or passed in logic.
+                    max_length=None,
+                    max_prompt_length=None,
+                )
+
+                dataloader = DataLoader(
+                    dataset,
+                    batch_size=batch_size,
+                    shuffle=False,
+                    collate_fn=collator,
+                    pin_memory=True,
+                )
+
+                rewards_chosen = []
+                rewards_rejected = []
+
+                desc = f"Model {model_idx} Inference"
+                for batch in tqdm(
+                    dataloader, desc=desc, position=model_idx, leave=False
+                ):
+                    with torch.no_grad():
+                        chosen_ids = batch["chosen_input_ids"].to(device)
+                        chosen_mask = batch["chosen_attention_mask"].to(device)
+                        rejected_ids = batch["rejected_input_ids"].to(device)
+                        rejected_mask = batch["rejected_attention_mask"].to(device)
+
+                        r_c = self._compute_reward(
+                            chosen_ids, chosen_mask, model, reward_head, device
+                        )
+                        r_r = self._compute_reward(
+                            rejected_ids, rejected_mask, model, reward_head, device
+                        )
+
+                        rewards_chosen.extend(r_c.cpu().tolist())
+                        rewards_rejected.extend(r_r.cpu().tolist())
+
+                # 3. Critical Section: Update Dataset
+                with dataset_lock:
+                    current_ds = shared_dataset[0]
+                    current_ds = current_ds.add_column(
+                        f"rewards_{model_idx}_chosen", rewards_chosen
+                    )
+                    current_ds = current_ds.add_column(
+                        f"rewards_{model_idx}_rejected", rewards_rejected
+                    )
+                    shared_dataset[0] = current_ds
+                    logger.info(f"Model {model_idx} annotation merged.")
+
+            except Exception as e:
+                logger.error(f"Error in annotation thread for model {model_idx}: {e}")
+            finally:
+                gpu_semaphore.release()
+
+        # Launch threads
+        for i in range(self.num_models):
+            t = threading.Thread(target=_annotate_single_model, args=(i,))
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        final_dataset = shared_dataset[0]
+
+        # Persistence
+        logger.info(f"Pushing annotated dataset to {dataset_name}...")
+        self._hub_manager.push_dataset(final_dataset, dataset_name)
+
+        return final_dataset
+
 
 class REPPOModel(BaseModel):
     """REPPO Policy Model (Orchestrator).
@@ -405,6 +546,7 @@ class REPPOModel(BaseModel):
         generator: Optional[Any] = None,  # Unused - for Phase 2
         reward_trainer: Optional[DictConfig] = None,
         policy_trainer: Optional[DictConfig] = None,
+        trainer: Optional[DictConfig] = None,
         debug: bool = False,
         **kwargs: Any,
     ):
@@ -418,10 +560,13 @@ class REPPOModel(BaseModel):
         self.debug = debug
         self._num_models = 1
         self._reward_trainer_cfg = reward_trainer
-        self._policy_trainer_cfg = policy_trainer
+        # Support both policy_trainer and trainer (preferred) key
+        self._policy_trainer_cfg = policy_trainer or trainer
         self._reward_trainer: Optional[BaseTrainer] = None
         self._policy_trainer: Optional[BaseTrainer] = None
-        self._trainer: Any = True if reward_trainer or policy_trainer else None
+        # We set self._trainer to policy config to satisfy generic checks relying
+        # on model.trainer
+        self._trainer: Any = self._policy_trainer_cfg
 
         self.reward_model = instantiate(
             reward_model,
@@ -569,23 +714,57 @@ class REPPOModel(BaseModel):
 
         # Phase 1: Reward Training
         logger.info("--- Phase 1: Training Reward Ensemble ---")
-        if self._reward_trainer is None:
-            # Pop epochs if present in config
-            cfg = self._reward_trainer_cfg.copy()
-            reward_epochs = cfg.pop("training_epochs", max_epochs)
-            self._reward_trainer = instantiate(cfg)
-            if isinstance(self._reward_trainer, functools.partial):
-                self._reward_trainer = self._reward_trainer()
-        else:
-            reward_epochs = self._reward_trainer_cfg.get("training_epochs", max_epochs)
+        # Determine reward epochs first
+        reward_epochs = self._reward_trainer_cfg.get("training_epochs", max_epochs)
 
-        self._reward_trainer.train(
-            model=self.reward_model,
-            data_manager=data_manager,
-            max_epochs=reward_epochs,
-            wandb_manager=wandb_manager,
-            continue_training=continue_training,
-        )
+        if self.reward_model.can_load_from_epoch(reward_epochs):
+            logger.info(
+                f"Reward models for epoch {reward_epochs} already exist. "
+                "Skipping training and loading from Hub."
+            )
+            self.reward_model.load_from_epoch(reward_epochs)
+        else:
+            if self._reward_trainer is None:
+                # Pop epochs from config to avoid passing it to trainer init
+                cfg = self._reward_trainer_cfg.copy()
+                if "training_epochs" in cfg:
+                    del cfg["training_epochs"]
+
+                trainer_instance = instantiate(cfg)
+                if isinstance(trainer_instance, functools.partial):
+                    trainer_instance = trainer_instance()
+                self._reward_trainer = trainer_instance
+
+            if self._reward_trainer is None:
+                raise ValueError("Failed to initialize reward trainer")
+
+            self._reward_trainer.train(
+                model=self.reward_model,
+                data_manager=data_manager,
+                max_epochs=reward_epochs,
+                wandb_manager=wandb_manager,
+                continue_training=continue_training,
+            )
+
+        # Inter-Phase: Annotate Dataset
+        logger.info("--- Phase 1 Complete. Starting Annotation ---")
+
+        # We annotate the dataset corresponding to the trained state
+        # We assume all models are at the same epoch after training
+        annotated_epoch = self.reward_model.get_epoch(0)
+        annotation_dataset_name = self.reward_model.get_name(epoch=annotated_epoch)
+
+        # For now, we annotate the evaluation dataset provided by DataManager
+        # TODO: Allow configuring which dataset split to annotate
+        # (e.g. 'train' or 'unlabeled')
+        target_dataset = data_manager.eval_dataset
+
+        if target_dataset is not None:
+            self.reward_model.annotate_dataset(
+                dataset=target_dataset, dataset_name=annotation_dataset_name
+            )
+        else:
+            logger.warning("No evaluation dataset found in DataManager to annotate.")
 
         # Phase 2: Policy Training (Not Implemented)
         logger.info("--- Phase 2: Training Policy Model ---")

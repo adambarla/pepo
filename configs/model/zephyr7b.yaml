@@ -1,9 +1,12 @@
 # SmolLM2 Model Configuration for PEPO
 # Note: If L > num_gpus, divide batch_size by ceil(L/num_gpus) and multiply gradient_accumulation_steps by ceil(L/num_gpus)
 defaults:
-  - /trainer@trainer: default
+  - /trainer@trainer: ensemble
   - /generator@generator: greedy
   - _self_
+
+train_batch_size: 64  # Updated 2025-12-19
+eval_batch_size: 256  # Updated 2025-12-18 by find_optimal_batch_sizes.py
 
 _target_: pepo.model.deppo.DEPPOModel
 alpha: 0.1
@@ -21,8 +24,8 @@ lora_target_modules: "all-linear"
 compile: false
 
 trainer:
-  train_batch_size: 64  # Updated 2025-12-19
-  eval_batch_size: 256  # Updated 2025-12-18 by find_optimal_batch_sizes.py
+  train_batch_size: ${train_batch_size}
+  eval_batch_size: ${eval_batch_size}
   gradient_accumulation_steps: 1
 
 generator:

@@ -80,6 +80,13 @@ follow_imports = "skip"
 
 [tool.ruff]
 src = ["src"]
+exclude = [
+    "alpaca_eval",
+    "arena-hard-auto",
+    "LLM",
+    "figures",
+    "notebooks",
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["pepo"]

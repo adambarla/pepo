@@ -3,17 +3,17 @@
 
 defaults:
   - /trainer@reward_trainer: ensemble
-  - /trainer@policy_trainer: single
+  - /trainer@trainer: single
   - _self_
+
+train_batch_size: 128
+eval_batch_size: 256
 
 _target_: pepo.model.reppo.REPPOModel
 _recursive_: false
 
 wandb:
   tags: ["reppo"]
-
-trainer:
-  eval_batch_size: 256
 
 reward_model:
   _target_: pepo.model.reppo.REPPORewardModel
@@ -40,23 +40,15 @@ debug: ${debug}
 kl_coef: 0.1
 
 reward_trainer:
-  train_batch_size: 128
-  eval_batch_size: 256
+  train_batch_size: ${train_batch_size}
+  eval_batch_size: ${eval_batch_size}
   gradient_accumulation_steps: 1
-  log_interval: 1
-  skip_eval: false
-  optimizer:
-    lr: 5e-6
   training_epochs: 1
 
-policy_trainer:
-  train_batch_size: 128
-  eval_batch_size: 256
+trainer:
+  train_batch_size: ${train_batch_size}
+  eval_batch_size: ${eval_batch_size}
   gradient_accumulation_steps: 1
-  log_interval: 1
-  skip_eval: false
-  optimizer:
-    lr: 1e-6
   training_epochs: 1
 
 generator:

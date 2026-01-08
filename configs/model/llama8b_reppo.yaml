@@ -1,6 +1,10 @@
-# REPPO Llama 8B Configuration
-# Orchestrates two-phase training: Reward (L models) -> Policy (1 model)
-# Note: Policy trainer is currently a placeholder
+defaults:
+  - /trainer@reward_trainer: ensemble
+  - /trainer@trainer: single
+  - _self_
+
+train_batch_size: 32
+eval_batch_size: 64
 
 _target_: pepo.model.reppo.REPPOModel
 _recursive_: false
@@ -19,7 +23,6 @@ reward_model:
   debug: ${debug}
 
 
-# Policy Model Configuration (Main REPPOModel args)
 model_id: "allenai/Llama-3.1-Tulu-3-8B-SFT"
 lora_r: 16
 lora_alpha: 16
@@ -39,6 +42,14 @@ generator:
   max_new_tokens: 128
 
 
-# trainer:
-#  _target_: pepo.trainer.reppo.REPPOTrainer
-#  ... (removed for now)
+reward_trainer:
+  train_batch_size: ${train_batch_size}
+  eval_batch_size: ${eval_batch_size}
+  gradient_accumulation_steps: 1
+  training_epochs: 2
+
+trainer:
+  train_batch_size: ${train_batch_size}
+  eval_batch_size: ${eval_batch_size}
+  gradient_accumulation_steps: 1
+  training_epochs: 2

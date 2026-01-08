@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import dotenv
 from huggingface_hub import HfApi, login
@@ -69,14 +69,22 @@ class HubManager:
             self.api.model_info(repo_id)
             return True
         except Exception:
-            logger.warning(f"Failed to load {repo_id}")
             return False
 
-    def get_repo_id(self, model_name: str, epoch: Optional[int] = None) -> str:
+    def dataset_exists(self, name: str, epoch: Optional[int] = None) -> bool:
+        """Check if dataset exists on the Hub."""
+        repo_id = self.get_repo_id(name, epoch)
+        try:
+            self.api.dataset_info(repo_id)
+            return True
+        except Exception:
+            return False
+
+    def get_repo_id(self, name: str, epoch: Optional[int] = None) -> str:
         if epoch is not None:
-            return f"{self.base_dir}/{model_name}-e{epoch}"
+            return f"{self.base_dir}/{name}-e{epoch}"
         else:
-            return f"{self.base_dir}/{model_name}"
+            return f"{self.base_dir}/{name}"
 
     def load_model(
         self,
@@ -202,3 +210,16 @@ class HubManager:
         logger.info(
             f"Model and tokenizer successfully pushed to: https://huggingface.co/{repo_id}"
         )
+
+    def push_dataset(
+        self, dataset: Any, dataset_name: str, private: bool = False
+    ) -> None:
+        """Push dataset to Hugging Face Hub."""
+        repo_id = f"{self.base_dir}/{dataset_name}"
+        if not self.should_push_to_hub:
+            logger.warning(f"Disabled push to Hub. Skipping push of {repo_id}.")
+            return
+
+        logger.info(f"Pushing dataset to {repo_id}...")
+        dataset.push_to_hub(repo_id, private=private)
+        logger.info(f"Dataset successfully pushed to: https://huggingface.co/{repo_id}")
