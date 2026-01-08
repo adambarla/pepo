@@ -50,7 +50,7 @@ class BaseModel(ABC):
         batch: dict[str, torch.Tensor],
         model: torch.nn.Module,
         device: torch.device,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> tuple[torch.Tensor, dict[str, float]]:
         """
         Compute loss for training.
 
@@ -60,7 +60,7 @@ class BaseModel(ABC):
             device: Device to run computation on.
 
         Returns:
-            Tuple of (loss, *metrics) where metrics are logged.
+            Tuple of (loss, metrics_dict) where metrics_dict contains scalars to be logged.
         """
 
     @abstractmethod
@@ -84,6 +84,34 @@ class BaseModel(ABC):
         """
 
     @abstractmethod
+    def can_load_from_epoch(self, epoch: int) -> bool:
+        """Check if model can be loaded from epoch."""
+
+    @abstractmethod
+    def load_from_epoch(self, epoch: int) -> None:
+        """Load model from epoch."""
+
+    def find_latest_epoch(self, max_epoch: int) -> Optional[int]:
+        """
+        Find the latest epoch where all submodels have checkpoints.
+
+        Args:
+            max_epoch: Maximum epoch to check from (checks backwards).
+
+        Returns:
+            The latest epoch where all submodels exist, or None if none found.
+        """
+        for epoch in range(max_epoch, -1, -1):
+            if self.can_load_from_epoch(epoch):
+                logger.info(f"Found latest common epoch {epoch} for model")
+                return epoch
+
+        logger.warning(
+            f"No common epoch found (checked from epoch {max_epoch} down to 0)"
+        )
+        return None
+
+    @abstractmethod
     def load(self, init_new: bool = False, epoch: Optional[int] = None) -> None:
         """Load models into memory."""
 
@@ -96,8 +124,24 @@ class BaseModel(ABC):
         return self.tokenizer
 
     @abstractmethod
-    def get_name(self, epoch: Optional[int] = None) -> str:
-        """Get model name for identification."""
+    def get_name(
+        self,
+        *,
+        epoch: Optional[int] = None,
+        model_idx: Optional[int] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Get model name for identification.
+
+        Args:
+            epoch: Optional epoch number to include in name.
+            model_idx: Optional model index for ensemble submodels.
+            **kwargs: Additional optional arguments.
+        """
+
+    @abstractmethod
+    def _get_base_model_name(self) -> str:
+        """Get the base model name (e.g. from model_id)."""
 
     def init_trainer(self) -> None:
         """Initialize the trainer if it's a partial."""

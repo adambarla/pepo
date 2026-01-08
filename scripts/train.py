@@ -92,10 +92,18 @@ def main(cfg: DictConfig) -> None:
             resolve=True,
             structured_config_mode=SCMode.DICT,
         )
+        # Merge tags from model config if present
+        tags = list(wandb_config.tags)
+        model_cfg = cfg.get("model")
+        if model_cfg is not None and "wandb" in model_cfg and "tags" in model_cfg.wandb:
+            for tag in model_cfg.wandb.tags:
+                if tag not in tags:
+                    tags.append(tag)
+
         wandb_manager = WandbManager(
             enabled=True,
             project=wandb_config.project,
-            tags=wandb_config.tags,
+            tags=tags,
             notes=wandb_config.notes,
             entity=wandb_config.entity,
             mode=wandb_config.mode,

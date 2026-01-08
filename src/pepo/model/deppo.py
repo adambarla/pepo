@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..generator import Generator
 from ..loader import ModelLoader
-from ..trainer import DEPPOTrainer
+from ..trainer import EnsembleTrainer
 from ..utils import DeviceManager, HubManager
 from ..utils.model_utils import get_log_probs
 from .base import BaseModel
@@ -44,7 +44,7 @@ class DEPPOModel(BaseModel):
         lora_task_type: str = "CAUSAL_LM",
         lora_target_modules: str = "all-linear",
         compile: bool = False,
-        trainer: Optional[DEPPOTrainer] = None,
+        trainer: Optional[EnsembleTrainer] = None,
         generator: Optional[Generator] = None,
         debug: bool = False,
         **kwargs: Any,
@@ -171,7 +171,7 @@ class DEPPOModel(BaseModel):
             models.append(
                 self.loader.load_model(
                     model_id=self.model_id,
-                    model_name=self.get_submodel_name(model_idx),
+                    model_name=self.get_name(model_idx=model_idx),
                     model_idx=model_idx,
                     lora_config=self.lora_config,
                     init_new=init_new,
@@ -256,7 +256,7 @@ class DEPPOModel(BaseModel):
         """
         self.loader.push_model(
             model=self.models[model_idx],
-            model_name=self.get_submodel_name(model_idx),
+            model_name=self.get_name(model_idx=model_idx),
             tokenizer=self.tokenizer,
             epochs=epochs,
         )
@@ -276,7 +276,7 @@ class DEPPOModel(BaseModel):
             False otherwise.
         """
         for model_idx in range(self._num_models):
-            submodel_name = self.get_submodel_name(model_idx)
+            submodel_name = self.get_name(model_idx=model_idx)
             if not self._hub_manager.model_exists(submodel_name, epoch):
                 return False
         return True
@@ -293,20 +293,24 @@ class DEPPOModel(BaseModel):
         if self._models is not None:
             logger.info("Unloading existing models before loading from checkpoint...")
             self.unload()
-
         self.load(init_new=False, epoch=epoch)
 
         logger.info(f"Successfully loaded models from epoch {epoch} checkpoint")
 
-    def get_name(self, epoch: Optional[int] = None) -> str:
+    def get_name(
+        self,
+        *,
+        epoch: Optional[int] = None,
+        model_idx: Optional[int] = None,
+        **kwargs: Any,
+    ) -> str:
         model_name = self.model_id.rsplit("/", 1)[-1]
         repo_name = f"{model_name}-a{self.alpha}-b{self.beta}-L{self._num_models}"
+        if model_idx is not None:
+            repo_name = f"{repo_name}-l{model_idx}"
         if epoch is not None:
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
-
-    def get_submodel_name(self, model_idx: int) -> str:
-        return f"{self.get_name()}-l{model_idx}"
 
     def _get_base_model_name(self) -> str:
         return self.model_id.rsplit("/", 1)[-1]
@@ -316,7 +320,7 @@ class DEPPOModel(BaseModel):
         batch: Dict[str, torch.Tensor],
         model: PeftModel,
         device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, dict[str, float]]:
         batch = {k: v.to(device) for k, v in batch.items()}
 
         chosen_ids = batch["chosen_input_ids"]
@@ -372,7 +376,24 @@ class DEPPOModel(BaseModel):
         argument = self.beta * (pi_log_ratio - ref_log_ratio - alpha_offset)
         dpo_loss_components = -F.logsigmoid(argument)
         loss = dpo_loss_components.mean()
-        return loss, lprobs_chosen, lprobs_reject
+
+        # Calculate metrics
+        with torch.no_grad():
+            margins = pi_log_ratio - ref_log_ratio
+            accuracy = (margins > alpha_offset).float().mean()
+            metrics = {
+                "loss": loss.item(),
+                "rewards/chosen": (self.beta * (lprobs_chosen - lprobs_chosen_ref))
+                .mean()
+                .item(),
+                "rewards/rejected": (self.beta * (lprobs_reject - lprobs_reject_ref))
+                .mean()
+                .item(),
+                "rewards/margins": (self.beta * margins).mean().item(),
+                "accuracy": accuracy.item(),
+            }
+
+        return loss, metrics
 
     def _predict_submodel(
         self,

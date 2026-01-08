@@ -7,9 +7,12 @@ This module contains all REPPO model classes:
 - REPPOModel: Orchestrator for two-phase RLHF training
 """
 
+import functools
 import logging
-import threading
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+if TYPE_CHECKING:
+    from ..trainer import BaseTrainer
 
 import torch
 import torch.nn as nn
@@ -22,10 +25,6 @@ from transformers import AutoTokenizer
 from ..loader import ModelLoader
 from ..utils import DeviceManager, HubManager
 from .base import BaseModel
-
-# Trainers will be implemented later
-# if TYPE_CHECKING:
-#     from ..trainer.reppo import REPPOPolicyTrainer, REPPORewardTrainer
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +62,7 @@ class RewardHead(nn.Module):
         return self.linear(last_hidden).squeeze(-1)  # type: ignore[no-any-return]
 
 
-class REPPORewardModel:
+class REPPORewardModel(BaseModel):
     """Ensemble of L reward models: base LLM + LoRA + RewardHead.
 
     Each reward model shares the base LLM architecture but has:
@@ -193,6 +192,8 @@ class REPPORewardModel:
         config = AutoConfig.from_pretrained(self.model_id)
         hidden_size = config.hidden_size
         model_dtype = self._device_manager.dtype
+        if isinstance(model_dtype, str):
+            model_dtype = getattr(torch, model_dtype)
 
         self._models = []
         for model_idx in range(self._num_models):
@@ -203,7 +204,7 @@ class REPPORewardModel:
             self._models.append(
                 self.loader.load_model(
                     model_id=self.model_id,
-                    model_name=self.get_submodel_name(model_idx),
+                    model_name=self.get_name(model_idx=model_idx),
                     model_idx=model_idx,
                     lora_config=self.lora_config,
                     init_new=init_new,
@@ -229,7 +230,25 @@ class REPPORewardModel:
         self._models = None
         self._device_manager.clear_cache()
         self.epochs_per_model = [0] * self._num_models
-        logger.info("All reward models unloaded")
+        logger.info("All submodels unloaded from GPU memory")
+
+    def _push_models(self) -> None:
+        """Push all ensemble models to Hub."""
+        for i in range(self._num_models):
+            self._push_model(i)
+
+    def _push_model(self, model_idx: int, epochs: Optional[int] = None) -> None:
+        """Push single model to hub."""
+        self.loader.push_model(
+            model=self.models[model_idx],
+            model_name=self.get_name(model_idx=model_idx),
+            tokenizer=self.tokenizer,
+            epochs=epochs,
+        )
+
+    @property
+    def tokenizer(self) -> AutoTokenizer:
+        return self._tokenizer
 
     @property
     def models(self) -> list[PeftModel]:
@@ -266,7 +285,7 @@ class REPPORewardModel:
         batch: Dict[str, torch.Tensor],
         model: PeftModel,
         device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, dict[str, float]]:
         """Bradley-Terry loss for preference learning."""
         model_idx = self.models.index(model)
         reward_head = self.reward_heads[model_idx]
@@ -284,79 +303,40 @@ class REPPORewardModel:
         )
 
         loss = -F.logsigmoid(chosen_rewards - rejected_rewards).mean()
-        return loss, chosen_rewards, rejected_rewards
 
-    def predict(
+        with torch.no_grad():
+            accuracy = (chosen_rewards > rejected_rewards).float().mean()
+            metrics = {
+                "loss": loss.item(),
+                "rewards/chosen": chosen_rewards.mean().item(),
+                "rewards/rejected": rejected_rewards.mean().item(),
+                "rewards/margins": (chosen_rewards - rejected_rewards).mean().item(),
+                "accuracy": accuracy.item(),
+            }
+
+        return loss, metrics
+
+    def get_name(
         self,
-        device_input_ids: list[torch.Tensor],
-        device_attention_masks: list[torch.Tensor],
-    ) -> torch.Tensor:
-        """Compute rewards using device-resident tensors (pessimistic aggregation).."""
-        if self._models is None:
-            raise RuntimeError("Models not loaded. Call load() first.")
-
-        rewards_ensemble: list[Optional[torch.Tensor]] = [None] * self._num_models
-        thread_exceptions: list[Optional[BaseException]] = [None] * self._num_models
-
-        def predict_reward(
-            model_idx: int,
-            model: PeftModel,
-            input_ids: torch.Tensor,
-            attention_mask: torch.Tensor,
-        ) -> None:
-            try:
-                reward_head = model.reward_head  # type: ignore[attr-defined]
-                device = input_ids.device
-                with torch.no_grad():
-                    model.eval()
-                    rewards = self._compute_reward(
-                        input_ids, attention_mask, model, reward_head, device
-                    )
-                    rewards_ensemble[model_idx] = rewards
-            except BaseException as e:
-                thread_exceptions[model_idx] = e
-
-        threads = []
-        for model_idx in range(self._num_models):
-            thread = threading.Thread(
-                target=predict_reward,
-                args=(
-                    model_idx,
-                    self.models[model_idx],
-                    device_input_ids[model_idx],
-                    device_attention_masks[model_idx],
-                ),
-            )
-            thread.start()
-            threads.append(thread)
-
-        for thread in threads:
-            thread.join()
-
-        for model_idx, exc in enumerate(thread_exceptions):
-            if exc is not None:
-                raise RuntimeError(f"Exception in reward model {model_idx}") from exc
-
-        rewards_filtered = [r.cpu() for r in rewards_ensemble if r is not None]
-        if len(rewards_filtered) == 1:
-            return rewards_filtered[0]
-
-        rewards_tensor = torch.stack(rewards_filtered, dim=0)
-        return rewards_tensor.min(dim=0).values
-
-    def get_name(self, epoch: Optional[int] = None) -> str:
+        *,
+        epoch: Optional[int] = None,
+        model_idx: Optional[int] = None,
+        **kwargs: Any,
+    ) -> str:
         model_name = self.model_id.rsplit("/", 1)[-1]
-        repo_name = f"{model_name}-reppo-a0.0-b0.0-L{self._num_models}"
+        repo_name = f"{model_name}-reppo-L{self._num_models}"
+        if model_idx is not None:
+            repo_name = f"{repo_name}-r{model_idx}"
         if epoch is not None:
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
 
-    def get_submodel_name(self, model_idx: int) -> str:
-        return f"{self.get_name()}-r{model_idx}"
+    def _get_base_model_name(self) -> str:
+        return self.model_id.rsplit("/", 1)[-1]
 
     def can_load_from_epoch(self, epoch: int) -> bool:
         for model_idx in range(self._num_models):
-            submodel_name = self.get_submodel_name(model_idx)
+            submodel_name = self.get_name(model_idx=model_idx)
             if not self._hub_manager.model_exists(submodel_name, epoch):
                 return False
         return True
@@ -376,6 +356,14 @@ class REPPORewardModel:
         """Train the reward model ensemble."""
         raise NotImplementedError("REPPORewardModel training is disabled for now.")
 
+    def predict(
+        self,
+        device_input_ids: list[torch.Tensor],
+        device_attention_masks: list[torch.Tensor],
+    ) -> torch.Tensor:
+        """Inference prediction (unused for reward model training)."""
+        raise NotImplementedError("Predict not implemented for Reward Model")
+
 
 class REPPOModel(BaseModel):
     """REPPO Policy Model (Orchestrator).
@@ -394,7 +382,7 @@ class REPPOModel(BaseModel):
         reward_model: DictConfig,
         device_manager: DeviceManager,
         hub_manager: HubManager,
-        kl_coef: float = 0.1,
+        kl_coef: float = 0.1,  # Unused - for Phase 2
         tokenizer_id: Optional[str] = None,
         chat_template: Optional[str] = None,
         lora_r: int = 16,
@@ -404,7 +392,9 @@ class REPPOModel(BaseModel):
         lora_task_type: str = "CAUSAL_LM",
         lora_target_modules: str = "all-linear",
         compile: bool = False,
-        generator: Optional[Any] = None,
+        generator: Optional[Any] = None,  # Unused - for Phase 2
+        reward_trainer: Optional[DictConfig] = None,
+        policy_trainer: Optional[DictConfig] = None,
         debug: bool = False,
         **kwargs: Any,
     ):
@@ -412,12 +402,16 @@ class REPPOModel(BaseModel):
         self.model_id = model_id
         self._device_manager = device_manager
         self._hub_manager = hub_manager
-        self.kl_coef = kl_coef
-        self.tokenizer_id = tokenizer_id
-        self.chat_template = chat_template
+        # Unused Phase 2 attributes (kept for config compatibility)
         self.generator = generator
+        self.kl_coef = kl_coef
         self.debug = debug
         self._num_models = 1
+        self._reward_trainer_cfg = reward_trainer
+        self._policy_trainer_cfg = policy_trainer
+        self._reward_trainer: Optional[BaseTrainer] = None
+        self._policy_trainer: Optional[BaseTrainer] = None
+        self._trainer: Any = True if reward_trainer or policy_trainer else None
 
         # Instantiate Helper Reward Model
         logger.info("Instantiating REPPO reward model helper...")
@@ -449,7 +443,6 @@ class REPPOModel(BaseModel):
             chat_template=chat_template,
         )
         self._models: list[PeftModel] | None = None
-        self._ref_policy: PeftModel | None = None
         self.epochs_per_model: list[Optional[int]] = [0]
 
         logger.info(
@@ -488,7 +481,7 @@ class REPPOModel(BaseModel):
         else:
             model = self.loader.load_model(
                 model_id=self.model_id,
-                model_name=self.get_submodel_name(0),
+                model_name=self.get_name(),
                 model_idx=0,
                 lora_config=self.lora_config,
                 init_new=init_new,
@@ -511,21 +504,27 @@ class REPPOModel(BaseModel):
         self._ref_policy = None
         self._device_manager.clear_cache()
         self.epochs_per_model = [0]
-        logger.info("REPPO Policy model unloaded")
 
-    def get_name(self, epoch: Optional[int] = None) -> str:
-        """Get policy model name (formerly REPPOPolicyModel.get_name)."""
+    def get_name(
+        self,
+        *,
+        epoch: Optional[int] = None,
+        model_idx: Optional[int] = None,  # Ignored - policy has only one model
+        **kwargs: Any,
+    ) -> str:
+        """Get policy model name - policy for L reward models."""
         model_name = self.model_id.rsplit("/", 1)[-1]
-        repo_name = f"{model_name}-reppo-a0.0-b0.0-L1"
+        # L refers to the number of reward models, not policy models
+        repo_name = f"{model_name}-reppo-L{self.reward_model._num_models}-policy"
         if epoch is not None:
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
 
-    def get_submodel_name(self, model_idx: int) -> str:
-        return f"{self.get_name()}-policy"
+    def _get_base_model_name(self) -> str:
+        return self.model_id.rsplit("/", 1)[-1]
 
     def can_load_from_epoch(self, epoch: int) -> bool:
-        return self._hub_manager.model_exists(self.get_submodel_name(0), epoch)
+        return self._hub_manager.model_exists(self.get_name(), epoch)
 
     def load_from_epoch(self, epoch: int) -> None:
         if self._models is not None:
@@ -540,22 +539,50 @@ class REPPOModel(BaseModel):
         wandb_manager: Optional[Any] = None,
         continue_training: bool = False,
     ) -> None:
-        """Execute orchestrated training via configured trainer."""
-        raise NotImplementedError("REPPOModel training is disabled for now.")
+        """Execute orchestrated training: Reward Ensemble -> Policy."""
+        if self._reward_trainer_cfg is None or self._policy_trainer_cfg is None:
+            raise ValueError("Trainers not configured in model config.")
+
+        # Phase 1: Reward Training
+        logger.info("--- Phase 1: Training Reward Ensemble ---")
+        if self._reward_trainer is None:
+            # Pop epochs if present in config
+            cfg = self._reward_trainer_cfg.copy()
+            reward_epochs = cfg.pop("training_epochs", max_epochs)
+            self._reward_trainer = instantiate(cfg)
+            if isinstance(self._reward_trainer, functools.partial):
+                self._reward_trainer = self._reward_trainer()
+        else:
+            reward_epochs = self._reward_trainer_cfg.get("training_epochs", max_epochs)
+
+        self._reward_trainer.train(
+            model=self.reward_model,
+            data_manager=data_manager,
+            max_epochs=reward_epochs,
+            wandb_manager=wandb_manager,
+            continue_training=continue_training,
+        )
+
+        # Phase 2: Policy Training (Not Implemented)
+        logger.info("--- Phase 2: Training Policy Model ---")
+        raise NotImplementedError(
+            "Phase 2 (Policy Training) is not implemented yet. "
+            "Only Phase 1 (Reward Ensemble Training) is currently supported."
+        )
 
     def loss_fn(
         self,
-        batch: Dict[str, torch.Tensor],
+        batch: dict[str, torch.Tensor],
         model: torch.nn.Module,
         device: torch.device,
-    ) -> tuple[torch.Tensor, ...]:
-        """Compute Policy Loss (PPO/RLOO/etc)."""
-        raise NotImplementedError("Policy loss implementation pending.")
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute loss (delegated to phase-specific models)."""
+        raise NotImplementedError("REPPOModel loss_fn should not be called directly.")
 
     def predict(
         self,
         device_input_ids: list[torch.Tensor],
         device_attention_masks: list[torch.Tensor],
     ) -> torch.Tensor:
-        """Policy prediction (generation or log probs)."""
-        raise NotImplementedError("Policy prediction implementation pending.")
+        """Inference prediction."""
+        raise NotImplementedError("REPPOModel predict not implemented yet.")

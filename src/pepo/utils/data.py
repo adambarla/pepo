@@ -522,23 +522,31 @@ class DataManager:
         ] * num_gpus
         threads: list[threading.Thread] = []
 
+        # Prepare shards and tokenizer copies before starting threads for safety
+        shards: list[Dataset] = []
+        for i in range(num_gpus):
+            start = i * chunk_size
+            end = min(start + chunk_size, total_size)
+            if start < total_size:
+                shards.append(dataset.select(range(start, end)))
+            else:
+                shards.append(None)
+
         def worker(
             model: AutoModelForCausalLM,
             gpu_id: int,
             shard_idx: int,
-            start_idx: int,
-            end_idx: int,
+            sub_dataset: Dataset,
         ) -> None:
             try:
                 device = torch.device(f"cuda:{gpu_id}")
-                sub_dataset = dataset.select(range(start_idx, end_idx))
+                tokenizer_copy = copy.deepcopy(self.tokenizer)
 
                 collator = DataCollator(
-                    tokenizer=self.tokenizer,
+                    tokenizer=tokenizer_copy,
                     max_length=self.max_length,
                     max_prompt_length=self.max_prompt_length,
                 )
-
                 dataloader = DataLoader(
                     sub_dataset,
                     batch_size=self.inference_batch_size,
@@ -553,7 +561,7 @@ class DataManager:
                 chosen_logps_shard: list[float] = []
                 rejected_logps_shard: list[float] = []
 
-                desc = f"GPU {gpu_id} ({start_idx}-{end_idx})"
+                desc = f"GPU {gpu_id}"
                 for batch in tqdm(
                     dataloader, desc=desc, position=shard_idx, leave=False
                 ):
@@ -583,12 +591,10 @@ class DataManager:
 
         # Launch threads for processing (models already loaded)
         for i, gpu_id in enumerate(available_gpus):
-            start = i * chunk_size
-            end = min(start + chunk_size, total_size)
-            if start >= total_size:
-                break
+            if shards[i] is None:
+                continue
 
-            t = threading.Thread(target=worker, args=(models[i], gpu_id, i, start, end))
+            t = threading.Thread(target=worker, args=(models[i], gpu_id, i, shards[i]))
             t.start()
             threads.append(t)
 

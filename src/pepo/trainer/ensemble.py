@@ -1,76 +1,33 @@
-"""DEPPO Trainer for ensemble models."""
+"""Ensemble Trainer for parallel training of multiple models (DEPPO, REPPOReward)."""
 
 import logging
 import threading
-from typing import TYPE_CHECKING, Any, Callable, Optional
-
-if TYPE_CHECKING:
-    from ..model import BaseModel
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import torch
-from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import get_scheduler
 
 from ..utils import DataManager, WandbManager, WandbRun
-from .base import BaseTrainer
+from .base import GenericTrainer
+
+if TYPE_CHECKING:
+    from ..model import BaseModel
 
 logger = logging.getLogger(__name__)
 
 
-class DEPPOTrainer(BaseTrainer):
-    """Trainer class for DEPPO ensemble models."""
+class EnsembleTrainer(GenericTrainer):
+    """
+    Trainer for ensemble models that supports parallel training across GPUs.
+    Adapted from DEPPOTrainer to be generic for any BaseModel returning (loss, metrics).
+    """
 
-    def __init__(
-        self,
-        optimizer: Callable[..., torch.optim.Optimizer],
-        scheduler_name: str,
-        scheduler_num_warmup_steps: int,
-        wandb_config: DictConfig,
-        train_batch_size: int,
-        eval_batch_size: int,
-        gradient_accumulation_steps: int = 1,
-        early_stopping_patience: Optional[int] = None,
-        early_stopping_min_delta: float = 0.0,
-        log_interval: int = 100,
-        skip_eval: bool = False,
-        max_batches_per_epoch: Optional[int] = None,
-    ) -> None:
-        """
-        Initialize trainer.
-
-        Args:
-            optimizer: Callable factory for optimizer instantiation (partial).
-            scheduler_name: Name of the scheduler to use.
-            scheduler_num_warmup_steps: Number of warmup steps for the scheduler.
-            wandb_config: Hydra config for wandb settings.
-            train_batch_size: Batch size for training.
-            eval_batch_size: Batch size for evaluation and generation
-                (found via find_optimal_batch_sizes.py).
-            gradient_accumulation_steps: Number of steps to accumulate gradients.
-            early_stopping_patience: Number of epochs to wait before stopping
-                if no improvement. If None, early stopping is disabled.
-            early_stopping_min_delta: Minimum change to qualify as an improvement.
-            max_batches_per_epoch: Limit batches per epoch (for testing).
-                None = no limit.
-        """
-        self.optimizer_factory = optimizer
-        self.scheduler_name = scheduler_name
-        self.scheduler_num_warmup_steps = scheduler_num_warmup_steps
-        self.wandb_config = wandb_config
-        self.batch_size = train_batch_size
-        self.eval_batch_size = eval_batch_size
-        self.gradient_accumulation_steps = gradient_accumulation_steps
-        self.early_stopping_patience = early_stopping_patience
-        self.early_stopping_min_delta = early_stopping_min_delta
-        self.log_interval = log_interval
-        self.skip_eval = skip_eval
-        self.max_batches_per_epoch = max_batches_per_epoch
-
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
         self.optimizers: list[torch.optim.Optimizer] = []
-        self.schedulers: list[torch.optim.lr_scheduler._LRScheduler] = []
-        self.wandb_manager: Optional[WandbManager] = None
+        self.schedulers: list[torch.optim.lr_scheduler.LRScheduler] = []
 
     def _setup_training(
         self,
@@ -78,15 +35,7 @@ class DEPPOTrainer(BaseTrainer):
         max_epochs: int,
         wandb_manager: Optional[WandbManager] = None,
     ) -> None:
-        """
-        Setup optimizers, schedulers, and wandb handlers.
-        Internal helper called by train().
-
-        Args:
-            data_manager: Data manager for training data.
-            max_epochs: Maximum number of epochs to train for.
-            wandb_manager: Optional WandbManager instance for logging.
-        """
+        """Setup optimizers, schedulers, and wandb handlers."""
         if self.optimizers:
             return
 
@@ -132,29 +81,15 @@ class DEPPOTrainer(BaseTrainer):
         continue_training: bool = False,
     ) -> None:
         """
-        Train the DEPPO ensemble models and save the models to the hub.
-        Uses threading to run models in parallel on different GPUs.
-
-        Args:
-            model: DEPPOModel instance to train (typed as BaseModel for Liskov).
-            data_manager: Data manager for training data.
-            max_epochs: Maximum number of epochs to train for.
-            wandb_manager: Optional WandbManager instance for logging.
+        Train the ensemble models using threading for parallel GPU operation.
         """
-        # Cast to DEPPOModel - this trainer requires DEPPOModel-specific attributes
-        from ..model import DEPPOModel  # Local import to avoid circular import
+        self.model = model
 
-        if not isinstance(model, DEPPOModel):
-            raise TypeError(f"DEPPOTrainer requires DEPPOModel, got {type(model)}")
-        self.model: DEPPOModel = model
-
-        # Load models if not already loaded
+        # Initial loading logic
         if self.model._models is None:
             if continue_training:
-                model_name = model.get_name()
-                latest_epoch = model.hub_manager.find_latest_epoch_for_all_submodels(
-                    model_name, model.num_models, max_epoch=max_epochs
-                )
+                # Use find_latest_epoch from BaseModel
+                latest_epoch = self.model.find_latest_epoch(max_epoch=max_epochs)
                 if latest_epoch is None:
                     logger.warning(
                         "Continue training enabled but no checkpoint found. "
@@ -181,25 +116,24 @@ class DEPPOTrainer(BaseTrainer):
 
         self._setup_training(data_manager, max_epochs, wandb_manager)
 
-        logger.info("Training DEPPO ensemble models...")
+        logger.info(f"Training {self.model.num_models} ensemble models...")
 
         group = self.model.get_name()
-
         threads = []
-        stop_event = threading.Event()  # Signal to stop all threads on error
+        stop_event = threading.Event()
 
         def run_training(**kwargs: Any) -> None:
             """Wrapper that catches exceptions from training threads."""
             try:
                 self._train_model(**kwargs)
             except InterruptedError:
-                pass  # Thread stopped due to error in another thread
+                pass
             except Exception as e:
-                if not stop_event.is_set():  # Only log first error
+                if not stop_event.is_set():
                     logger.error(
                         f"Training thread for model {kwargs['model_idx']} failed: {e}"
                     )
-                stop_event.set()  # Signal other threads to stop
+                stop_event.set()
 
         for model_idx in range(self.model.num_models):
             train_loader = self.data_manager.get_dataloader(
@@ -247,7 +181,8 @@ class DEPPOTrainer(BaseTrainer):
         if stop_event.is_set():
             raise RuntimeError("Training failed - see error log above")
 
-        self.model._push_models()
+        # Cast to Any to access specific model attributes not in BaseModel
+        cast(Any, self.model)._push_models()
 
     def _train_model(
         self,
@@ -255,7 +190,7 @@ class DEPPOTrainer(BaseTrainer):
         train_loader: DataLoader[dict[str, torch.Tensor]],
         eval_loader: DataLoader[dict[str, torch.Tensor]],
         optimizer: torch.optim.Optimizer,
-        scheduler: torch.optim.lr_scheduler._LRScheduler,
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
         n_epochs: int,
         grad_acc_steps: int,
         wandb_run: Optional[WandbRun],
@@ -263,14 +198,9 @@ class DEPPOTrainer(BaseTrainer):
         es_min_delta: float,
         stop_event: Optional[threading.Event] = None,
     ) -> None:
-        """
-        Train a single model in a thread. Each thread sets its CUDA device context
-        to ensure proper GPU isolation.
-        """
-        # Explicitly set CUDA device for this thread
+        """Train a single model in a thread."""
         gpu_id = self.model.device_manager._get_gpu_id_for_model(model_idx)
         torch.cuda.set_device(gpu_id)
-
         device = torch.device(self.model.device_manager.get_device_for_model(model_idx))
         model = self.model.models[model_idx]
 
@@ -278,11 +208,11 @@ class DEPPOTrainer(BaseTrainer):
             wandb_run.init_run()
 
         n_batches = len(train_loader)
-
-        start_epoch = self.model.epochs_per_model[model_idx] or 0
+        start_epoch = cast(Any, self.model).epochs_per_model[model_idx] or 0
         global_step = (
             0 if start_epoch == 0 else start_epoch * n_batches // grad_acc_steps
         )
+
         if global_step > 0:
             for _ in range(global_step):
                 scheduler.step()
@@ -300,13 +230,13 @@ class DEPPOTrainer(BaseTrainer):
                 wandb_run=wandb_run,
             )
 
-        is_continuing = start_epoch > 0
-        if not is_continuing:
-            self.model.loader.push_model(
+        model_any = cast(Any, self.model)
+        if model_any.loader:
+            model_any.loader.push_model(
                 model=model,
-                model_name=self.model.get_submodel_name(model_idx),
-                tokenizer=self.model._tokenizer,
-                epochs=start_epoch,
+                model_name=self.model.get_name(model_idx=model_idx),
+                tokenizer=self.model.tokenizer,
+                epochs=0,
             )
 
         best_eval_loss = initial_eval_loss
@@ -314,7 +244,6 @@ class DEPPOTrainer(BaseTrainer):
         es_enabled = es_patience is not None
 
         for epoch in range(start_epoch + 1, n_epochs + 1):
-            # Check if another thread failed and we should stop
             if stop_event is not None and stop_event.is_set():
                 logger.warning(
                     f"Model {model_idx} stopping early due to error in another thread"
@@ -335,16 +264,17 @@ class DEPPOTrainer(BaseTrainer):
                 stop_event=stop_event,
             )
 
-            self.model.epochs_per_model[model_idx] = epoch
-            if self.model.loader:
-                self.model.loader.push_model(
+            model_any = cast(Any, self.model)
+            model_any.epochs_per_model[model_idx] = epoch
+            if model_any.loader:
+                model_any.loader.push_model(
                     model=model,
-                    model_name=self.model.get_submodel_name(model_idx),
-                    tokenizer=self.model._tokenizer,
+                    model_name=self.model.get_name(model_idx=model_idx),
+                    tokenizer=self.model.tokenizer,
                     epochs=epoch,
                 )
 
-            eval_loss = best_eval_loss  # Default if skipping
+            eval_loss = best_eval_loss
             if not self.skip_eval:
                 eval_loss = self._eval_epoch(
                     model_idx=model_idx,
@@ -364,7 +294,6 @@ class DEPPOTrainer(BaseTrainer):
                 else:
                     patience_counter += 1
 
-                assert es_patience is not None
                 if patience_counter >= es_patience:
                     logger.info(
                         f"Model {model_idx} - Early stopping triggered "
@@ -376,15 +305,64 @@ class DEPPOTrainer(BaseTrainer):
         if wandb_run is not None:
             wandb_run.finish()
 
+    def _compute_avg_metrics(
+        self,
+        accumulated_metrics: dict[str, float],
+        count: int,
+    ) -> dict[str, float]:
+        """Helper to compute averages from accumulated metrics."""
+        return {k: v / count for k, v in accumulated_metrics.items()}
+
+    def _log_metrics(
+        self,
+        wandb_run: WandbRun,
+        metrics: dict[str, float],
+        step: int,
+        prefix: str = "train",
+        add_avg_prefix: bool = True,
+        exclude_keys: Optional[list[str]] = None,
+        additional_log_items: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Helper to log metrics to wandb with consistent naming."""
+        if exclude_keys is None:
+            exclude_keys = []
+
+        log_dict: dict[str, Any] = {}
+        # Add basic info
+        if prefix == "train":
+            log_dict[f"{prefix}/step"] = step
+
+        # Add additional items (e.g. LR or Epoch)
+        if additional_log_items:
+            log_dict.update(additional_log_items)
+
+        # Add metrics
+        for k, v in metrics.items():
+            if k in exclude_keys:
+                continue
+
+            # Construct key name
+            if add_avg_prefix:
+                parts = k.split("/")
+                parts[-1] = f"avg_{parts[-1]}"
+                new_k = "/".join(parts)
+                key_name = f"{prefix}/{new_k}"
+            else:
+                key_name = f"{prefix}/{k}"
+
+            log_dict[key_name] = v
+
+        wandb_run.log(log_dict, step=step)
+
     def _train_epoch(
         self,
         model_idx: int,
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
-        scheduler: torch.optim.lr_scheduler._LRScheduler,
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
         train_loader: DataLoader[dict[str, torch.Tensor]],
         device: torch.device,
-        epoch: int,  # 1-indexed epoch number
+        epoch: int,
         n_epochs: int,
         grad_acc_steps: int,
         wandb_run: Optional[WandbRun],
@@ -397,11 +375,10 @@ class DEPPOTrainer(BaseTrainer):
 
         model.train()
         optimizer.zero_grad()
-        loss_sum = torch.tensor(0.0, device=device)
-        lprob_chosen_sum_tensor = torch.tensor(0.0, device=device)
-        lprob_reject_sum_tensor = torch.tensor(0.0, device=device)
-        margin_sum_tensor = torch.tensor(0.0, device=device)
-        ebatch = 0
+
+        accumulated_metrics: dict[str, float] = {}
+        last_logged_metrics: dict[str, float] = {}
+        samples_count = 0
 
         desc = f"Model {model_idx} - Epoch {epoch}/{n_epochs}"
         pbar = tqdm(
@@ -409,18 +386,16 @@ class DEPPOTrainer(BaseTrainer):
             desc=desc,
             position=model_idx,
             leave=False,
-            mininterval=1.0,  # Update at most once per second
+            mininterval=1.0,
         )
 
         for step, batch in enumerate(train_loader):
-            # Check if another thread failed - stop immediately
             if stop_event is not None and stop_event.is_set():
                 pbar.close()
                 raise InterruptedError(
                     "Training stopped due to error in another thread"
                 )
 
-            # Check batch limit (for testing)
             if (
                 self.max_batches_per_epoch is not None
                 and step >= self.max_batches_per_epoch
@@ -428,58 +403,70 @@ class DEPPOTrainer(BaseTrainer):
                 pbar.close()
                 break
 
-            logger.debug(f"Batch dimensions: {batch['chosen_input_ids'].shape}")
-            batch_loss, lprobs_ch, lprobs_re = self.model.loss_fn(batch, model, device)
+            # loss_fn returns (loss, metrics_dict)
+            loss, metrics = self.model.loss_fn(batch, model, device)
 
-            loss_sum += batch_loss.detach()
-            lprob_chosen_sum_tensor += lprobs_ch.mean().detach()
-            lprob_reject_sum_tensor += lprobs_re.mean().detach()
-            margin_sum_tensor += (lprobs_ch - lprobs_re).mean().detach()
+            # Accumulate metrics
+            loss_val = loss.item()
+            if "loss" not in metrics:
+                metrics["loss"] = loss_val
 
-            batch_loss = batch_loss / grad_acc_steps
-            batch_loss.backward()  # type: ignore[no-untyped-call]
+            for k, v in metrics.items():
+                accumulated_metrics[k] = accumulated_metrics.get(k, 0.0) + v
+
+            samples_count += 1
+
+            # Scale and backward
+            scaled_loss = loss / grad_acc_steps
+            scaled_loss.backward()  # type: ignore[no-untyped-call]
 
             if (step + 1) % grad_acc_steps == 0:
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
-                ebatch += 1
 
             if (step + 1) % self.log_interval == 0:
-                current_lr = scheduler.get_last_lr()[0]
-                loss_val = loss_sum.item() / (step + 1)
-                margin_val = margin_sum_tensor.item() / (step + 1)
+                interval_metrics = {
+                    k: v - last_logged_metrics.get(k, 0.0)
+                    for k, v in accumulated_metrics.items()
+                }
+                last_logged_metrics = accumulated_metrics.copy()
 
-                pbar.set_postfix(
-                    {
-                        "loss": f"{loss_val:.4f}",
-                        "margin": f"{margin_val:.4f}",
-                    }
+                avg_interval_metrics = self._compute_avg_metrics(
+                    interval_metrics, self.log_interval
                 )
+
+                current_loss = avg_interval_metrics.get("loss", 0.0)
+                pbar.set_postfix({"loss": f"{current_loss:.4f}"})
                 pbar.update(1)
 
                 if wandb_run is not None:
-                    wandb_run.log(
-                        {
-                            "train/learning_rate": current_lr,
-                            "train/step": global_step,
-                            "train/curr_avg_loss": loss_val,
-                            "train/curr_avg_margin": margin_val,
-                        },
+                    current_lr = scheduler.get_last_lr()[0]
+                    self._log_metrics(
+                        wandb_run=wandb_run,
+                        metrics=avg_interval_metrics,
                         step=global_step,
+                        prefix="train",
+                        add_avg_prefix=False,  # Raw interval metrics
+                        additional_log_items={"train/learning_rate": current_lr},
                     )
-        if wandb_run is not None:
-            wandb_run.log(
-                {
-                    "train/avg_lprobs_chosen": lprob_chosen_sum_tensor.item() / ebatch,
-                    "train/avg_lprobs_reject": lprob_reject_sum_tensor.item() / ebatch,
-                    "train/avg_margin": margin_sum_tensor.item() / ebatch,
-                    "train/epoch": epoch,
-                },
-                step=global_step,
-            )
+
         pbar.close()
+
+        # Log epoch averages
+        if wandb_run is not None and samples_count > 0:
+            avg_epoch_metrics = self._compute_avg_metrics(
+                accumulated_metrics, samples_count
+            )
+            self._log_metrics(
+                wandb_run=wandb_run,
+                metrics=avg_epoch_metrics,
+                step=global_step,
+                prefix="train",
+                add_avg_prefix=True,
+                additional_log_items={"train/epoch": epoch},
+            )
 
     def _eval_epoch(
         self,
@@ -492,22 +479,13 @@ class DEPPOTrainer(BaseTrainer):
         global_step: int,
         wandb_run: Optional[WandbRun] = None,
     ) -> float:
-        """
-        Evaluate the model on the evaluation dataset.
-        """
         logger.info(f"Model {model_idx} - Evaluating epoch {epoch}/{n_epochs}")
-
         n_batches = len(eval_loader)
-
         if n_batches == 0:
             raise ValueError("Evaluation loader is empty")
 
         model.eval()
-
-        loss_sum = torch.tensor(0.0, device=device)
-        lprob_chosen_sum_tensor = torch.tensor(0.0, device=device)
-        lprob_reject_sum_tensor = torch.tensor(0.0, device=device)
-        margin_sum_tensor = torch.tensor(0.0, device=device)
+        accumulated_metrics: dict[str, float] = {}
 
         desc = f"Model {model_idx} - Eval Epoch {epoch}/{n_epochs}"
         pbar = tqdm(
@@ -516,46 +494,43 @@ class DEPPOTrainer(BaseTrainer):
             position=model_idx,
             leave=False,
             total=n_batches,
-            mininterval=1.0,  # Update at most once per second
+            mininterval=1.0,
         )
 
         with torch.no_grad():
             for step, batch in enumerate(pbar):
-                batch_loss, lprobs_ch, lprobs_re = self.model.loss_fn(
-                    batch, model, device
-                )
+                loss, metrics = self.model.loss_fn(batch, model, device)
 
-                loss_sum += batch_loss
+                loss_val = loss.item()
+                if "loss" not in metrics:
+                    metrics["loss"] = loss_val
 
-                lprob_chosen_sum_tensor += lprobs_ch.mean()
-                lprob_reject_sum_tensor += lprobs_re.mean()
-                margin_sum_tensor += (lprobs_ch - lprobs_re).mean()
+                for k, v in metrics.items():
+                    accumulated_metrics[k] = accumulated_metrics.get(k, 0.0) + v
 
                 if (step + 1) % self.log_interval == 0:
-                    current_avg_loss = loss_sum.item() / (step + 1)
-                    margin_val = margin_sum_tensor.item() / (step + 1)
+                    running_avg_loss = accumulated_metrics["loss"] / (step + 1)
 
-                    pbar.set_postfix(
-                        {
-                            "loss": f"{current_avg_loss:.4f}",
-                            "margin": f"{margin_val:.4f}",
-                        }
-                    )
+                    postfix_dict = {"loss": f"{running_avg_loss:.4f}"}
+
+                    pbar.set_postfix(postfix_dict)
 
         pbar.close()
 
         if wandb_run is not None:
-            wandb_run.log(
-                {
-                    "eval/loss": loss_sum.item() / n_batches,
-                    "eval/avg_lprobs_chosen": lprob_chosen_sum_tensor.item()
-                    / n_batches,
-                    "eval/avg_lprobs_reject": lprob_reject_sum_tensor.item()
-                    / n_batches,
-                    "eval/avg_margin": margin_sum_tensor.item() / n_batches,
-                    "eval/epoch": epoch,
-                },
-                step=global_step,
+            avg_epoch_metrics = self._compute_avg_metrics(
+                accumulated_metrics, n_batches
             )
 
-        return loss_sum.item() / n_batches
+            self._log_metrics(
+                wandb_run=wandb_run,
+                metrics=avg_epoch_metrics,
+                step=global_step,
+                prefix="eval",
+                add_avg_prefix=True,
+                additional_log_items={"eval/epoch": epoch},
+            )
+
+            return avg_epoch_metrics.get("loss", 0.0)
+
+        return accumulated_metrics.get("loss", 0.0) / n_batches
