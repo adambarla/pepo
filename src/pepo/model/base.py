@@ -11,6 +11,7 @@ from transformers import AutoTokenizer
 
 if TYPE_CHECKING:
     from ..generator import Generator
+    from ..loader import CheckpointManager
     from ..trainer import BaseTrainer
     from ..utils import DeviceManager, HubManager
 
@@ -27,6 +28,7 @@ class BaseModel(ABC):
 
     _models: Optional[list[PeftModel]]
     _trainer: Optional["BaseTrainer"]
+    _checkpoint_manager: "CheckpointManager"
     generator: Optional["Generator"]
 
     @property
@@ -44,6 +46,11 @@ class BaseModel(ABC):
     def hub_manager(self) -> "HubManager":
         """Hub manager for model storage."""
 
+    @property
+    def checkpoint_manager(self) -> "CheckpointManager":
+        """Checkpoint manager for saving/loading models."""
+        return self._checkpoint_manager
+
     @abstractmethod
     def loss_fn(
         self,
@@ -60,7 +67,8 @@ class BaseModel(ABC):
             device: Device to run computation on.
 
         Returns:
-            Tuple of (loss, metrics_dict) where metrics_dict contains scalars to be logged.
+            Tuple of (loss, metrics_dict) where metrics_dict contains scalars to be
+            logged.
         """
 
     @abstractmethod
@@ -90,6 +98,18 @@ class BaseModel(ABC):
     @abstractmethod
     def load_from_epoch(self, epoch: int) -> None:
         """Load model from epoch."""
+
+    @abstractmethod
+    def save(self) -> None:
+        """Save all models to storage."""
+
+    @abstractmethod
+    def set_epoch(self, epoch: int, model_idx: Optional[int] = None) -> None:
+        """Set trained epoch. For ensembles, model_idx specifies which model."""
+
+    @abstractmethod
+    def get_epoch(self, model_idx: int = 0) -> int:
+        """Get trained epoch. For ensembles, model_idx specifies which model."""
 
     def find_latest_epoch(self, max_epoch: int) -> Optional[int]:
         """

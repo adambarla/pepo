@@ -10,7 +10,7 @@ from .utils import DeviceManager, HubManager
 logger = logging.getLogger(__name__)
 
 
-class ModelLoader:
+class CheckpointManager:
     def __init__(
         self,
         device_manager: DeviceManager,

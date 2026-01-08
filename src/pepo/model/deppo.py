@@ -12,7 +12,7 @@ from peft import LoraConfig, PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..generator import Generator
-from ..loader import ModelLoader
+from ..loader import CheckpointManager
 from ..trainer import EnsembleTrainer
 from ..utils import DeviceManager, HubManager
 from ..utils.model_utils import get_log_probs
@@ -66,8 +66,7 @@ class DEPPOModel(BaseModel):
 
         self.compile_model = compile
 
-        # Initialize Loader
-        self.loader = ModelLoader(
+        self._checkpoint_manager = CheckpointManager(
             device_manager=device_manager,
             hub_manager=hub_manager,
             compile_model=compile,
@@ -82,7 +81,7 @@ class DEPPOModel(BaseModel):
             target_modules=lora_target_modules,
         )
 
-        self._tokenizer = self.loader.load_tokenizer(
+        self._tokenizer = self.checkpoint_manager.load_tokenizer(
             model_id=model_id,
             tokenizer_id=tokenizer_id,
             chat_template=chat_template,
@@ -169,7 +168,7 @@ class DEPPOModel(BaseModel):
 
         for model_idx in range(self._num_models):
             models.append(
-                self.loader.load_model(
+                self.checkpoint_manager.load_model(
                     model_id=self.model_id,
                     model_name=self.get_name(model_idx=model_idx),
                     model_idx=model_idx,
@@ -180,36 +179,12 @@ class DEPPOModel(BaseModel):
             )
         return models
 
-    def _check_models_loaded(self, expected_epoch: Optional[int] = None) -> None:
-        """
-        Check if models are loaded and optionally verify they're at the expected epoch.
-
-        Args:
-            expected_epoch: If provided, verify models are loaded from this epoch.
-
-        Raises:
-            RuntimeError: If models are not loaded or loaded from wrong epoch.
-        """
+    def _check_models_loaded(self) -> None:
+        """Check if models are loaded."""
         if self._models is None:
-            epoch_msg = (
-                f"Expected epoch: {expected_epoch}"
-                if expected_epoch is not None
-                else ""
-            )
             raise RuntimeError(
-                "Models are not loaded. Call model.load() "
-                f"before using the model. {epoch_msg}"
+                "Models are not loaded. Call model.load() before using the model."
             )
-
-        if expected_epoch is not None:
-            current_epoch = self.epochs_per_model[0] if self.epochs_per_model else None
-            if current_epoch != expected_epoch:
-                raise RuntimeError(
-                    f"Models are loaded from epoch {current_epoch}, "
-                    f"but expected epoch {expected_epoch}. "
-                    f"Call model.load(epoch={expected_epoch}) "
-                    "to load the correct checkpoint."
-                )
 
     @property
     def models(self) -> list[PeftModel]:
@@ -242,19 +217,27 @@ class DEPPOModel(BaseModel):
 
         logger.info("All submodels unloaded from GPU memory")
 
-    def _push_models(self) -> None:
-        """
-        Push all ensemble models to Hub.
-        Delegates to factory.
-        """
-        for i, submodel in enumerate(self.models):
+    def save(self) -> None:
+        """Save all ensemble models to Hub."""
+        for i in range(len(self.models)):
             self._push_model(i)
+
+    def set_epoch(self, epoch: int, model_idx: Optional[int] = None) -> None:
+        """Set trained epoch for a model."""
+        if model_idx is not None:
+            self.epochs_per_model[model_idx] = epoch
+        else:
+            self.epochs_per_model = [epoch] * self._num_models
+
+    def get_epoch(self, model_idx: int = 0) -> int:
+        """Get trained epoch for a model."""
+        return self.epochs_per_model[model_idx] or 0
 
     def _push_model(self, model_idx: int, epochs: Optional[int] = None) -> None:
         """
         Push single model to hub.
         """
-        self.loader.push_model(
+        self.checkpoint_manager.push_model(
             model=self.models[model_idx],
             model_name=self.get_name(model_idx=model_idx),
             tokenizer=self.tokenizer,
@@ -477,32 +460,6 @@ class DEPPOModel(BaseModel):
         )  # (L, B, V)
         min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
         return min_log_probs
-
-    def predict_base_model(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
-    ) -> torch.Tensor:
-        self._check_models_loaded()
-
-        if len(input_ids.shape) == 1:
-            input_ids = input_ids.unsqueeze(0)
-        if len(input_ids.shape) != 2:
-            raise ValueError("input_ids must be a 2D tensor")
-
-        if attention_mask is None:
-            attention_mask = (input_ids != self.tokenizer.pad_token_id).float()
-
-        model = self.models[0]
-        device = torch.device(self.device_manager.get_device_for_model(0))
-        input_ids = input_ids.to(device)
-        attention_mask = attention_mask.to(device)
-        # disable adapter
-        with torch.no_grad():
-            with model.disable_adapter():
-                model.eval()
-                log_probs = self._predict_submodel(
-                    model, input_ids, attention_mask
-                )  # (B, V)
-        return log_probs.cpu()
 
     def generate_responses(
         self,

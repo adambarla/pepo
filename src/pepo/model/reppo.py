@@ -22,7 +22,7 @@ from omegaconf import DictConfig
 from peft import LoraConfig, PeftModel
 from transformers import AutoTokenizer
 
-from ..loader import ModelLoader
+from ..loader import CheckpointManager
 from ..utils import DeviceManager, HubManager
 from .base import BaseModel
 
@@ -117,8 +117,7 @@ class REPPORewardModel(BaseModel):
         self.chat_template = chat_template
         self.debug = debug
 
-        # Initialize Loader
-        self.loader = ModelLoader(
+        self._checkpoint_manager = CheckpointManager(
             device_manager=device_manager,
             hub_manager=hub_manager,
             compile_model=compile,
@@ -134,7 +133,7 @@ class REPPORewardModel(BaseModel):
             modules_to_save=["reward_head"],
         )
 
-        self._tokenizer = self.loader.load_tokenizer(
+        self._tokenizer = self.checkpoint_manager.load_tokenizer(
             model_id=model_id,
             tokenizer_id=tokenizer_id,
             chat_template=chat_template,
@@ -202,7 +201,7 @@ class REPPORewardModel(BaseModel):
             reward_head = RewardHead(hidden_size).to(device=device, dtype=model_dtype)
 
             self._models.append(
-                self.loader.load_model(
+                self.checkpoint_manager.load_model(
                     model_id=self.model_id,
                     model_name=self.get_name(model_idx=model_idx),
                     model_idx=model_idx,
@@ -232,14 +231,25 @@ class REPPORewardModel(BaseModel):
         self.epochs_per_model = [0] * self._num_models
         logger.info("All submodels unloaded from GPU memory")
 
-    def _push_models(self) -> None:
-        """Push all ensemble models to Hub."""
+    def save(self) -> None:
+        """Save all ensemble models to Hub."""
         for i in range(self._num_models):
             self._push_model(i)
 
+    def set_epoch(self, epoch: int, model_idx: Optional[int] = None) -> None:
+        """Set trained epoch for a model."""
+        if model_idx is not None:
+            self.epochs_per_model[model_idx] = epoch
+        else:
+            self.epochs_per_model = [epoch] * self._num_models
+
+    def get_epoch(self, model_idx: int = 0) -> int:
+        """Get trained epoch for a model."""
+        return self.epochs_per_model[model_idx] or 0
+
     def _push_model(self, model_idx: int, epochs: Optional[int] = None) -> None:
         """Push single model to hub."""
-        self.loader.push_model(
+        self.checkpoint_manager.push_model(
             model=self.models[model_idx],
             model_name=self.get_name(model_idx=model_idx),
             tokenizer=self.tokenizer,
@@ -413,16 +423,13 @@ class REPPOModel(BaseModel):
         self._policy_trainer: Optional[BaseTrainer] = None
         self._trainer: Any = True if reward_trainer or policy_trainer else None
 
-        # Instantiate Helper Reward Model
-        logger.info("Instantiating REPPO reward model helper...")
         self.reward_model = instantiate(
             reward_model,
             device_manager=device_manager,
             hub_manager=hub_manager,
         )
 
-        # Initialize Loader for Policy
-        self.loader = ModelLoader(
+        self._checkpoint_manager = CheckpointManager(
             device_manager=device_manager,
             hub_manager=hub_manager,
             compile_model=compile,
@@ -437,13 +444,13 @@ class REPPOModel(BaseModel):
             target_modules=lora_target_modules,
         )
 
-        self._tokenizer = self.loader.load_tokenizer(
+        self._tokenizer = self.checkpoint_manager.load_tokenizer(
             model_id=model_id,
             tokenizer_id=tokenizer_id,
             chat_template=chat_template,
         )
         self._models: list[PeftModel] | None = None
-        self.epochs_per_model: list[Optional[int]] = [0]
+        self._epoch: int = 0
 
         logger.info(
             f"REPPOModel initialized as Policy ({self.model_id}) "
@@ -479,7 +486,7 @@ class REPPOModel(BaseModel):
             logger.warning("Policy already loaded. Unload first to reload.")
             # We allow proceeding, similar to reload
         else:
-            model = self.loader.load_model(
+            model = self.checkpoint_manager.load_model(
                 model_id=self.model_id,
                 model_name=self.get_name(),
                 model_idx=0,
@@ -489,7 +496,7 @@ class REPPOModel(BaseModel):
             )
             self._models = [model]
             if epoch is not None:
-                self.epochs_per_model = [epoch]
+                self._epoch = epoch
             logger.info("Loaded REPPO Policy model")
 
     def unload(self) -> None:
@@ -503,7 +510,7 @@ class REPPOModel(BaseModel):
         self._models = None
         self._ref_policy = None
         self._device_manager.clear_cache()
-        self.epochs_per_model = [0]
+        self._epoch = 0
 
     def get_name(
         self,
@@ -531,6 +538,23 @@ class REPPOModel(BaseModel):
             # Partial unload if needed, or just rely on load handling it
             pass
         self.load(init_new=False, epoch=epoch)
+
+    def save(self) -> None:
+        """Save policy model to Hub."""
+        self.checkpoint_manager.push_model(
+            model=self.policy,
+            model_name=self.get_name(),
+            tokenizer=self.tokenizer,
+            epochs=self._epoch,
+        )
+
+    def set_epoch(self, epoch: int, model_idx: Optional[int] = None) -> None:
+        """Set trained epoch for policy (model_idx ignored)."""
+        self._epoch = epoch
+
+    def get_epoch(self, model_idx: int = 0) -> int:
+        """Get trained epoch for policy (model_idx ignored)."""
+        return self._epoch
 
     def train(
         self,

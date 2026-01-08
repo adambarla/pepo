@@ -1,7 +1,7 @@
 """Single Model Trainer for sequential training of a single model."""
 
 import logging
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -141,14 +141,8 @@ class SingleModelTrainer(GenericTrainer):
 
             # Checkpointing logic
             # We always save the latest model
-            model_any = cast(Any, model)
-            if model_any.loader:
-                model_any.loader.push_model(
-                    model=model.models[0],
-                    model_name=model.get_name(),
-                    tokenizer=model.tokenizer,
-                    epochs=epoch,
-                )
+            model.set_epoch(epoch)
+            model.save()
 
             if not self.skip_eval:
                 n_batches = len(
@@ -279,7 +273,8 @@ class SingleModelTrainer(GenericTrainer):
 
         pbar.close()
 
-        # Handle any remaining metrics if the loop finished without a full accumulation step
+        # Handle any remaining metrics if the loop finished without
+        # a full accumulation step
         if metrics_tracker and wandb_run:
             avg_metrics = {
                 k: v / (num_batches % grad_acc_steps or grad_acc_steps)

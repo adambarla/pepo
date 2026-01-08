@@ -2,7 +2,7 @@
 
 import logging
 import threading
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -181,8 +181,7 @@ class EnsembleTrainer(GenericTrainer):
         if stop_event.is_set():
             raise RuntimeError("Training failed - see error log above")
 
-        # Cast to Any to access specific model attributes not in BaseModel
-        cast(Any, self.model)._push_models()
+        self.model.save()
 
     def _train_model(
         self,
@@ -208,7 +207,7 @@ class EnsembleTrainer(GenericTrainer):
             wandb_run.init_run()
 
         n_batches = len(train_loader)
-        start_epoch = cast(Any, self.model).epochs_per_model[model_idx] or 0
+        start_epoch = self.model.get_epoch(model_idx=model_idx)
         global_step = (
             0 if start_epoch == 0 else start_epoch * n_batches // grad_acc_steps
         )
@@ -230,9 +229,8 @@ class EnsembleTrainer(GenericTrainer):
                 wandb_run=wandb_run,
             )
 
-        model_any = cast(Any, self.model)
-        if model_any.loader:
-            model_any.loader.push_model(
+        if start_epoch == 0:
+            self.model.checkpoint_manager.push_model(
                 model=model,
                 model_name=self.model.get_name(model_idx=model_idx),
                 tokenizer=self.model.tokenizer,
@@ -264,10 +262,9 @@ class EnsembleTrainer(GenericTrainer):
                 stop_event=stop_event,
             )
 
-            model_any = cast(Any, self.model)
-            model_any.epochs_per_model[model_idx] = epoch
-            if model_any.loader:
-                model_any.loader.push_model(
+            self.model.set_epoch(epoch, model_idx=model_idx)
+            if self.model.checkpoint_manager:
+                self.model.checkpoint_manager.push_model(
                     model=model,
                     model_name=self.model.get_name(model_idx=model_idx),
                     tokenizer=self.model.tokenizer,
