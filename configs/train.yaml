@@ -1,8 +1,6 @@
 defaults:
   - model: llama_instruct
   - dataset: ultrafeedback
-  - hub: default
-  - device: default
   - _self_
 
 wandb:
@@ -14,8 +12,11 @@ wandb:
   entity: "pepo-team"
   mode: "online"
 
-hub:
-  push: ${sync} # Push trained models
+# Global manager settings (flat config, not Hydra instantiated)
+push_to_hub: ${sync}
+hub_base_dir: "PessimisticDPO"
+gpu_ids: null  # list of GPU IDs (null = auto-detect)
+dtype: bfloat16
 
 dataset:
   max_length: 1024

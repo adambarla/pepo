@@ -7,28 +7,29 @@ This module contains all REPPO model classes:
 - REPPOModel: Orchestrator for two-phase RLHF training
 """
 
-import functools
+from __future__ import annotations
+
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
     from ..trainer import BaseTrainer
+    from ..utils import DeviceManager, HubManager
 
 import copy
+import functools
 import threading
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from hydra.utils import instantiate
-from omegaconf import DictConfig
 from peft import LoraConfig, PeftModel
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from ..loader import CheckpointManager
-from ..utils import DeviceManager, HubManager
+from ..utils import get_device_manager, get_hub_manager
 from ..utils.data import DataCollator
 from .base import BaseModel
 
@@ -82,8 +83,6 @@ class REPPORewardModel(BaseModel):
         self,
         num_networks: int,
         model_id: str,
-        device_manager: DeviceManager,
-        hub_manager: HubManager,
         tokenizer_id: Optional[str] = None,
         chat_template: Optional[str] = None,
         lora_r: int = 16,
@@ -94,6 +93,7 @@ class REPPORewardModel(BaseModel):
         lora_target_modules: str = "all-linear",
         compile: bool = False,
         debug: bool = False,
+        trainer: Optional["BaseTrainer"] = None,
         **kwargs: Any,
     ):
         """Initialize REPPO Reward Model ensemble.
@@ -101,8 +101,6 @@ class REPPORewardModel(BaseModel):
         Args:
             num_networks: Number of reward models (L).
             model_id: HuggingFace model ID for base model.
-            device_manager: Device manager for GPU allocation.
-            hub_manager: Hub manager for model storage.
             tokenizer_id: Optional tokenizer ID (defaults to model_id).
             chat_template: Optional chat template override.
             lora_r: LoRA rank.
@@ -112,20 +110,19 @@ class REPPORewardModel(BaseModel):
             lora_task_type: LoRA task type.
             lora_target_modules: LoRA target modules.
             compile: Whether to compile the model.
-            trainer: Optional trainer instance.
             debug: Enable debug logging.
         """
         self._num_models = num_networks
         self.model_id = model_id
-        self._device_manager = device_manager
-        self._hub_manager = hub_manager
+        self._device_manager = get_device_manager()
+        self._hub_manager = get_hub_manager()
         self.tokenizer_id = tokenizer_id
         self.chat_template = chat_template
         self.debug = debug
 
         self._checkpoint_manager = CheckpointManager(
-            device_manager=device_manager,
-            hub_manager=hub_manager,
+            device_manager=self._device_manager,
+            hub_manager=self._hub_manager,
             compile_model=compile,
         )
 
@@ -146,6 +143,10 @@ class REPPORewardModel(BaseModel):
         )
         self._models: list[PeftModel] | None = None
         self.epochs_per_model: list[Optional[int]] = [0] * self._num_models
+        self.trainer = trainer
+
+        if trainer is not None:
+            self.trainer = trainer
 
         logger.info(
             f"REPPORewardModel initialized with L={self._num_models}, "
@@ -179,9 +180,8 @@ class REPPORewardModel(BaseModel):
 
     def init_trainer(self) -> None:
         """Initialize the trainer if it's a partial."""
-        # if isinstance(self._trainer, functools.partial):
-        #     self._trainer = self._trainer()
-        pass
+        if isinstance(self.trainer, functools.partial):
+            self.trainer = self.trainer()
 
     def load(self, init_new: bool = False, epoch: Optional[int] = None) -> None:
         """Load models and reward heads into memory."""
@@ -365,12 +365,40 @@ class REPPORewardModel(BaseModel):
     def train(
         self,
         data_manager: Any,
-        max_epochs: int,
+        max_epochs: Optional[int] = None,
         wandb_manager: Optional[Any] = None,
         continue_training: bool = False,
     ) -> None:
         """Train the reward model ensemble."""
-        raise NotImplementedError("REPPORewardModel training is disabled for now.")
+        if self.trainer is None:
+            raise ValueError("Trainer not set in REPPORewardModel.")
+
+        self.init_trainer()
+
+        reward_epochs = (
+            max_epochs if max_epochs is not None else self.trainer.training_epochs
+        )
+
+        if reward_epochs is None:
+            raise ValueError(
+                "Training epochs not configured in reward_model.trainer "
+                "and not passed to train()."
+            )
+
+        if self.can_load_from_epoch(reward_epochs):
+            logger.info(
+                f"Reward models for epoch {reward_epochs} already exist. "
+                "Skipping training and loading from Hub."
+            )
+            self.load_from_epoch(reward_epochs)
+        else:
+            self.trainer.train(
+                model=self,
+                data_manager=data_manager,
+                max_epochs=reward_epochs,
+                wandb_manager=wandb_manager,
+                continue_training=continue_training,
+            )
 
     def predict(
         self,
@@ -384,8 +412,9 @@ class REPPORewardModel(BaseModel):
         self,
         dataset: Any,
         dataset_name: str,
+        split: str = "train",
         semaphore_limit: Optional[int] = None,
-        batch_size: int = 8,
+        force_annotation: bool = False,
     ) -> Any:
         """
         Annotate dataset with rewards from all ensemble models.
@@ -396,18 +425,17 @@ class REPPORewardModel(BaseModel):
         Args:
             dataset: The dataset to annotate (HuggingFace Dataset).
             dataset_name: Name for pushing to Hub.
+            split: Split name for the dataset (e.g., 'train', 'eval').
             semaphore_limit: Max concurrent threads (defaults to num_gpus).
-            batch_size: Batch size for inference.
+            force_annotation: If True, re-annotate even if dataset exists on Hub.
 
         Returns:
             The annotated dataset.
         """
-        if self._hub_manager.dataset_exists(dataset_name):
+        if not force_annotation and self._hub_manager.dataset_exists(dataset_name):
             logger.info(
                 f"Dataset {dataset_name} already exists on Hub. Skipping annotation."
             )
-            # We return the original dataset; robust training might fetch from Hub
-            # independently or we could return None to signal "done".
             return dataset
 
         if self._models is None:
@@ -449,6 +477,10 @@ class REPPORewardModel(BaseModel):
                     max_length=None,
                     max_prompt_length=None,
                 )
+
+                if self.trainer is None:
+                    raise ValueError("Trainer not set. Cannot determine batch size.")
+                batch_size = getattr(self.trainer, "eval_batch_size", 64)
 
                 dataloader = DataLoader(
                     dataset,
@@ -510,8 +542,8 @@ class REPPORewardModel(BaseModel):
         final_dataset = shared_dataset[0]
 
         # Persistence
-        logger.info(f"Pushing annotated dataset to {dataset_name}...")
-        self._hub_manager.push_dataset(final_dataset, dataset_name)
+        logger.info(f"Pushing annotated dataset split '{split}' to {dataset_name}...")
+        self._hub_manager.push_dataset(final_dataset, dataset_name, split=split)
 
         return final_dataset
 
@@ -530,9 +562,7 @@ class REPPOModel(BaseModel):
     def __init__(
         self,
         model_id: str,
-        reward_model: DictConfig,
-        device_manager: DeviceManager,
-        hub_manager: HubManager,
+        reward_model: "REPPORewardModel",
         kl_coef: float = 0.1,  # Unused - for Phase 2
         tokenizer_id: Optional[str] = None,
         chat_template: Optional[str] = None,
@@ -544,39 +574,36 @@ class REPPOModel(BaseModel):
         lora_target_modules: str = "all-linear",
         compile: bool = False,
         generator: Optional[Any] = None,  # Unused - for Phase 2
-        reward_trainer: Optional[DictConfig] = None,
-        policy_trainer: Optional[DictConfig] = None,
-        trainer: Optional[DictConfig] = None,
+        trainer: Optional["BaseTrainer"] = None,
+        force_annotation: bool = False,
         debug: bool = False,
         **kwargs: Any,
     ):
         """Initialize REPPO Model (Policy)."""
         self.model_id = model_id
-        self._device_manager = device_manager
-        self._hub_manager = hub_manager
+        self._device_manager = get_device_manager()
+        self._hub_manager = get_hub_manager()
         # Unused Phase 2 attributes (kept for config compatibility)
         self.generator = generator
         self.kl_coef = kl_coef
         self.debug = debug
         self._num_models = 1
-        self._reward_trainer_cfg = reward_trainer
-        # Support both policy_trainer and trainer (preferred) key
-        self._policy_trainer_cfg = policy_trainer or trainer
-        self._reward_trainer: Optional[BaseTrainer] = None
-        self._policy_trainer: Optional[BaseTrainer] = None
-        # We set self._trainer to policy config to satisfy generic checks relying
-        # on model.trainer
-        self._trainer: Any = self._policy_trainer_cfg
+        self._force_annotation = force_annotation
 
-        self.reward_model = instantiate(
-            reward_model,
-            device_manager=device_manager,
-            hub_manager=hub_manager,
-        )
+        self.reward_model = reward_model
+
+        # Access reward trainer from the instantiated reward model
+        self._reward_trainer = getattr(reward_model, "trainer", None)
+
+        self._policy_trainer = trainer
+
+        # We set self._trainer to policy trainer to satisfy generic checks relying
+        # on model.trainer
+        self._trainer = self._policy_trainer
 
         self._checkpoint_manager = CheckpointManager(
-            device_manager=device_manager,
-            hub_manager=hub_manager,
+            device_manager=self._device_manager,
+            hub_manager=self._hub_manager,
             compile_model=compile,
         )
 
@@ -704,74 +731,33 @@ class REPPOModel(BaseModel):
     def train(
         self,
         data_manager: Any,
-        max_epochs: int,
+        max_epochs: Optional[int] = None,
         wandb_manager: Optional[Any] = None,
         continue_training: bool = False,
     ) -> None:
         """Execute orchestrated training: Reward Ensemble -> Policy."""
-        if self._reward_trainer_cfg is None or self._policy_trainer_cfg is None:
-            raise ValueError("Trainers not configured in model config.")
+        self.reward_model.train(
+            data_manager=data_manager,
+            wandb_manager=wandb_manager,
+            continue_training=continue_training,
+        )
 
-        # Phase 1: Reward Training
-        logger.info("--- Phase 1: Training Reward Ensemble ---")
-        # Determine reward epochs first
-        reward_epochs = self._reward_trainer_cfg.get("training_epochs", max_epochs)
-
-        if self.reward_model.can_load_from_epoch(reward_epochs):
-            logger.info(
-                f"Reward models for epoch {reward_epochs} already exist. "
-                "Skipping training and loading from Hub."
-            )
-            self.reward_model.load_from_epoch(reward_epochs)
-        else:
-            if self._reward_trainer is None:
-                # Pop epochs from config to avoid passing it to trainer init
-                cfg = self._reward_trainer_cfg.copy()
-                if "training_epochs" in cfg:
-                    del cfg["training_epochs"]
-
-                trainer_instance = instantiate(cfg)
-                if isinstance(trainer_instance, functools.partial):
-                    trainer_instance = trainer_instance()
-                self._reward_trainer = trainer_instance
-
-            if self._reward_trainer is None:
-                raise ValueError("Failed to initialize reward trainer")
-
-            self._reward_trainer.train(
-                model=self.reward_model,
-                data_manager=data_manager,
-                max_epochs=reward_epochs,
-                wandb_manager=wandb_manager,
-                continue_training=continue_training,
-            )
-
-        # Inter-Phase: Annotate Dataset
-        logger.info("--- Phase 1 Complete. Starting Annotation ---")
-
-        # We annotate the dataset corresponding to the trained state
-        # We assume all models are at the same epoch after training
         annotated_epoch = self.reward_model.get_epoch(0)
         annotation_dataset_name = self.reward_model.get_name(epoch=annotated_epoch)
 
-        # For now, we annotate the evaluation dataset provided by DataManager
-        # TODO: Allow configuring which dataset split to annotate
-        # (e.g. 'train' or 'unlabeled')
-        target_dataset = data_manager.eval_dataset
+        for dataset, split in [
+            (data_manager.merged_train_dataset, "train"),
+            (data_manager.eval_dataset, "eval"),
+        ]:
+            if dataset is not None:
+                self.reward_model.annotate_dataset(
+                    dataset=dataset,
+                    dataset_name=annotation_dataset_name,
+                    split=split,
+                    force_annotation=self._force_annotation,
+                )
 
-        if target_dataset is not None:
-            self.reward_model.annotate_dataset(
-                dataset=target_dataset, dataset_name=annotation_dataset_name
-            )
-        else:
-            logger.warning("No evaluation dataset found in DataManager to annotate.")
-
-        # Phase 2: Policy Training (Not Implemented)
-        logger.info("--- Phase 2: Training Policy Model ---")
-        raise NotImplementedError(
-            "Phase 2 (Policy Training) is not implemented yet. "
-            "Only Phase 1 (Reward Ensemble Training) is currently supported."
-        )
+        raise NotImplementedError("Phase 2 not implemented.")
 
     def loss_fn(
         self,

@@ -9,7 +9,7 @@ from tqdm import tqdm
 from transformers import get_scheduler
 
 from ..utils import DataManager, WandbManager, WandbRun
-from .base import GenericTrainer
+from .base import BaseTrainer
 
 if TYPE_CHECKING:
     from ..model import BaseModel
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class SingleModelTrainer(GenericTrainer):
+class SingleModelTrainer(BaseTrainer):
     """
     Standard sequential trainer for single-model architectures.
     """
@@ -74,12 +74,20 @@ class SingleModelTrainer(GenericTrainer):
         self,
         model: "BaseModel",
         data_manager: DataManager,
-        max_epochs: int,
+        max_epochs: Optional[int] = None,
         wandb_manager: Optional[WandbManager] = None,
         continue_training: bool = False,
     ) -> None:
         """Sequential training loop."""
         self.model = model
+
+        if max_epochs is None:
+            max_epochs = self.training_epochs
+
+        if max_epochs is None:
+            raise ValueError(
+                "max_epochs not provided to train() and not configured in trainer."
+            )
 
         # Initial loading
         if self.model._models is None:

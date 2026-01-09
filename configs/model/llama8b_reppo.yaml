@@ -1,5 +1,5 @@
 defaults:
-  - /trainer@reward_trainer: ensemble
+  - /trainer@reward_model.trainer: ensemble
   - /trainer@trainer: single
   - _self_
 
@@ -7,7 +7,6 @@ train_batch_size: 32
 eval_batch_size: 64
 
 _target_: pepo.model.reppo.REPPOModel
-_recursive_: false
 
 reward_model:
   _target_: pepo.model.reppo.REPPORewardModel
@@ -21,6 +20,11 @@ reward_model:
   lora_target_modules: "all-linear"
   compile: false
   debug: ${debug}
+  trainer:
+    train_batch_size: ${...train_batch_size}
+    eval_batch_size: ${...eval_batch_size}
+    gradient_accumulation_steps: 1
+    training_epochs: 2
 
 
 model_id: "allenai/Llama-3.1-Tulu-3-8B-SFT"
@@ -33,6 +37,7 @@ lora_target_modules: "all-linear"
 compile: false
 debug: ${debug}
 kl_coef: 0.1
+force_annotation: false  # Set to true to re-annotate even if dataset exists on Hub
 
 generator:
   _target_: pepo.generator.Generator
@@ -42,14 +47,10 @@ generator:
   max_new_tokens: 128
 
 
-reward_trainer:
-  train_batch_size: ${train_batch_size}
-  eval_batch_size: ${eval_batch_size}
-  gradient_accumulation_steps: 1
-  training_epochs: 2
+
 
 trainer:
-  train_batch_size: ${train_batch_size}
-  eval_batch_size: ${eval_batch_size}
+  train_batch_size: ${..train_batch_size}
+  eval_batch_size: ${..eval_batch_size}
   gradient_accumulation_steps: 1
   training_epochs: 2

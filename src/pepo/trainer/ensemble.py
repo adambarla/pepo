@@ -10,7 +10,7 @@ from tqdm import tqdm
 from transformers import get_scheduler
 
 from ..utils import DataManager, WandbManager, WandbRun
-from .base import GenericTrainer
+from .base import BaseTrainer
 
 if TYPE_CHECKING:
     from ..model import BaseModel
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class EnsembleTrainer(GenericTrainer):
+class EnsembleTrainer(BaseTrainer):
     """
     Trainer for ensemble models that supports parallel training across GPUs.
     Adapted from DEPPOTrainer to be generic for any BaseModel returning (loss, metrics).
@@ -76,7 +76,7 @@ class EnsembleTrainer(GenericTrainer):
         self,
         model: "BaseModel",
         data_manager: DataManager,
-        max_epochs: int,
+        max_epochs: Optional[int] = None,
         wandb_manager: Optional[WandbManager] = None,
         continue_training: bool = False,
     ) -> None:
@@ -84,6 +84,14 @@ class EnsembleTrainer(GenericTrainer):
         Train the ensemble models using threading for parallel GPU operation.
         """
         self.model = model
+
+        if max_epochs is None:
+            max_epochs = self.training_epochs
+
+        if max_epochs is None:
+            raise ValueError(
+                "max_epochs not provided to train() and not configured in trainer."
+            )
 
         # Initial loading logic
         if self.model._models is None:

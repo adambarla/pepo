@@ -2,8 +2,6 @@ defaults:
   - model: llama_instruct
   - dataset: ultrafeedback
   - evaluator: alpaca
-  - hub: default
-  - device: default
   - model@ref_model: null #in CLI override as model@ref_model=...
   - _self_
 
@@ -16,8 +14,11 @@ wandb:
   entity: "pepo-team"
   mode: "online"
 
-hub:
-  push: ${sync} # Push trained models
+# Global manager settings (flat config, not Hydra instantiated)
+push_to_hub: false  # Eval typically doesn't push
+hub_base_dir: "PessimisticDPO"
+gpu_ids: null
+dtype: bfloat16
 
 dataset:
   max_length: 1024

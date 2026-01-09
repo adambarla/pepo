@@ -9,6 +9,6 @@
 #SBATCH --exclusive
 #SBATCH --mem=450G
 
-cd ~/PEPO
+cd ~/pepo
 
-uv  run --no-sync scripts/train.py "$@"
+uv run scripts/train.py "$@"

@@ -9,11 +9,11 @@ from omegaconf import DictConfig, OmegaConf
 from pepo.evaluator.base import BaseEvaluator
 from pepo.model import BaseModel
 from pepo.utils import (
-    DeviceManager,
-    HubManager,
     WandbManager,
     WandbRun,
     constants,
+    init_device_manager,
+    init_hub_manager,
     setup_logging,
     strip_hydra_targets,
 )
@@ -49,14 +49,18 @@ def main(cfg: DictConfig) -> None:
     logger.debug(f"Config: \n{OmegaConf.to_yaml(cfg, resolve=True)}")
     logger.info("PEPO Evaluation Script - Starting")
 
-    device_manager: DeviceManager = instantiate(cfg.device)
-    hub_manager: HubManager = instantiate(cfg.hub)
-
-    model: BaseModel = instantiate(
-        cfg.model,
-        device_manager=device_manager,
-        hub_manager=hub_manager,
+    # Initialize global managers
+    init_device_manager(
+        gpu_ids=cfg.get("gpu_ids"),
+        dtype=cfg.get("dtype", "bfloat16"),
     )
+    init_hub_manager(
+        base_dir=cfg.get("hub_base_dir", "PessimisticDPO"),
+        push=cfg.get("push_to_hub", False),  # Eval typically doesn't push
+        load_trainable=False,  # Eval loads frozen models
+    )
+
+    model: BaseModel = instantiate(cfg.model)
     epoch: Optional[int] = cfg.get("e", None)
 
     if model.generator is None:
@@ -90,11 +94,7 @@ def main(cfg: DictConfig) -> None:
     model_ref: Optional[BaseModel] = None
     epoch_ref: Optional[int] = None
     if cfg.get("ref_model", None) is not None and "_target_" in cfg.ref_model:
-        model_ref = instantiate(
-            cfg.ref_model,
-            device_manager=device_manager,
-            hub_manager=hub_manager,
-        )
+        model_ref = instantiate(cfg.ref_model)
         epoch_ref = cfg.get("ref_e", None)
 
     evaluator.evaluate(

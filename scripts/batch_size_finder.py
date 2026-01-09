@@ -292,6 +292,8 @@ def update_model_config(
     config_path="../configs", config_name="benchmark.yaml", version_base="1.1"
 )
 def main(cfg: DictConfig) -> None:
+    from pepo.utils import init_device_manager, init_hub_manager
+
     hydra_cfg = HydraConfig.get()
     work_dir = Path(hydra_cfg.runtime.cwd)
 
@@ -305,11 +307,16 @@ def main(cfg: DictConfig) -> None:
         tasks = [tasks]
 
     set_seed(cfg.seed)
-    device_manager = instantiate(cfg.device)
-    hub_manager = instantiate(cfg.hub)
-    model = instantiate(
-        cfg.model, device_manager=device_manager, hub_manager=hub_manager
+    init_device_manager(
+        gpu_ids=cfg.get("gpu_ids"),
+        dtype=cfg.get("dtype", "bfloat16"),
     )
+    init_hub_manager(
+        base_dir=cfg.get("hub_base_dir", "PessimisticDPO"),
+        push=False,
+        load_trainable=True,
+    )
+    model = instantiate(cfg.model)
     tokenizer = model.get_tokenizer()
 
     results: dict[str, dict[str, Any]] = {}

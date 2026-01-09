@@ -14,6 +14,47 @@ dotenv.load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# Singleton instance
+_instance: Optional["HubManager"] = None
+
+
+def init_hub_manager(
+    base_dir: str = "PessimisticDPO",
+    push: bool = True,
+    load_trainable: bool = True,
+    hf_token: Optional[str] = None,
+) -> "HubManager":
+    """Initialize the global HubManager singleton.
+
+    Args:
+        base_dir: HuggingFace username/organization.
+        push: Whether to push models/datasets to hub.
+        load_trainable: Whether to load models with trainable parameters.
+        hf_token: HuggingFace token. If None, uses HF_TOKEN env var.
+
+    Returns:
+        The initialized HubManager instance.
+    """
+    global _instance
+    _instance = HubManager(
+        base_dir=base_dir,
+        push=push,
+        load_trainable=load_trainable,
+        hf_token=hf_token,
+    )
+    return _instance
+
+
+def get_hub_manager() -> "HubManager":
+    """Get the global HubManager singleton.
+
+    Raises:
+        RuntimeError: If init_hub_manager was not called first.
+    """
+    if _instance is None:
+        raise RuntimeError("HubManager not initialized. Call init_hub_manager() first.")
+    return _instance
+
 
 class HubManager:
     """
@@ -212,14 +253,27 @@ class HubManager:
         )
 
     def push_dataset(
-        self, dataset: Any, dataset_name: str, private: bool = False
+        self,
+        dataset: Any,
+        dataset_name: str,
+        split: str = "train",
+        private: bool = False,
     ) -> None:
-        """Push dataset to Hugging Face Hub."""
+        """Push dataset to Hugging Face Hub.
+
+        Args:
+            dataset: The dataset to push.
+            dataset_name: Name for the dataset repo.
+            split: Split name (e.g., 'train', 'eval'). Defaults to 'train'.
+            private: Whether to make the repo private.
+        """
         repo_id = f"{self.base_dir}/{dataset_name}"
         if not self.should_push_to_hub:
             logger.warning(f"Disabled push to Hub. Skipping push of {repo_id}.")
             return
 
-        logger.info(f"Pushing dataset to {repo_id}...")
-        dataset.push_to_hub(repo_id, private=private)
-        logger.info(f"Dataset successfully pushed to: https://huggingface.co/{repo_id}")
+        logger.info(f"Pushing dataset split '{split}' to {repo_id}...")
+        dataset.push_to_hub(repo_id, split=split, private=private)
+        logger.info(
+            f"Dataset split '{split}' pushed to: https://huggingface.co/{repo_id}"
+        )

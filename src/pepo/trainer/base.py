@@ -18,26 +18,7 @@ class BaseTrainer(ABC):
     """
     Abstract base class for model trainers.
 
-    This defines the interface that BaseModel.train() relies on.
-    Subclasses implement training logic for specific model types.
-    """
-
-    @abstractmethod
-    def train(
-        self,
-        model: "BaseModel",
-        data_manager: "DataManager",
-        max_epochs: int,
-        wandb_manager: Optional["WandbManager"] = None,
-        continue_training: bool = False,
-    ) -> None:
-        """Train the model."""
-        pass
-
-
-class GenericTrainer(BaseTrainer):
-    """
-    Base class for trainers with shared configuration.
+    Defined with shared configuration fields used by subclasses.
     """
 
     def __init__(
@@ -54,6 +35,7 @@ class GenericTrainer(BaseTrainer):
         log_interval: int = 100,
         skip_eval: bool = False,
         max_batches_per_epoch: Optional[int] = None,
+        training_epochs: Optional[int] = None,
     ) -> None:
         self.optimizer_factory = optimizer
         self.scheduler_name = scheduler_name
@@ -67,5 +49,28 @@ class GenericTrainer(BaseTrainer):
         self.log_interval = log_interval
         self.skip_eval = skip_eval
         self.max_batches_per_epoch = max_batches_per_epoch
+        self.training_epochs = training_epochs
 
         self.wandb_manager: Optional["WandbManager"] = None
+
+    @abstractmethod
+    def train(
+        self,
+        model: "BaseModel",
+        data_manager: "DataManager",
+        max_epochs: Optional[int] = None,
+        wandb_manager: Optional["WandbManager"] = None,
+        continue_training: bool = False,
+    ) -> None:
+        """
+        Train the model using the configured trainer.
+
+        Args:
+            model: The model to train.
+            data_manager: Data manager for training data.
+            max_epochs: Optional number of epochs to train for.
+                Defaults to trainer config.
+            wandb_manager: Optional WandbManager instance for logging.
+            continue_training: Whether to continue from checkpoint.
+        """
+        pass

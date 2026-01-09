@@ -1,10 +1,15 @@
 """DEPPO (Direct Ensemble Pessimistic Preference Optimization) Model."""
 
+from __future__ import annotations
+
 import functools
 import logging
 import math
 import threading
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+if TYPE_CHECKING:
+    from ..utils import DeviceManager, HubManager
 
 import torch
 import torch.nn.functional as F
@@ -14,7 +19,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from ..generator import Generator
 from ..loader import CheckpointManager
 from ..trainer import EnsembleTrainer
-from ..utils import DeviceManager, HubManager
+from ..utils import get_device_manager, get_hub_manager
 from ..utils.model_utils import get_log_probs
 from .base import BaseModel
 
@@ -33,8 +38,6 @@ class DEPPOModel(BaseModel):
         beta: float,
         num_networks: int,
         model_id: str,
-        device_manager: DeviceManager,
-        hub_manager: HubManager,
         tokenizer_id: Optional[str] = None,
         chat_template: Optional[str] = None,
         lora_r: int = 16,
@@ -56,8 +59,8 @@ class DEPPOModel(BaseModel):
         self.beta = beta
         self._num_models = num_networks
         self.model_id = model_id
-        self._device_manager = device_manager
-        self._hub_manager = hub_manager
+        self._device_manager = get_device_manager()
+        self._hub_manager = get_hub_manager()
         self.tokenizer_id = tokenizer_id
         self.chat_template = chat_template
         self._trainer = trainer
@@ -67,8 +70,8 @@ class DEPPOModel(BaseModel):
         self.compile_model = compile
 
         self._checkpoint_manager = CheckpointManager(
-            device_manager=device_manager,
-            hub_manager=hub_manager,
+            device_manager=self._device_manager,
+            hub_manager=self._hub_manager,
             compile_model=compile,
         )
 
@@ -119,7 +122,7 @@ class DEPPOModel(BaseModel):
     def train(
         self,
         data_manager: Any,
-        max_epochs: int,
+        max_epochs: Optional[int] = None,
         wandb_manager: Optional[Any] = None,
         continue_training: bool = False,
     ) -> None:
@@ -128,8 +131,9 @@ class DEPPOModel(BaseModel):
 
         Args:
             data_manager: Data manager for training data.
-            max_epochs: Maximum number of epochs to train for.
+            max_epochs: Optional number of epochs to train for.
             wandb_manager: Optional WandbManager instance for logging.
+            continue_training: Whether to continue from checkpoint.
         """
         if self._trainer is None:
             raise ValueError("Trainer not configured in model config.")

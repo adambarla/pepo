@@ -458,6 +458,18 @@ class DataManager:
 
         logger.info("Dataset preprocessing and splitting complete.")
 
+    @property
+    def merged_train_dataset(self) -> Dataset:
+        """Return merged train dataset (all L splits) for annotation.
+
+        Concatenates all L train dataset splits, excluding eval to prevent
+        data leakage during policy training.
+        """
+        from datasets import concatenate_datasets
+
+        all_train = list(self.train_datasets.values())
+        return concatenate_datasets(all_train)
+
     def _initialize_dataset(self) -> None:
         dataset_preprocessed = self._load_cache()
 

@@ -2,7 +2,7 @@
 # Orchestrates two-phase training: Reward (L=1 models) -> Policy (1 model)
 
 defaults:
-  - /trainer@reward_trainer: ensemble
+  - /trainer@reward_model.trainer: ensemble
   - /trainer@trainer: single
   - _self_
 
@@ -10,7 +10,6 @@ train_batch_size: 128
 eval_batch_size: 256
 
 _target_: pepo.model.reppo.REPPOModel
-_recursive_: false
 
 wandb:
   tags: ["reppo"]
@@ -25,6 +24,11 @@ reward_model:
   lora_dropout: 0.05
   lora_target_modules: "all-linear"
   debug: ${debug}
+  trainer:
+    train_batch_size: ${...train_batch_size}
+    eval_batch_size: ${...eval_batch_size}
+    gradient_accumulation_steps: 1
+    training_epochs: 1
 
 model_id: "HuggingFaceTB/SmolLM2-1.7B"
 tokenizer_id: null
@@ -39,15 +43,11 @@ compile: false
 debug: ${debug}
 kl_coef: 0.1
 
-reward_trainer:
-  train_batch_size: ${train_batch_size}
-  eval_batch_size: ${eval_batch_size}
-  gradient_accumulation_steps: 1
-  training_epochs: 1
+
 
 trainer:
-  train_batch_size: ${train_batch_size}
-  eval_batch_size: ${eval_batch_size}
+  train_batch_size: ${..train_batch_size}
+  eval_batch_size: ${..eval_batch_size}
   gradient_accumulation_steps: 1
   training_epochs: 1
 

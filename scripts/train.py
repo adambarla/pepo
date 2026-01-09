@@ -25,10 +25,10 @@ from omegaconf import DictConfig, OmegaConf, SCMode
 from pepo.model import BaseModel
 from pepo.utils import (
     DataManager,
-    DeviceManager,
-    HubManager,
     WandbManager,
     constants,
+    init_device_manager,
+    init_hub_manager,
     set_seed,
     setup_logging,
 )
@@ -61,15 +61,18 @@ def main(cfg: DictConfig) -> None:
 
     set_seed(cfg.seed)
 
-    # Instantiate managers
-    device_manager: DeviceManager = instantiate(cfg.device)
-    hub_manager: HubManager = instantiate(cfg.hub)
-
-    model: BaseModel = instantiate(
-        cfg.model,
-        device_manager=device_manager,
-        hub_manager=hub_manager,
+    # Initialize global managers
+    device_manager = init_device_manager(
+        gpu_ids=cfg.get("gpu_ids"),
+        dtype=cfg.get("dtype", "bfloat16"),
     )
+    init_hub_manager(
+        base_dir=cfg.get("hub_base_dir", "PessimisticDPO"),
+        push=cfg.get("push_to_hub", cfg.get("sync", True)),
+        load_trainable=True,
+    )
+
+    model: BaseModel = instantiate(cfg.model)
 
     if model._trainer is None:
         raise ValueError("Trainer not configured in model config.")

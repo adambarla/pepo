@@ -172,7 +172,7 @@ class BaseModel(ABC):
     def train(
         self,
         data_manager: Any,
-        max_epochs: int,
+        max_epochs: Optional[int] = None,
         wandb_manager: Optional[Any] = None,
         continue_training: bool = False,
     ) -> None:
@@ -181,7 +181,8 @@ class BaseModel(ABC):
 
         Args:
             data_manager: Data manager for training data.
-            max_epochs: Maximum number of epochs to train for.
+            max_epochs: Optional number of epochs to train for.
+                Defaults to trainer config.
             wandb_manager: Optional WandbManager instance for logging.
             continue_training: Whether to continue from checkpoint.
         """
