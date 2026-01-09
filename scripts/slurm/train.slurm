@@ -1,9 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=train_pepo
-#SBATCH --partition=long
 #SBATCH --output=outputs/slurm/train/%j.out
 #SBATCH --error=outputs/slurm/train/%j.err
-#SBATCH --time=48:00:00
+#SBATCH --time=12:00:00
 #SBATCH --gres=gpu:4
 #SBATCH --account=infra01
 #SBATCH --exclusive

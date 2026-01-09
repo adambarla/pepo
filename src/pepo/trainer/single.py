@@ -8,7 +8,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import get_scheduler
 
-from ..utils import DataManager, WandbManager, WandbRun
+from ..data import DataManager
+from ..utils import WandbManager, WandbRun
 from .base import BaseTrainer
 
 if TYPE_CHECKING:
@@ -77,6 +78,7 @@ class SingleModelTrainer(BaseTrainer):
         max_epochs: Optional[int] = None,
         wandb_manager: Optional[WandbManager] = None,
         continue_training: bool = False,
+        **kwargs: Any,
     ) -> None:
         """Sequential training loop."""
         self.model = model
@@ -89,9 +91,9 @@ class SingleModelTrainer(BaseTrainer):
                 "max_epochs not provided to train() and not configured in trainer."
             )
 
-        # Initial loading
         if self.model._models is None:
-            self.model.load(init_new=not continue_training)
+            load_kwargs = kwargs.get("load_kwargs", {})
+            self.model.load(init_new=not continue_training, **load_kwargs)
 
         self._setup_training(model, data_manager, max_epochs, wandb_manager)
 
@@ -100,11 +102,13 @@ class SingleModelTrainer(BaseTrainer):
         group = model.get_name()
         wandb_run = None
         if self.wandb_manager is not None:
+            m_idx = None if "policy" in group.lower() else 0
             wandb_run = self.wandb_manager.get_training_wandb_handler(
                 model=model,
                 data_manager=data_manager,
-                model_idx=0,
+                model_idx=m_idx,
                 group=group,
+                extra_tags=["policy"],
             )
             if wandb_run is not None and wandb_run.enabled:
                 wandb_run.init_run()
@@ -143,12 +147,8 @@ class SingleModelTrainer(BaseTrainer):
             )
 
             if self.early_stopping_patience is not None:
-                # For early stopping we use validation loss
-                # Note: We can implement validation set if needed
                 pass
 
-            # Checkpointing logic
-            # We always save the latest model
             model.set_epoch(epoch)
             model.save()
 
@@ -240,28 +240,17 @@ class SingleModelTrainer(BaseTrainer):
             if stop_event is not None and stop_event.is_set():
                 break
 
-            # Move batch to device
             batch = {k: v.to(device) for k, v in batch.items()}
-
-            # Forward pass
             loss, metrics = model.loss_fn(batch, model.models[0], device)
-
-            # Scale loss for gradient accumulation
             scaled_loss = loss / grad_acc_steps
-
-            # Backward pass
             scaled_loss.backward()  # type: ignore[no-untyped-call]
 
             total_loss += loss.item()
             num_batches += 1
 
-            # Accumulate metrics
             for k, v in metrics.items():
-                if k not in metrics_tracker:
-                    metrics_tracker[k] = 0.0
-                metrics_tracker[k] += v
+                metrics_tracker[k] = metrics_tracker.get(k, 0.0) + v
 
-            # Update weights if gradient accumulation steps reached
             if (batch_idx + 1) % grad_acc_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
@@ -269,7 +258,6 @@ class SingleModelTrainer(BaseTrainer):
                 global_step += 1
 
                 if wandb_run:
-                    # Log metrics for the accumulated step
                     avg_metrics = {
                         k: v / grad_acc_steps for k, v in metrics_tracker.items()
                     }
@@ -277,7 +265,7 @@ class SingleModelTrainer(BaseTrainer):
                     prefixed_metrics["train/step"] = global_step
                     prefixed_metrics["train/lr"] = scheduler.get_last_lr()[0]
                     wandb_run.log(prefixed_metrics, step=global_step)
-                    metrics_tracker.clear()  # Reset metrics for next accumulation
+                    metrics_tracker.clear()
 
         pbar.close()
 

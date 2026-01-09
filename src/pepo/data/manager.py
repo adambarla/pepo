@@ -1,8 +1,7 @@
 import copy
 import hashlib
 import logging
-import threading
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from ..utils import DeviceManager
@@ -11,11 +10,10 @@ import numpy as np
 import torch
 from datasets import Dataset, DatasetDict, load_dataset
 from torch.utils.data import DataLoader
-from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from ..utils import get_device_manager, get_hub_manager
-from ..utils.model_utils import get_log_probs
+from .annotators import BaseAnnotator
 from .collators.base import DataCollator
 from .processors.base import DataProcessor
 from .sampler import LengthBasedBatchSampler
@@ -41,7 +39,7 @@ class DataManager:
         dataloader_num_workers: int = 0,
         dataloader_pin_memory: bool = False,
         shuffle_train: bool = True,
-        ref_model_id: Optional[str] = None,
+        annotators: Optional[list[BaseAnnotator]] = None,
         inference_batch_size: int = 8,
         device_manager: Optional["DeviceManager"] = None,
         force_recompute: bool = False,
@@ -59,7 +57,7 @@ class DataManager:
         self.dataloader_num_workers = dataloader_num_workers
         self.dataloader_pin_memory = dataloader_pin_memory
         self.shuffle_train = shuffle_train
-        self.ref_model_id = ref_model_id
+        self.annotators = annotators or []
         self.inference_batch_size = inference_batch_size
         self.device_manager = device_manager or get_device_manager()
         self.force_recompute = force_recompute
@@ -67,36 +65,62 @@ class DataManager:
 
         self._initialize_dataset()
 
-    def _get_processed_name(self) -> str:
+    def get_processed_name(self) -> str:
         """Generate unique name for processed dataset based on config."""
 
-        # Include critical filtering params in hash
+        # Sort annotator signatures for consistent hashing (commutative)
+        annotator_sigs = [
+            str(sorted(a.get_signature().items())) for a in self.annotators
+        ]
+        annotator_sigs.sort()
+
         hash_params = {
-            "template": getattr(self.tokenizer, "chat_template", ""),
+            "template": self.tokenizer.chat_template or "",
             "train_split": self.train_split_name,
             "eval_split": self.eval_split_name,
             "max_len": self.max_length,
             "max_prompt_len": self.max_prompt_length,
-            "ref_model": self.ref_model_id,
+            "annotators": annotator_sigs,
         }
         param_hash = hashlib.md5(str(sorted(hash_params.items())).encode()).hexdigest()[
             :8
         ]
 
         proc_name = type(self.processor).__name__ if self.processor else "none"
-        return f"{self.dataset_id.replace('/', '_')}-{proc_name}-{param_hash}"
+        if proc_name.endswith("Processor"):
+            proc_name = proc_name.replace("Processor", "")
+
+        # Also sort names for the string representation
+        annotator_names = sorted([type(a).__name__ for a in self.annotators])
+        annotator_names = [
+            n.replace("Annotator", "") if n.endswith("Annotator") else n
+            for n in annotator_names
+        ]
+        annotator_str = "-".join(annotator_names) if annotator_names else "none"
+
+        # Use only the last part of dataset_id (after /) for brevity
+        short_dataset_id = self.dataset_id.rsplit("/", 1)[-1]
+
+        # Omit processor name if it matches dataset pattern (redundant)
+        if proc_name.lower() in short_dataset_id.lower():
+            full_name = f"{short_dataset_id}-{annotator_str}-{param_hash}"
+        else:
+            full_name = f"{short_dataset_id}-{proc_name}-{annotator_str}-{param_hash}"
+
+        return full_name
 
     def _initialize_dataset(self) -> None:
-        processed_name = self._get_processed_name()
+        processed_name = self.get_processed_name()
 
+        # Check if processed dataset exists on Hub
         # Check if processed dataset exists on Hub
         if not self.force_recompute and self._hub_manager.dataset_exists(
             processed_name
         ):
             logger.info(f"Loading processed dataset from Hub: {processed_name}")
             repo_id = self._hub_manager.get_repo_id(processed_name)
-            train_data = load_dataset(repo_id, split="train")
-            eval_data = load_dataset(repo_id, split="eval")
+            train_data = load_dataset(repo_id, split=self.train_split_name)
+            eval_data = load_dataset(repo_id, split=self.eval_split_name)
         else:
             # Load raw and process
             train_raw = load_dataset(self.dataset_id, split=self.train_split_name)
@@ -112,163 +136,36 @@ class DataManager:
             else:
                 train_data, eval_data = train_raw, eval_raw
 
-            if self.ref_model_id:
-                logger.info(f"Adding reference logprobs using {self.ref_model_id}...")
-                train_data = self._add_ref_logprobs(train_data)
-                eval_data = self._add_ref_logprobs(eval_data)
+            for annotator in self.annotators:
+                logger.info(f"Applying annotator: {annotator.__class__.__name__}")
+                train_data = annotator.annotate(
+                    train_data,
+                    tokenizer=self.tokenizer,
+                    device_manager=self.device_manager,
+                    force=self.force_recompute,
+                )
+                eval_data = annotator.annotate(
+                    eval_data,
+                    tokenizer=self.tokenizer,
+                    device_manager=self.device_manager,
+                    force=self.force_recompute,
+                )
 
             # Push to Hub
-            ds_dict = DatasetDict({"train": train_data, "eval": eval_data})
+            ds_dict = DatasetDict(
+                {self.train_split_name: train_data, self.eval_split_name: eval_data}
+            )
             self._hub_manager.push_dataset(ds_dict, processed_name)
 
         self._split_train(train_data)
         self.eval_dataset = self._sort_by_length(eval_data)
 
-    def _add_ref_logprobs(self, dataset: Dataset) -> Dataset:
-        if self.device_manager is None:
-            raise ValueError(
-                "DeviceManager is required for reference lprob computation"
-            )
-        if self.ref_model_id is None:
-            raise ValueError("ref_model_id is required for reference lprob computation")
-
-        available_gpus = self.device_manager._available_gpus
-        num_gpus = len(available_gpus)
-        logger.info(f"Computing reference lprobs with {self.ref_model_id}...")
-
-        # Load models sequentially (following trainer pattern)
-        models: list[AutoModelForCausalLM] = []
-        for gpu_id in available_gpus:
-            device_str = f"cuda:{gpu_id}"
-            logger.info(f"Loading reference model on {device_str}...")
-            model = cast(
-                AutoModelForCausalLM,
-                AutoModelForCausalLM.from_pretrained(
-                    self.ref_model_id,
-                    dtype=self.device_manager.dtype,
-                    device_map=device_str,
-                    attn_implementation="sdpa",
-                ),
-            )
-            model.config.use_cache = False  # Match training config
-            model.eval()
-            models.append(model)
-
-        total_size = len(dataset)
-        chunk_size = (total_size + num_gpus - 1) // num_gpus
-
-        results: list[tuple[list[float], list[float]] | Exception | None] = [
-            None
-        ] * num_gpus
-        threads: list[threading.Thread] = []
-
-        def worker(
-            model: AutoModelForCausalLM,
-            gpu_id: int,
-            shard_idx: int,
-            start_idx: int,
-            end_idx: int,
-        ) -> None:
-            try:
-                device = torch.device(f"cuda:{gpu_id}")
-                sub_dataset = dataset.select(range(start_idx, end_idx))
-
-                # Use fresh collator
-                if self.collator:
-                    collator = copy.deepcopy(self.collator)
-                    collator.set_tokenizer(copy.deepcopy(self.tokenizer))
-                else:
-                    collator = DataCollator(
-                        tokenizer=copy.deepcopy(self.tokenizer),
-                        max_length=self.max_length,
-                        max_prompt_length=self.max_prompt_length,
-                    )
-
-                dataloader = DataLoader(
-                    sub_dataset,
-                    batch_size=self.inference_batch_size,
-                    shuffle=False,
-                    collate_fn=collator,
-                    num_workers=self.dataloader_num_workers,
-                    pin_memory=self.dataloader_pin_memory,
-                    # persistent_workers not available in signature yet
-                )
-
-                chosen_logps_shard: list[float] = []
-                rejected_logps_shard: list[float] = []
-
-                desc = f"GPU {gpu_id} ({start_idx}-{end_idx})"
-                for batch in tqdm(
-                    dataloader, desc=desc, position=shard_idx, leave=False
-                ):
-                    batch = {
-                        k: v.to(device)
-                        for k, v in batch.items()
-                        if isinstance(v, torch.Tensor)
-                    }
-                    with torch.no_grad():
-                        chosen_logps = get_log_probs(
-                            model,
-                            device,
-                            batch["chosen_input_ids"],
-                            batch["chosen_attention_mask"],
-                            batch["chosen_response_mask"],
-                        )
-                        rejected_logps = get_log_probs(
-                            model,
-                            device,
-                            batch["rejected_input_ids"],
-                            batch["rejected_attention_mask"],
-                            batch["rejected_response_mask"],
-                        )
-                    chosen_logps_shard.extend(chosen_logps.cpu().tolist())
-                    rejected_logps_shard.extend(rejected_logps.cpu().tolist())
-
-                results[shard_idx] = (chosen_logps_shard, rejected_logps_shard)
-
-            except Exception as e:
-                logger.error(f"Worker on GPU {gpu_id} failed: {e}")
-                results[shard_idx] = e
-
-        # Launch threads for processing
-        for i, gpu_id in enumerate(available_gpus):
-            start = i * chunk_size
-            end = min(start + chunk_size, total_size)
-            if start >= total_size:
-                break
-
-            t = threading.Thread(target=worker, args=(models[i], gpu_id, i, start, end))
-            t.start()
-            threads.append(t)
-
-        for t in threads:
-            t.join()
-
-        # Cleanup models
-        for model in models:
-            del model
-        if self.device_manager:
-            self.device_manager.clear_cache()
-
-        # Check for errors and combine results
-        final_chosen: list[float] = []
-        final_rejected: list[float] = []
-
-        for res in results:
-            if isinstance(res, Exception):
-                raise res
-            if res is None:
-                continue
-            chosen, rejected = res
-            final_chosen.extend(chosen)
-            final_rejected.extend(rejected)
-
-        return dataset.add_column("reference_chosen_logps", final_chosen).add_column(
-            "reference_rejected_logps", final_rejected
-        )
-
     def _split_train(self, dataset: Dataset) -> None:
         """Split train into n_splits for ensemble models."""
+        if self.n_splits is None or self.n_splits <= 1:
+            self.train_datasets = {0: self._sort_by_length(dataset)}
+            return
+
         np.random.seed(self.seed)
         indices = np.arange(len(dataset))
         np.random.shuffle(indices)
@@ -293,11 +190,70 @@ class DataManager:
         )
         return dataset.select(sorted_indices)
 
+    def set_num_splits(self, n_splits: int) -> None:
+        """Update number of splits and re-partition train dataset."""
+        if n_splits == self.n_splits:
+            return
+
+        self.n_splits = n_splits
+        # Resplit using the current merged dataset
+        self._split_train(self.merged_train_dataset)
+
     @property
     def merged_train_dataset(self) -> Dataset:
         from datasets import concatenate_datasets
 
         return concatenate_datasets(list(self.train_datasets.values()))
+
+    def add_annotator(self, annotator: BaseAnnotator) -> None:
+        """Add an annotator, update dataset (cache/compute), and re-split."""
+        self.annotators.append(annotator)
+        new_name = self.get_processed_name()
+
+        # Check cache
+        if (
+            not self.force_recompute
+            and not annotator.force
+            and self._hub_manager.dataset_exists(new_name)
+        ):
+            logger.info(f"Loading annotated dataset from Hub: {new_name}")
+            repo_id = self._hub_manager.get_repo_id(new_name)
+            # Load and update internal state
+            self._split_train(load_dataset(repo_id, split=self.train_split_name))
+            eval_ds = load_dataset(repo_id, split=self.eval_split_name)
+            self.eval_dataset = self._sort_by_length(eval_ds)
+            return
+
+        # Compute
+        logger.info(f"applying additional annotator: {type(annotator).__name__}...")
+
+        # Use current state as base
+        train_data = self.merged_train_dataset
+        eval_data = self.eval_dataset
+
+        train_data = annotator.annotate(
+            train_data,
+            tokenizer=self.tokenizer,
+            device_manager=self.device_manager,
+            force=self.force_recompute,
+        )
+        eval_data = annotator.annotate(
+            eval_data,
+            tokenizer=self.tokenizer,
+            device_manager=self.device_manager,
+            force=self.force_recompute,
+        )
+
+        # Push to Hub
+        logger.info(f"Pushing updated dataset to Hub: {new_name}")
+        ds_dict = DatasetDict(
+            {self.train_split_name: train_data, self.eval_split_name: eval_data}
+        )
+        self._hub_manager.push_dataset(ds_dict, new_name)
+
+        # Update internal state (re-split)
+        self._split_train(train_data)
+        self.eval_dataset = self._sort_by_length(eval_data)
 
     def get_dataloader(
         self,

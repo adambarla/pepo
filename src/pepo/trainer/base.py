@@ -2,14 +2,15 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
 from omegaconf import DictConfig
 
 if TYPE_CHECKING:
+    from ..data import DataManager
     from ..model import BaseModel
-    from ..utils import DataManager, WandbManager
+    from ..utils import WandbManager
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class BaseTrainer(ABC):
         skip_eval: bool = False,
         max_batches_per_epoch: Optional[int] = None,
         training_epochs: Optional[int] = None,
+        force: bool = False,
     ) -> None:
         self.optimizer_factory = optimizer
         self.scheduler_name = scheduler_name
@@ -50,6 +52,7 @@ class BaseTrainer(ABC):
         self.skip_eval = skip_eval
         self.max_batches_per_epoch = max_batches_per_epoch
         self.training_epochs = training_epochs
+        self.force = force
 
         self.wandb_manager: Optional["WandbManager"] = None
 
@@ -61,6 +64,7 @@ class BaseTrainer(ABC):
         max_epochs: Optional[int] = None,
         wandb_manager: Optional["WandbManager"] = None,
         continue_training: bool = False,
+        **kwargs: Any,
     ) -> None:
         """
         Train the model using the configured trainer.

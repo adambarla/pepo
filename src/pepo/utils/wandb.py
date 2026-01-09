@@ -167,20 +167,10 @@ class WandbManager:
     def _generate_train_run_name(
         model: BaseModel,
         data_manager: Any,
-        model_idx: int,
+        model_idx: Optional[int],
     ) -> str:
         """Generate run name for training runs."""
-        parts = []
-        if model and hasattr(model, "get_name"):
-            parts.append(model.get_name())
-        if data_manager and hasattr(data_manager, "get_run_identifier"):
-            parts.append(data_manager.get_run_identifier())
-        if parts:
-            name = "-".join(parts)
-            if f"-l{model_idx}" not in name:
-                name = f"{name}-l{model_idx}"
-            return name
-        return f"train-l{model_idx}"
+        return model.get_name(model_idx=model_idx) if model else "train"
 
     @staticmethod
     def _generate_eval_run_name(
@@ -206,8 +196,9 @@ class WandbManager:
         self,
         model: BaseModel,
         data_manager: Any,
-        model_idx: int,
+        model_idx: Optional[int] = 0,
         group: Optional[str] = None,
+        extra_tags: Optional[list[str]] = None,
     ) -> Optional["WandbRun"]:
         """
         Create a new wandb handler for a training run.
@@ -217,6 +208,7 @@ class WandbManager:
             data_manager: Data manager instance for this training run.
             model_idx: Model index for this training run.
             group: Optional group name for organizing related runs.
+            extra_tags: Additional tags to add to this run.
 
         Returns:
             WandbRun instance for the training run, or None if wandb is disabled.
@@ -229,11 +221,15 @@ class WandbManager:
 
         run_name = self._generate_train_run_name(model, data_manager, model_idx)
 
+        tags = self._get_base_tags(model)
+        if extra_tags:
+            tags = tags + extra_tags
+
         handler = WandbRun(
             enabled=self.enabled,
             wandb_module=self.wandb,
             project=self.project,
-            tags=self._get_base_tags(model),
+            tags=tags,
             notes=self.notes,
             entity=self.entity,
             mode=self.mode,

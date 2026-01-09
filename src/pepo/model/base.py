@@ -132,7 +132,9 @@ class BaseModel(ABC):
         return None
 
     @abstractmethod
-    def load(self, init_new: bool = False, epoch: Optional[int] = None) -> None:
+    def load(
+        self, init_new: bool = False, epoch: Optional[int] = None, **kwargs: Any
+    ) -> None:
         """Load models into memory."""
 
     @abstractmethod

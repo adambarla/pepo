@@ -1,0 +1,12 @@
+# Base Dataset Configuration
+_target_: pepo.data.DataManager
+seed: 42
+n_splits: null
+dataloader_num_workers: 0
+dataloader_pin_memory: true
+force_recompute: false
+annotators:
+  - _target_: pepo.data.annotators.LogprobAnnotator
+    ref_model_id: ${model.model_id}
+    inference_batch_size: ${model.trainer.eval_batch_size}
+    force: false

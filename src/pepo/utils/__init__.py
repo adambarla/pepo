@@ -1,4 +1,3 @@
-from .data import DataManager
 from .device import DeviceManager, get_device_manager, init_device_manager
 from .general import sanitize_filename, set_seed, strip_hydra_targets
 from .hub import HubManager, get_hub_manager, init_hub_manager
@@ -18,5 +17,4 @@ __all__ = [
     "HubManager",
     "init_hub_manager",
     "get_hub_manager",
-    "DataManager",
 ]

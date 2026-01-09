@@ -19,12 +19,8 @@ gpu_ids: null  # list of GPU IDs (null = auto-detect)
 dtype: bfloat16
 
 dataset:
-  max_length: 1024
-  max_prompt_length: 512
   n_splits: ${L}
-  cache_dir: ${oc.env:SCRATCH}/pepo/cache
   seed: ${seed}
-  force_recompute: false
 
 model:
   num_networks: ${L}

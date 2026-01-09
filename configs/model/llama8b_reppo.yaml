@@ -36,7 +36,7 @@ lora_task_type: "CAUSAL_LM"
 lora_target_modules: "all-linear"
 compile: false
 debug: ${debug}
-kl_coef: 0.1
+beta: 0.1
 force_annotation: false  # Set to true to re-annotate even if dataset exists on Hub
 
 generator:

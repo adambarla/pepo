@@ -22,9 +22,9 @@ import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf, SCMode
 
+from pepo.data import DataManager
 from pepo.model import BaseModel
 from pepo.utils import (
-    DataManager,
     WandbManager,
     constants,
     init_device_manager,
@@ -81,7 +81,6 @@ def main(cfg: DictConfig) -> None:
     data_manager: DataManager = instantiate(
         cfg.dataset,
         tokenizer=model.get_tokenizer(),
-        ref_model_id=cfg.model.model_id,
         inference_batch_size=cfg.model.trainer.eval_batch_size,
         device_manager=device_manager,
     )

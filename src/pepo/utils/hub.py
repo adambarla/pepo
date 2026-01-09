@@ -121,11 +121,22 @@ class HubManager:
         except Exception:
             return False
 
+    def load_dataset(self, name: str, split: Optional[str] = None) -> Any:
+        """Load dataset from the Hub."""
+        from datasets import load_dataset
+
+        repo_id = self.get_repo_id(name)
+        return load_dataset(repo_id, split=split)
+
     def get_repo_id(self, name: str, epoch: Optional[int] = None) -> str:
         if epoch is not None:
             return f"{self.base_dir}/{name}-e{epoch}"
         else:
             return f"{self.base_dir}/{name}"
+
+    def get_full_repo_id(self, name: str, epoch: Optional[int] = None) -> str:
+        """Get full repo ID (org/name) for loading datasets."""
+        return self.get_repo_id(name, epoch)
 
     def load_model(
         self,
@@ -255,25 +266,19 @@ class HubManager:
     def push_dataset(
         self,
         dataset: Any,
-        dataset_name: str,
-        split: str = "train",
+        name: str,
+        split: Optional[str] = None,
         private: bool = False,
     ) -> None:
-        """Push dataset to Hugging Face Hub.
-
-        Args:
-            dataset: The dataset to push.
-            dataset_name: Name for the dataset repo.
-            split: Split name (e.g., 'train', 'eval'). Defaults to 'train'.
-            private: Whether to make the repo private.
-        """
-        repo_id = f"{self.base_dir}/{dataset_name}"
-        if not self.should_push_to_hub:
-            logger.warning(f"Disabled push to Hub. Skipping push of {repo_id}.")
+        """Push dataset to Hub. Skips if push disabled."""
+        if not self.should_push:
+            logger.warning(f"Hub push disabled. Skipping dataset push: {name}")
             return
+        repo_id = self.get_repo_id(name)
+        logger.info(f"Pushing dataset to Hub: {repo_id}")
 
-        logger.info(f"Pushing dataset split '{split}' to {repo_id}...")
-        dataset.push_to_hub(repo_id, split=split, private=private)
-        logger.info(
-            f"Dataset split '{split}' pushed to: https://huggingface.co/{repo_id}"
-        )
+        kwargs = {"repo_id": repo_id, "private": private}
+        if split:
+            kwargs["split"] = split
+        dataset.push_to_hub(**kwargs)
+        logger.info(f"Dataset pushed to: https://huggingface.co/{repo_id}")

@@ -9,7 +9,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import get_scheduler
 
-from ..utils import DataManager, WandbManager, WandbRun
+from ..data import DataManager
+from ..utils import WandbManager, WandbRun
 from .base import BaseTrainer
 
 if TYPE_CHECKING:
@@ -79,6 +80,7 @@ class EnsembleTrainer(BaseTrainer):
         max_epochs: Optional[int] = None,
         wandb_manager: Optional[WandbManager] = None,
         continue_training: bool = False,
+        **kwargs: Any,
     ) -> None:
         """
         Train the ensemble models using threading for parallel GPU operation.
@@ -162,6 +164,7 @@ class EnsembleTrainer(BaseTrainer):
                     data_manager=data_manager,
                     model_idx=model_idx,
                     group=group,
+                    extra_tags=["reward"],
                 )
 
             thread = threading.Thread(
@@ -333,20 +336,15 @@ class EnsembleTrainer(BaseTrainer):
             exclude_keys = []
 
         log_dict: dict[str, Any] = {}
-        # Add basic info
         if prefix == "train":
             log_dict[f"{prefix}/step"] = step
-
-        # Add additional items (e.g. LR or Epoch)
         if additional_log_items:
             log_dict.update(additional_log_items)
 
-        # Add metrics
         for k, v in metrics.items():
             if k in exclude_keys:
                 continue
 
-            # Construct key name
             if add_avg_prefix:
                 parts = k.split("/")
                 parts[-1] = f"avg_{parts[-1]}"
@@ -408,10 +406,7 @@ class EnsembleTrainer(BaseTrainer):
                 pbar.close()
                 break
 
-            # loss_fn returns (loss, metrics_dict)
             loss, metrics = self.model.loss_fn(batch, model, device)
-
-            # Accumulate metrics
             loss_val = loss.item()
             if "loss" not in metrics:
                 metrics["loss"] = loss_val
@@ -420,8 +415,6 @@ class EnsembleTrainer(BaseTrainer):
                 accumulated_metrics[k] = accumulated_metrics.get(k, 0.0) + v
 
             samples_count += 1
-
-            # Scale and backward
             scaled_loss = loss / grad_acc_steps
             scaled_loss.backward()  # type: ignore[no-untyped-call]
 

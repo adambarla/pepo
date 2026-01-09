@@ -16,21 +16,19 @@ if TYPE_CHECKING:
     from ..trainer import BaseTrainer
     from ..utils import DeviceManager, HubManager
 
-import copy
 import functools
-import threading
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from peft import LoraConfig, PeftModel
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 from transformers import AutoTokenizer
 
+from ..data import RewardDataCollator
+from ..data.annotators.reward import RewardAnnotator
 from ..loader import CheckpointManager
 from ..utils import get_device_manager, get_hub_manager
-from ..utils.data import DataCollator
+from ..utils.model_utils import get_log_probs
 from .base import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -183,7 +181,9 @@ class REPPORewardModel(BaseModel):
         if isinstance(self.trainer, functools.partial):
             self.trainer = self.trainer()
 
-    def load(self, init_new: bool = False, epoch: Optional[int] = None) -> None:
+    def load(
+        self, init_new: bool = False, epoch: Optional[int] = None, **kwargs: Any
+    ) -> None:
         """Load models and reward heads into memory."""
         if self._models is not None:
             logger.warning("Models already loaded. Unload first to reload.")
@@ -269,7 +269,14 @@ class REPPORewardModel(BaseModel):
     @property
     def models(self) -> list[PeftModel]:
         if self._models is None:
-            raise RuntimeError("Models not loaded. Call load() first.")
+            logger.info("Models not loaded. Lazy loading using current epoch state.")
+            # Assume strict consistency (all models same epoch) for now
+            epoch = self.get_epoch(0)
+            self.load_from_epoch(epoch)
+
+        if self._models is None:
+            raise RuntimeError("Failed to lazy load models.")
+
         return self._models
 
     @models.setter
@@ -368,34 +375,31 @@ class REPPORewardModel(BaseModel):
         max_epochs: Optional[int] = None,
         wandb_manager: Optional[Any] = None,
         continue_training: bool = False,
+        force_annotation: bool = False,
     ) -> None:
         """Train the reward model ensemble."""
         if self.trainer is None:
             raise ValueError("Trainer not set in REPPORewardModel.")
 
         self.init_trainer()
-
-        reward_epochs = (
+        r_epochs = (
             max_epochs if max_epochs is not None else self.trainer.training_epochs
         )
 
-        if reward_epochs is None:
-            raise ValueError(
-                "Training epochs not configured in reward_model.trainer "
-                "and not passed to train()."
-            )
-
-        if self.can_load_from_epoch(reward_epochs):
+        # Skip if models exist and not forced
+        trainer_force = self.trainer.force if self.trainer else False
+        can_load = r_epochs is not None and self.can_load_from_epoch(r_epochs)
+        if not trainer_force and can_load:
             logger.info(
-                f"Reward models for epoch {reward_epochs} already exist. "
-                "Skipping training and loading from Hub."
+                f"Reward models for epoch {r_epochs} already exist. Skipping training."
             )
-            self.load_from_epoch(reward_epochs)
+            for i in range(self._num_models):
+                self.set_epoch(r_epochs if r_epochs is not None else 0, model_idx=i)
         else:
             self.trainer.train(
                 model=self,
                 data_manager=data_manager,
-                max_epochs=reward_epochs,
+                max_epochs=r_epochs,
                 wandb_manager=wandb_manager,
                 continue_training=continue_training,
             )
@@ -407,145 +411,6 @@ class REPPORewardModel(BaseModel):
     ) -> torch.Tensor:
         """Inference prediction (unused for reward model training)."""
         raise NotImplementedError("Predict not implemented for Reward Model")
-
-    def annotate_dataset(
-        self,
-        dataset: Any,
-        dataset_name: str,
-        split: str = "train",
-        semaphore_limit: Optional[int] = None,
-        force_annotation: bool = False,
-    ) -> Any:
-        """
-        Annotate dataset with rewards from all ensemble models.
-
-        Uses parallel threads (up to semaphore_limit or num_gpus) to run inference.
-        Updates the dataset gradually as models finish.
-
-        Args:
-            dataset: The dataset to annotate (HuggingFace Dataset).
-            dataset_name: Name for pushing to Hub.
-            split: Split name for the dataset (e.g., 'train', 'eval').
-            semaphore_limit: Max concurrent threads (defaults to num_gpus).
-            force_annotation: If True, re-annotate even if dataset exists on Hub.
-
-        Returns:
-            The annotated dataset.
-        """
-        if not force_annotation and self._hub_manager.dataset_exists(dataset_name):
-            logger.info(
-                f"Dataset {dataset_name} already exists on Hub. Skipping annotation."
-            )
-            return dataset
-
-        if self._models is None:
-            raise RuntimeError("Models not loaded. Call load() first.")
-
-        limit = semaphore_limit or self._device_manager.num_available_gpus
-        gpu_semaphore = threading.Semaphore(value=limit)
-        dataset_lock = threading.Lock()
-
-        logger.info(f"Starting dataset annotation with {limit} concurrent threads...")
-
-        threads = []
-        # We need a shared reference to the dataset that threads can update
-        # Using a container list to allow 'pass-by-reference' update of the
-        # dataset object safely within the lock if the library returns a new
-        # object on add_column
-        shared_dataset = [dataset]
-
-        def _annotate_single_model(model_idx: int) -> None:
-            gpu_semaphore.acquire()
-            try:
-                # 1. Load Model
-                device = torch.device(
-                    self._device_manager.get_device_for_model(model_idx)
-                )
-                # Ensure model is on correct device (it should be if loaded via load())
-                # Explicit check for mypy
-                if self._models is None:
-                    raise RuntimeError("Models not loaded.")
-                model = self._models[model_idx]
-                reward_head = self.reward_heads[model_idx]
-
-                # 2. Prepare DataLoader
-                tokenizer_copy = copy.deepcopy(self.tokenizer)
-                collator = DataCollator(
-                    tokenizer=tokenizer_copy,
-                    # We assume max_length etc are handled by the dataset's
-                    # preprocessing or passed in logic.
-                    max_length=None,
-                    max_prompt_length=None,
-                )
-
-                if self.trainer is None:
-                    raise ValueError("Trainer not set. Cannot determine batch size.")
-                batch_size = getattr(self.trainer, "eval_batch_size", 64)
-
-                dataloader = DataLoader(
-                    dataset,
-                    batch_size=batch_size,
-                    shuffle=False,
-                    collate_fn=collator,
-                    pin_memory=True,
-                )
-
-                rewards_chosen = []
-                rewards_rejected = []
-
-                desc = f"Model {model_idx} Inference"
-                for batch in tqdm(
-                    dataloader, desc=desc, position=model_idx, leave=False
-                ):
-                    with torch.no_grad():
-                        chosen_ids = batch["chosen_input_ids"].to(device)
-                        chosen_mask = batch["chosen_attention_mask"].to(device)
-                        rejected_ids = batch["rejected_input_ids"].to(device)
-                        rejected_mask = batch["rejected_attention_mask"].to(device)
-
-                        r_c = self._compute_reward(
-                            chosen_ids, chosen_mask, model, reward_head, device
-                        )
-                        r_r = self._compute_reward(
-                            rejected_ids, rejected_mask, model, reward_head, device
-                        )
-
-                        rewards_chosen.extend(r_c.cpu().tolist())
-                        rewards_rejected.extend(r_r.cpu().tolist())
-
-                # 3. Critical Section: Update Dataset
-                with dataset_lock:
-                    current_ds = shared_dataset[0]
-                    current_ds = current_ds.add_column(
-                        f"rewards_{model_idx}_chosen", rewards_chosen
-                    )
-                    current_ds = current_ds.add_column(
-                        f"rewards_{model_idx}_rejected", rewards_rejected
-                    )
-                    shared_dataset[0] = current_ds
-                    logger.info(f"Model {model_idx} annotation merged.")
-
-            except Exception as e:
-                logger.error(f"Error in annotation thread for model {model_idx}: {e}")
-            finally:
-                gpu_semaphore.release()
-
-        # Launch threads
-        for i in range(self.num_models):
-            t = threading.Thread(target=_annotate_single_model, args=(i,))
-            t.start()
-            threads.append(t)
-
-        for t in threads:
-            t.join()
-
-        final_dataset = shared_dataset[0]
-
-        # Persistence
-        logger.info(f"Pushing annotated dataset split '{split}' to {dataset_name}...")
-        self._hub_manager.push_dataset(final_dataset, dataset_name, split=split)
-
-        return final_dataset
 
 
 class REPPOModel(BaseModel):
@@ -563,7 +428,7 @@ class REPPOModel(BaseModel):
         self,
         model_id: str,
         reward_model: "REPPORewardModel",
-        kl_coef: float = 0.1,  # Unused - for Phase 2
+        beta: float = 0.1,
         tokenizer_id: Optional[str] = None,
         chat_template: Optional[str] = None,
         lora_r: int = 16,
@@ -585,7 +450,7 @@ class REPPOModel(BaseModel):
         self._hub_manager = get_hub_manager()
         # Unused Phase 2 attributes (kept for config compatibility)
         self.generator = generator
-        self.kl_coef = kl_coef
+        self.beta = beta
         self.debug = debug
         self._num_models = 1
         self._force_annotation = force_annotation
@@ -593,7 +458,7 @@ class REPPOModel(BaseModel):
         self.reward_model = reward_model
 
         # Access reward trainer from the instantiated reward model
-        self._reward_trainer = getattr(reward_model, "trainer", None)
+        self._reward_trainer = reward_model.trainer
 
         self._policy_trainer = trainer
 
@@ -648,10 +513,13 @@ class REPPOModel(BaseModel):
             raise RuntimeError("Policy not loaded. Call load() first.")
         return self._models[0]
 
-    def load(self, init_new: bool = False, epoch: Optional[int] = None) -> None:
+    def load(
+        self, init_new: bool = False, epoch: Optional[int] = None, **kwargs: Any
+    ) -> None:
         """Load Policy Model (self) AND Reward Model (helper)."""
         # Load Reward Model Helper
-        self.reward_model.load(init_new=init_new, epoch=epoch)
+        if kwargs.get("load_reward_model", True):
+            self.reward_model.load(init_new=init_new, epoch=epoch)
 
         # Load Policy (Self)
         if self._models is not None:
@@ -694,7 +562,7 @@ class REPPOModel(BaseModel):
         """Get policy model name - policy for L reward models."""
         model_name = self.model_id.rsplit("/", 1)[-1]
         # L refers to the number of reward models, not policy models
-        repo_name = f"{model_name}-reppo-L{self.reward_model._num_models}-policy"
+        repo_name = f"{model_name}-reppo-b{self.beta}-L{self.reward_model._num_models}"
         if epoch is not None:
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
@@ -732,32 +600,59 @@ class REPPOModel(BaseModel):
         self,
         data_manager: Any,
         max_epochs: Optional[int] = None,
-        wandb_manager: Optional[Any] = None,
+        wandb_manager: Any = None,
         continue_training: bool = False,
     ) -> None:
-        """Execute orchestrated training: Reward Ensemble -> Policy."""
         self.reward_model.train(
             data_manager=data_manager,
             wandb_manager=wandb_manager,
             continue_training=continue_training,
+            force_annotation=self._force_annotation,
+        )
+        # Phase 2: Policy Training
+        logger.info("Starting Phase 2: Policy Training")
+        # Force annotation if reward training was forced
+        r_trainer = self.reward_model.trainer
+        r_force = r_trainer.force if r_trainer else False
+        force_annotation = self._force_annotation or r_force
+
+        reward_annotator = RewardAnnotator(
+            reward_model=self.reward_model,
+            device_manager=self._device_manager,
+            tokenizer=self.tokenizer,
+            force=force_annotation,
         )
 
-        annotated_epoch = self.reward_model.get_epoch(0)
-        annotation_dataset_name = self.reward_model.get_name(epoch=annotated_epoch)
+        # Dynamically add annotator to existing DataManager
+        # This handles caching, processing, pushing, and updating internal datasets
+        data_manager.add_annotator(reward_annotator)
 
-        for dataset, split in [
-            (data_manager.merged_train_dataset, "train"),
-            (data_manager.eval_dataset, "eval"),
-        ]:
-            if dataset is not None:
-                self.reward_model.annotate_dataset(
-                    dataset=dataset,
-                    dataset_name=annotation_dataset_name,
-                    split=split,
-                    force_annotation=self._force_annotation,
-                )
+        # Update DataManager for single-model policy training
+        data_manager.set_num_splits(1)
 
-        raise NotImplementedError("Phase 2 not implemented.")
+        # Update collator for reward columns
+        data_manager.collator = RewardDataCollator(
+            tokenizer=data_manager.tokenizer,
+            max_length=data_manager.max_length,
+            max_prompt_length=data_manager.max_prompt_length,
+        )
+
+        self.reward_model.unload()
+
+        self.init_trainer()
+
+        # Force policy training if annotation was forced
+        policy_continue = continue_training and not force_annotation
+        if self._trainer is None:
+            raise ValueError("Policy trainer (_trainer) not set.")
+        self._trainer.train(
+            model=self,
+            data_manager=data_manager,
+            max_epochs=max_epochs,
+            wandb_manager=wandb_manager,
+            continue_training=policy_continue,
+            load_kwargs={"load_reward_model": False},
+        )
 
     def loss_fn(
         self,
@@ -765,8 +660,43 @@ class REPPOModel(BaseModel):
         model: torch.nn.Module,
         device: torch.device,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Compute loss (delegated to phase-specific models)."""
-        raise NotImplementedError("REPPOModel loss_fn should not be called directly.")
+        c_p = batch["chosen_input_ids"].to(device)
+        c_m = batch["chosen_attention_mask"].to(device)
+        c_r = batch["chosen_response_mask"].to(device)
+        r_p = batch["rejected_input_ids"].to(device)
+        r_m = batch["rejected_attention_mask"].to(device)
+        r_r = batch["rejected_response_mask"].to(device)
+        lp_c = get_log_probs(model, device, c_p, c_m, c_r)
+        lp_r = get_log_probs(model, device, r_p, r_m, r_r)
+
+        if "reference_chosen_logps" in batch:
+            lrf_c = batch["reference_chosen_logps"].to(device)
+            lrf_r = batch["reference_rejected_logps"].to(device)
+        else:
+            with (
+                model.disable_adapter()
+                if isinstance(model, PeftModel)
+                else torch.no_grad()
+            ):
+                lrf_c = get_log_probs(model, device, c_p, c_m, c_r)
+                lrf_r = get_log_probs(model, device, r_p, r_m, r_r)
+
+        rs_w = batch["rewards_chosen"].to(device)
+        rs_l = batch["rewards_rejected"].to(device)
+        r_ps_w = rs_w.min(-1)[0]
+        r_ps_l = rs_l.min(-1)[0]
+
+        diff = self.beta * (lp_c - lp_r - (lrf_c - lrf_r)) - (r_ps_w - r_ps_l)
+        loss = (diff**2).mean()
+
+        with torch.no_grad():
+            metrics = {
+                "loss": loss.item(),
+                "rewards/pess_chosen": r_ps_w.mean().item(),
+                "rewards/pess_rejected": r_ps_l.mean().item(),
+                "accuracy": (lp_c - lp_r > lrf_c - lrf_r).float().mean().item(),
+            }
+        return loss, metrics
 
     def predict(
         self,
