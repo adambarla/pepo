@@ -10,6 +10,7 @@ This module contains all REPPO model classes:
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
@@ -140,6 +141,7 @@ class REPPORewardModel(BaseModel):
             chat_template=chat_template,
         )
         self._models: list[PeftModel] | None = None
+        self._models_lock = threading.Lock()
         self.epochs_per_model: list[Optional[int]] = [0] * self._num_models
         self.trainer = trainer
 
@@ -269,10 +271,12 @@ class REPPORewardModel(BaseModel):
     @property
     def models(self) -> list[PeftModel]:
         if self._models is None:
-            logger.info("Models not loaded. Lazy loading using current epoch state.")
-            # Assume strict consistency (all models same epoch) for now
-            epoch = self.get_epoch(0)
-            self.load_from_epoch(epoch)
+            with self._models_lock:
+                # Double-check pattern to avoid race condition
+                if self._models is None:
+                    logger.info("Lazy loading models from current epoch state.")
+                    epoch = self.get_epoch(0)
+                    self.load_from_epoch(epoch)
 
         if self._models is None:
             raise RuntimeError("Failed to lazy load models.")
