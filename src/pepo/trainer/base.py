@@ -10,7 +10,7 @@ from omegaconf import DictConfig
 if TYPE_CHECKING:
     from ..data import DataManager
     from ..model import BaseModel
-    from ..utils import WandbManager
+    from ..utils import WandbManager, WandbRun
 
 logger = logging.getLogger(__name__)
 
@@ -78,3 +78,56 @@ class BaseTrainer(ABC):
             continue_training: Whether to continue from checkpoint.
         """
         pass
+
+    def _compute_avg_metrics(
+        self, accumulated_metrics: dict[str, float], count: int
+    ) -> dict[str, float]:
+        """Compute averages from accumulated metrics."""
+        return {k: v / count for k, v in accumulated_metrics.items()}
+
+    def _move_to_device(
+        self,
+        batch: dict[str, torch.Tensor],
+        device: torch.device,
+    ) -> dict[str, torch.Tensor]:
+        """Move batch tensors to device."""
+        return {k: v.to(device) for k, v in batch.items()}
+
+    def _log_metrics(
+        self,
+        wandb_run: Optional["WandbRun"],
+        metrics: dict[str, float],
+        step: int,
+        prefix: str = "train",
+        add_avg_prefix: bool = True,
+        exclude_keys: Optional[list[str]] = None,
+        additional_log_items: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Helper to log metrics to wandb with consistent naming."""
+        if wandb_run is None:
+            return
+
+        if exclude_keys is None:
+            exclude_keys = []
+
+        log_dict: dict[str, Any] = {}
+        if prefix == "train":
+            log_dict[f"{prefix}/step"] = step
+        if additional_log_items:
+            log_dict.update(additional_log_items)
+
+        for k, v in metrics.items():
+            if k in exclude_keys:
+                continue
+
+            if add_avg_prefix:
+                parts = k.split("/")
+                parts[-1] = f"avg_{parts[-1]}"
+                new_k = "/".join(parts)
+                key_name = f"{prefix}/{new_k}"
+            else:
+                key_name = f"{prefix}/{k}"
+
+            log_dict[key_name] = v
+
+        wandb_run.log(log_dict, step=step)

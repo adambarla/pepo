@@ -114,8 +114,9 @@ class SingleModelTrainer(BaseTrainer):
                 wandb_run.init_run()
 
         # Initial eval
+        best_eval_loss = float("inf")
         if not self.skip_eval:
-            self._eval_epoch(
+            best_eval_loss = self._eval_epoch(
                 model=model,
                 eval_loader=data_manager.get_dataloader(
                     0, "eval", self.eval_batch_size
@@ -127,6 +128,9 @@ class SingleModelTrainer(BaseTrainer):
             )
 
         logger.info(f"Starting single model training for {max_epochs} epochs")
+
+        patience_counter = 0
+        es_min_delta = self.early_stopping_min_delta
 
         for epoch in range(1, max_epochs + 1):
             if self.scheduler is None:
@@ -146,18 +150,17 @@ class SingleModelTrainer(BaseTrainer):
                 wandb_run=wandb_run,
             )
 
-            if self.early_stopping_patience is not None:
-                pass
-
             model.set_epoch(epoch)
             model.save()
 
+            # Run eval and track best model
+            eval_loss = best_eval_loss
             if not self.skip_eval:
                 n_batches = len(
                     data_manager.get_dataloader(0, "train", self.batch_size)
                 )
                 global_step = epoch * n_batches // self.gradient_accumulation_steps
-                self._eval_epoch(
+                eval_loss = self._eval_epoch(
                     model=model,
                     eval_loader=data_manager.get_dataloader(
                         0, "eval", self.eval_batch_size
@@ -167,6 +170,35 @@ class SingleModelTrainer(BaseTrainer):
                     global_step=global_step,
                     wandb_run=wandb_run,
                 )
+
+            # Track best model and save without epoch suffix when eval improves
+            if eval_loss < best_eval_loss - es_min_delta:
+                best_eval_loss = eval_loss
+                patience_counter = 0
+                # Push best model (no epoch suffix)
+                if model.checkpoint_manager:
+                    logger.info(
+                        f"New best eval loss: {eval_loss:.4f}. "
+                        f"Pushing best model checkpoint."
+                    )
+                    model.checkpoint_manager.push_model(
+                        model=model.models[0],
+                        model_name=model.get_name(),
+                        tokenizer=model.tokenizer,
+                        epochs=None,  # No epoch suffix = best model
+                    )
+            elif self.early_stopping_patience is not None:
+                patience_counter += 1
+
+            if (
+                self.early_stopping_patience is not None
+                and patience_counter >= self.early_stopping_patience
+            ):
+                logger.info(
+                    f"Early stopping triggered after {epoch} epochs. "
+                    f"Best validation loss: {best_eval_loss:.4f}"
+                )
+                break
 
         if wandb_run is not None:
             wandb_run.finish()
@@ -180,8 +212,9 @@ class SingleModelTrainer(BaseTrainer):
         global_step: int,
         wandb_run: Optional[WandbRun] = None,
     ) -> float:
+        """Evaluate the model for one epoch."""
         model.models[0].eval()
-        metric_sums: dict[str, float] = {}
+        accumulated_metrics: dict[str, float] = {}
         n_batches = len(eval_loader)
         if n_batches == 0:
             return 0.0
@@ -196,19 +229,26 @@ class SingleModelTrainer(BaseTrainer):
         with torch.no_grad():
             for batch in eval_loader:
                 loss, metrics = model.loss_fn(batch, model.models[0], device)
+                if "loss" not in metrics:
+                    metrics["loss"] = loss.item()
+
                 for k, v in metrics.items():
-                    metric_sums[k] = metric_sums.get(k, 0.0) + v
+                    accumulated_metrics[k] = accumulated_metrics.get(k, 0.0) + v
                 pbar.update(1)
 
         pbar.close()
 
-        avg_metrics = {f"eval/{k}": v / n_batches for k, v in metric_sums.items()}
-        avg_metrics["eval/epoch"] = epoch
+        avg_epoch_metrics = self._compute_avg_metrics(accumulated_metrics, n_batches)
+        self._log_metrics(
+            wandb_run=wandb_run,
+            metrics=avg_epoch_metrics,
+            step=global_step,
+            prefix="eval",
+            add_avg_prefix=True,
+            additional_log_items={"eval/epoch": epoch},
+        )
 
-        if wandb_run:
-            wandb_run.log(avg_metrics, step=global_step)
-
-        return avg_metrics.get("eval/loss", 0.0)
+        return avg_epoch_metrics.get("loss", 0.0)
 
     def _train_epoch(
         self,
@@ -224,32 +264,33 @@ class SingleModelTrainer(BaseTrainer):
         stop_event: Optional[Any] = None,
     ) -> dict[str, float]:
         model.models[0].train()
-        total_loss = 0.0
-        num_batches = 0
         global_step = (epoch - 1) * len(train_loader) // grad_acc_steps
 
         pbar = tqdm(
             train_loader,
-            desc=f"Training Epoch {epoch}/{n_epochs}",
+            desc=f"Training E{epoch}/{n_epochs}",
             dynamic_ncols=True,
         )
 
-        metrics_tracker: dict[str, float] = {}
+        accumulated_metrics: dict[str, float] = {}
+        last_logged_metrics: dict[str, float] = {}
+        samples_count = 0
 
         for batch_idx, batch in enumerate(pbar):
             if stop_event is not None and stop_event.is_set():
                 break
 
-            batch = {k: v.to(device) for k, v in batch.items()}
             loss, metrics = model.loss_fn(batch, model.models[0], device)
             scaled_loss = loss / grad_acc_steps
             scaled_loss.backward()  # type: ignore[no-untyped-call]
 
-            total_loss += loss.item()
-            num_batches += 1
+            if "loss" not in metrics:
+                metrics["loss"] = loss.item()
 
             for k, v in metrics.items():
-                metrics_tracker[k] = metrics_tracker.get(k, 0.0) + v
+                accumulated_metrics[k] = accumulated_metrics.get(k, 0.0) + v
+
+            samples_count += 1
 
             if (batch_idx + 1) % grad_acc_steps == 0:
                 optimizer.step()
@@ -257,34 +298,46 @@ class SingleModelTrainer(BaseTrainer):
                 scheduler.step()
                 global_step += 1
 
-                if wandb_run:
-                    avg_metrics = {
-                        k: v / grad_acc_steps for k, v in metrics_tracker.items()
-                    }
-                    prefixed_metrics = {f"train/{k}": v for k, v in avg_metrics.items()}
-                    prefixed_metrics["train/step"] = global_step
-                    prefixed_metrics["train/lr"] = scheduler.get_last_lr()[0]
-                    wandb_run.log(prefixed_metrics, step=global_step)
-                    metrics_tracker.clear()
+            if (batch_idx + 1) % self.log_interval == 0:
+                interval_metrics = {
+                    k: v - last_logged_metrics.get(k, 0.0)
+                    for k, v in accumulated_metrics.items()
+                }
+                last_logged_metrics = accumulated_metrics.copy()
+
+                avg_interval_metrics = self._compute_avg_metrics(
+                    interval_metrics, self.log_interval
+                )
+
+                avg_loss = avg_interval_metrics.get("loss", 0.0)
+                pbar.set_postfix({"loss": f"{avg_loss:.4f}"})
+
+            self._log_metrics(
+                wandb_run=wandb_run,
+                metrics=avg_interval_metrics,
+                step=global_step,
+                prefix="train",
+                add_avg_prefix=False,
+                additional_log_items={"train/lr": scheduler.get_last_lr()[0]},
+            )
 
         pbar.close()
 
-        # Handle any remaining metrics if the loop finished without
-        # a full accumulation step
-        if metrics_tracker and wandb_run:
-            avg_metrics = {
-                k: v / (num_batches % grad_acc_steps or grad_acc_steps)
-                for k, v in metrics_tracker.items()
-            }
-            prefixed_metrics = {f"train/{k}": v for k, v in avg_metrics.items()}
-            prefixed_metrics["train/step"] = (
-                global_step + 1
-            )  # Increment for the last partial step
-            prefixed_metrics["train/lr"] = scheduler.get_last_lr()[0]
-            wandb_run.log(prefixed_metrics, step=global_step + 1)
+        # Log epoch averages
+        if samples_count > 0:
+            avg_epoch_metrics = self._compute_avg_metrics(
+                accumulated_metrics, samples_count
+            )
+            self._log_metrics(
+                wandb_run=wandb_run,
+                metrics=avg_epoch_metrics,
+                step=global_step,
+                prefix="train",
+                add_avg_prefix=True,
+                additional_log_items={"train/epoch": epoch},
+            )
 
         # Return average metrics for the epoch
-        if num_batches > 0:
-            final_avg_metrics = {k: v / num_batches for k, v in metrics_tracker.items()}
-            return final_avg_metrics
+        if samples_count > 0:
+            return self._compute_avg_metrics(accumulated_metrics, samples_count)
         return {}

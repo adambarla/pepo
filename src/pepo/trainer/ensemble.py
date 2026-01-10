@@ -178,8 +178,6 @@ class EnsembleTrainer(BaseTrainer):
                     n_epochs=max_epochs,
                     grad_acc_steps=self.gradient_accumulation_steps,
                     wandb_run=wandb_run,
-                    es_patience=self.early_stopping_patience,
-                    es_min_delta=self.early_stopping_min_delta,
                     stop_event=stop_event,
                 ),
             )
@@ -204,8 +202,6 @@ class EnsembleTrainer(BaseTrainer):
         n_epochs: int,
         grad_acc_steps: int,
         wandb_run: Optional[WandbRun],
-        es_patience: Optional[int],
-        es_min_delta: float,
         stop_event: Optional[threading.Event] = None,
     ) -> None:
         """Train a single model in a thread."""
@@ -250,7 +246,8 @@ class EnsembleTrainer(BaseTrainer):
 
         best_eval_loss = initial_eval_loss
         patience_counter = 0
-        es_enabled = es_patience is not None
+        es_patience = self.early_stopping_patience
+        es_min_delta = self.early_stopping_min_delta
 
         for epoch in range(start_epoch + 1, n_epochs + 1):
             if stop_event is not None and stop_event.is_set():
@@ -295,67 +292,38 @@ class EnsembleTrainer(BaseTrainer):
                     wandb_run=wandb_run,
                 )
 
-            if es_enabled and es_patience is not None:
-                if eval_loss < best_eval_loss - es_min_delta:
-                    best_eval_loss = eval_loss
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-
-                if patience_counter >= es_patience:
+            # Track best model and save without epoch suffix when eval loss improves
+            if eval_loss < best_eval_loss - es_min_delta:
+                best_eval_loss = eval_loss
+                patience_counter = 0
+                # Push best model (no epoch suffix)
+                if self.model.checkpoint_manager:
                     logger.info(
-                        f"Model {model_idx} - Early stopping triggered "
-                        f"after {epoch} epochs "
-                        f"Best validation loss: {best_eval_loss:.4f}"
+                        f"Model {model_idx} - New best eval loss: {eval_loss:.4f}. "
+                        f"Pushing best model checkpoint."
                     )
-                    break
+                    self.model.checkpoint_manager.push_model(
+                        model=model,
+                        model_name=self.model.get_name(model_idx=model_idx),
+                        tokenizer=self.model.tokenizer,
+                        epochs=None,  # No epoch suffix = best model
+                    )
+            elif es_patience is not None:
+                patience_counter += 1
+
+            if es_patience is not None and patience_counter >= es_patience:
+                logger.info(
+                    f"Model {model_idx} - Early stopping triggered "
+                    f"after {epoch} epochs. "
+                    f"Best validation loss: {best_eval_loss:.4f}"
+                )
+                break
 
         if wandb_run is not None:
             wandb_run.finish()
 
-    def _compute_avg_metrics(
-        self,
-        accumulated_metrics: dict[str, float],
-        count: int,
-    ) -> dict[str, float]:
-        """Helper to compute averages from accumulated metrics."""
-        return {k: v / count for k, v in accumulated_metrics.items()}
-
-    def _log_metrics(
-        self,
-        wandb_run: WandbRun,
-        metrics: dict[str, float],
-        step: int,
-        prefix: str = "train",
-        add_avg_prefix: bool = True,
-        exclude_keys: Optional[list[str]] = None,
-        additional_log_items: Optional[dict[str, Any]] = None,
-    ) -> None:
-        """Helper to log metrics to wandb with consistent naming."""
-        if exclude_keys is None:
-            exclude_keys = []
-
-        log_dict: dict[str, Any] = {}
-        if prefix == "train":
-            log_dict[f"{prefix}/step"] = step
-        if additional_log_items:
-            log_dict.update(additional_log_items)
-
-        for k, v in metrics.items():
-            if k in exclude_keys:
-                continue
-
-            if add_avg_prefix:
-                parts = k.split("/")
-                parts[-1] = f"avg_{parts[-1]}"
-                new_k = "/".join(parts)
-                key_name = f"{prefix}/{new_k}"
-            else:
-                key_name = f"{prefix}/{k}"
-
-            log_dict[key_name] = v
-
-        wandb_run.log(log_dict, step=step)
+        if wandb_run is not None:
+            wandb_run.finish()
 
     def _train_epoch(
         self,
@@ -383,7 +351,7 @@ class EnsembleTrainer(BaseTrainer):
         last_logged_metrics: dict[str, float] = {}
         samples_count = 0
 
-        desc = f"Model {model_idx} - Epoch {epoch}/{n_epochs}"
+        desc = f"Model {model_idx} - E{epoch}/{n_epochs}"
         pbar = tqdm(
             total=n_batches // self.log_interval,
             desc=desc,
@@ -439,21 +407,20 @@ class EnsembleTrainer(BaseTrainer):
                 pbar.set_postfix({"loss": f"{current_loss:.4f}"})
                 pbar.update(1)
 
-                if wandb_run is not None:
-                    current_lr = scheduler.get_last_lr()[0]
-                    self._log_metrics(
-                        wandb_run=wandb_run,
-                        metrics=avg_interval_metrics,
-                        step=global_step,
-                        prefix="train",
-                        add_avg_prefix=False,  # Raw interval metrics
-                        additional_log_items={"train/learning_rate": current_lr},
-                    )
+                current_lr = scheduler.get_last_lr()[0]
+                self._log_metrics(
+                    wandb_run=wandb_run,
+                    metrics=avg_interval_metrics,
+                    step=global_step,
+                    prefix="train",
+                    add_avg_prefix=False,  # Raw interval metrics
+                    additional_log_items={"train/learning_rate": current_lr},
+                )
 
         pbar.close()
 
         # Log epoch averages
-        if wandb_run is not None and samples_count > 0:
+        if samples_count > 0:
             avg_epoch_metrics = self._compute_avg_metrics(
                 accumulated_metrics, samples_count
             )
@@ -485,7 +452,7 @@ class EnsembleTrainer(BaseTrainer):
         model.eval()
         accumulated_metrics: dict[str, float] = {}
 
-        desc = f"Model {model_idx} - Eval Epoch {epoch}/{n_epochs}"
+        desc = f"Model {model_idx} - Eval E{epoch}/{n_epochs}"
         pbar = tqdm(
             eval_loader,
             desc=desc,
@@ -515,20 +482,14 @@ class EnsembleTrainer(BaseTrainer):
 
         pbar.close()
 
-        if wandb_run is not None:
-            avg_epoch_metrics = self._compute_avg_metrics(
-                accumulated_metrics, n_batches
-            )
+        avg_epoch_metrics = self._compute_avg_metrics(accumulated_metrics, n_batches)
+        self._log_metrics(
+            wandb_run=wandb_run,
+            metrics=avg_epoch_metrics,
+            step=global_step,
+            prefix="eval",
+            add_avg_prefix=True,
+            additional_log_items={"eval/epoch": epoch},
+        )
 
-            self._log_metrics(
-                wandb_run=wandb_run,
-                metrics=avg_epoch_metrics,
-                step=global_step,
-                prefix="eval",
-                add_avg_prefix=True,
-                additional_log_items={"eval/epoch": epoch},
-            )
-
-            return avg_epoch_metrics.get("loss", 0.0)
-
-        return accumulated_metrics.get("loss", 0.0) / n_batches
+        return avg_epoch_metrics.get("loss", 0.0)
