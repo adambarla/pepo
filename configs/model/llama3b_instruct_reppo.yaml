@@ -6,16 +6,15 @@ defaults:
   - _self_
 
 # Shared LLM config (reward + policy use the same base model)
-model_id: "HuggingFaceTB/SmolLM2-1.7B"
-chat_template: ${pepo.constants:SMOLLM_CHAT_TEMPLATE}
+model_id: "meta-llama/Llama-3.2-3B-Instruct"
 lora_r: 16
-lora_alpha: 32
+lora_alpha: 16
 lora_dropout: 0.05
 lora_target_modules: "all-linear"
 
-train_batch_size: 128
-eval_batch_size: 256
-generator_batch_size: 256
+train_batch_size: 32
+eval_batch_size: 64
+generator_batch_size: 128
 
 _target_: pepo.model.reppo.REPPOModel
 
@@ -26,7 +25,6 @@ reward_model:
   _target_: pepo.model.reppo.REPPORewardModel
   num_networks: ${L}
   model_id: ${..model_id}
-  chat_template: ${..chat_template}
   lora_r: ${..lora_r}
   lora_alpha: ${..lora_alpha}
   lora_dropout: ${..lora_dropout}
@@ -36,9 +34,10 @@ reward_model:
     train_batch_size: ${...train_batch_size}
     eval_batch_size: ${...eval_batch_size}
     gradient_accumulation_steps: 1
-    training_epochs: 1
+    training_epochs: 2
 
 tokenizer_id: null
+chat_template: null
 lora_bias: "none"
 lora_task_type: "CAUSAL_LM"
 compile: false
@@ -50,7 +49,7 @@ trainer:
   train_batch_size: ${..train_batch_size}
   eval_batch_size: ${..eval_batch_size}
   gradient_accumulation_steps: 1
-  training_epochs: 1
+  training_epochs: 2
 
 generator:
   batch_size: ${..generator_batch_size}
