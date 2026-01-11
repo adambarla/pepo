@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, cast
 
 if TYPE_CHECKING:
     from ..utils import DeviceManager, HubManager
+    from .config import BackboneConfig
 
 import torch
 import torch.nn.functional as F
@@ -33,19 +34,10 @@ class DEPPOModel(BaseModel):
 
     def __init__(
         self,
+        backbone: "BackboneConfig",
+        num_networks: int,  # This will be overridden by L in config usually
         alpha: float,
-        beta: float,
-        num_networks: int,
-        model_id: str,
-        tokenizer_id: Optional[str] = None,
-        chat_template: Optional[str] = None,
-        lora_r: int = 16,
-        lora_alpha: int = 16,
-        lora_dropout: float = 0.05,
-        lora_bias: str = "none",
-        lora_task_type: str = "CAUSAL_LM",
-        lora_target_modules: str = "all-linear",
-        compile: bool = False,
+        beta: float = 0.1,  # Default for safety
         trainer: Optional[EnsembleTrainer] = None,
         generator: Optional[Generator] = None,
         debug: bool = False,
@@ -57,36 +49,36 @@ class DEPPOModel(BaseModel):
         self.alpha = alpha
         self.beta = beta
         self._num_models = num_networks
-        self.model_id = model_id
+        self.model_id = backbone.model_id
         self._device_manager = get_device_manager()
         self._hub_manager = get_hub_manager()
-        self.tokenizer_id = tokenizer_id
-        self.chat_template = chat_template
+        self.tokenizer_id = backbone.tokenizer_id
+        self.chat_template = backbone.chat_template
         self._trainer = trainer
         self.generator = generator
         self.debug = debug
 
-        self.compile_model = compile
+        self.compile_model = backbone.compile
 
         self._checkpoint_manager = CheckpointManager(
             device_manager=self._device_manager,
             hub_manager=self._hub_manager,
-            compile_model=compile,
+            compile_model=backbone.compile,
         )
 
         self.lora_config = LoraConfig(
-            r=lora_r,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            bias=cast(Literal["none", "all", "lora_only"], lora_bias),
-            task_type=cast(Literal["CAUSAL_LM"], lora_task_type),
-            target_modules=lora_target_modules,
+            r=backbone.lora_r,
+            lora_alpha=backbone.lora_alpha,
+            lora_dropout=backbone.lora_dropout,
+            bias=cast(Literal["none", "all", "lora_only"], backbone.lora_bias),
+            task_type=cast(Literal["CAUSAL_LM"], backbone.lora_task_type),
+            target_modules=backbone.lora_target_modules,
         )
 
         self._tokenizer = self.checkpoint_manager.load_tokenizer(
-            model_id=model_id,
-            tokenizer_id=tokenizer_id,
-            chat_template=chat_template,
+            model_id=backbone.model_id,
+            tokenizer_id=backbone.tokenizer_id,
+            chat_template=backbone.chat_template,
         )
 
         self._models: list[PeftModel] | None = None  # lazy loaded

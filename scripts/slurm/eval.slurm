@@ -10,4 +10,4 @@
 
 cd ~/pepo
 
-uv run --no-sync scripts/eval.py "$@"
+uv run scripts/eval.py "$@"

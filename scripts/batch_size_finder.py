@@ -353,8 +353,9 @@ def main(cfg: DictConfig) -> None:
         else:
             logger.info(f"{task}: FAILED ({r['error']})")
 
-    for yaml_file in (work_dir / "configs" / "model").glob("*.yaml"):
+    for yaml_file in (work_dir / "configs" / "backbone").glob("*.yaml"):
         if cfg.model.model_id in yaml_file.read_text():
+            # Assuming backbone config now, structure is flat in the file
             update_model_config(yaml_file, results, logger)
             break
 

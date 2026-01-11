@@ -7,6 +7,6 @@ dataloader_pin_memory: true
 force_recompute: false
 annotators:
   - _target_: pepo.data.annotators.LogprobAnnotator
-    ref_model_id: ${model.model_id}
-    inference_batch_size: ${model.trainer.eval_batch_size}
+    ref_model_id: ${backbone.model_id}
+    inference_batch_size: ${backbone.eval_batch_size}
     force: false

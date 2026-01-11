@@ -1,5 +1,6 @@
 defaults:
-  - model: llama_instruct
+  - backbone: smollm
+  - model: reppo
   - dataset: ultrafeedback
   - _self_
 

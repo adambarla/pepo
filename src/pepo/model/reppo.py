@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, cast
 if TYPE_CHECKING:
     from ..trainer import BaseTrainer
     from ..utils import DeviceManager, HubManager
+    from .config import BackboneConfig
 
 
 import torch
@@ -80,64 +81,47 @@ class REPPORewardModel(BaseModel):
     def __init__(
         self,
         num_networks: int,
-        model_id: str,
-        tokenizer_id: Optional[str] = None,
-        chat_template: Optional[str] = None,
-        lora_r: int = 16,
-        lora_alpha: int = 16,
-        lora_dropout: float = 0.05,
-        lora_bias: str = "none",
-        lora_task_type: str = "CAUSAL_LM",
-        lora_target_modules: str = "all-linear",
-        compile: bool = False,
-        debug: bool = False,
+        backbone: "BackboneConfig",
         trainer: Optional["BaseTrainer"] = None,
+        debug: bool = False,
         **kwargs: Any,
     ):
         """Initialize REPPO Reward Model ensemble.
 
         Args:
             num_networks: Number of reward models (L).
-            model_id: HuggingFace model ID for base model.
-            tokenizer_id: Optional tokenizer ID (defaults to model_id).
-            chat_template: Optional chat template override.
-            lora_r: LoRA rank.
-            lora_alpha: LoRA alpha.
-            lora_dropout: LoRA dropout.
-            lora_bias: LoRA bias mode.
-            lora_task_type: LoRA task type.
-            lora_target_modules: LoRA target modules.
-            compile: Whether to compile the model.
-            debug: Enable debug logging.
+            backbone: Configuration for the backbone model.
+            trainer: Trainer configuration.
+            debug: Debug mode.
         """
         self._num_models = num_networks
-        self.model_id = model_id
+        self.model_id = backbone.model_id
         self._device_manager = get_device_manager()
         self._hub_manager = get_hub_manager()
-        self.tokenizer_id = tokenizer_id
-        self.chat_template = chat_template
+        self.tokenizer_id = backbone.tokenizer_id
+        self.chat_template = backbone.chat_template
         self.debug = debug
 
         self._checkpoint_manager = CheckpointManager(
             device_manager=self._device_manager,
             hub_manager=self._hub_manager,
-            compile_model=compile,
+            compile_model=backbone.compile,
         )
 
         self.lora_config = LoraConfig(
-            r=lora_r,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            bias=cast(Literal["none", "all", "lora_only"], lora_bias),
-            task_type=cast(Literal["CAUSAL_LM", "FEATURE_EXTRACTION"], lora_task_type),
-            target_modules=lora_target_modules,
+            r=backbone.lora_r,
+            lora_alpha=backbone.lora_alpha,
+            lora_dropout=backbone.lora_dropout,
+            bias=cast(Literal["none", "all", "lora_only"], backbone.lora_bias),
+            task_type="FEATURE_EXTRACTION",
+            target_modules=backbone.lora_target_modules,
             modules_to_save=["reward_head"],
         )
 
         self._tokenizer = self.checkpoint_manager.load_tokenizer(
-            model_id=model_id,
-            tokenizer_id=tokenizer_id,
-            chat_template=chat_template,
+            model_id=backbone.model_id,
+            tokenizer_id=backbone.tokenizer_id,
+            chat_template=backbone.chat_template,
         )
         self._models: list[PeftModel] | None = None
         self._models_lock = threading.Lock()
@@ -421,26 +405,17 @@ class REPPOModel(BaseModel):
 
     def __init__(
         self,
-        model_id: str,
+        backbone: "BackboneConfig",
         reward_model: "REPPORewardModel",
-        beta: float = 0.1,
-        tokenizer_id: Optional[str] = None,
-        chat_template: Optional[str] = None,
-        lora_r: int = 16,
-        lora_alpha: int = 16,
-        lora_dropout: float = 0.05,
-        lora_bias: str = "none",
-        lora_task_type: str = "CAUSAL_LM",
-        lora_target_modules: str = "all-linear",
-        compile: bool = False,
-        generator: Optional[Any] = None,  # Unused - for Phase 2
         trainer: Optional["BaseTrainer"] = None,
+        beta: float = 0.1,
+        generator: Optional[Any] = None,  # Unused - for Phase 2
         force_annotation: bool = False,
         debug: bool = False,
         **kwargs: Any,
     ):
         """Initialize REPPO Model (Policy)."""
-        self.model_id = model_id
+        self.model_id = backbone.model_id
         self._device_manager = get_device_manager()
         self._hub_manager = get_hub_manager()
         # Unused Phase 2 attributes (kept for config compatibility)
@@ -449,6 +424,21 @@ class REPPOModel(BaseModel):
         self.debug = debug
         self._num_models = 1
         self._force_annotation = force_annotation
+
+        # If reward_model has _partial_, we need to inject backbone
+        if hasattr(reward_model, "_partial_") and reward_model._partial_:
+            # This case shouldn't happen with the new config structure where we don't
+            # usually partial init the reward model. But if it is a DictConfig or
+            # partial, let's assume it's fully instantiated.
+            pass
+
+        # In Hydra composition, reward_model is instantiated with defaults
+        # However, it needs backbone. We should pass backbone to it if it's missing.
+        # But wait, reward_model is a sub-config in reppo.yaml.
+        # We need to explicitly pass backbone to reward_model in YAML or here.
+        # Since reward_model is likely already instantiated by Hydra when passed here,
+        # we face a chicken-egg problem.
+        # Solution: In `reppo.yaml`, we will set `reward_model.backbone: ${backbone}`.
 
         self.reward_model = reward_model
 
@@ -464,22 +454,22 @@ class REPPOModel(BaseModel):
         self._checkpoint_manager = CheckpointManager(
             device_manager=self._device_manager,
             hub_manager=self._hub_manager,
-            compile_model=compile,
+            compile_model=backbone.compile,
         )
 
         self.lora_config = LoraConfig(
-            r=lora_r,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            bias=cast(Literal["none", "all", "lora_only"], lora_bias),
-            task_type=cast(Literal["CAUSAL_LM"], lora_task_type),
-            target_modules=lora_target_modules,
+            r=backbone.lora_r,
+            lora_alpha=backbone.lora_alpha,
+            lora_dropout=backbone.lora_dropout,
+            bias=cast(Literal["none", "all", "lora_only"], backbone.lora_bias),
+            task_type=cast(Literal["CAUSAL_LM"], backbone.lora_task_type),
+            target_modules=backbone.lora_target_modules,
         )
 
         self._tokenizer = self.checkpoint_manager.load_tokenizer(
-            model_id=model_id,
-            tokenizer_id=tokenizer_id,
-            chat_template=chat_template,
+            model_id=backbone.model_id,
+            tokenizer_id=backbone.tokenizer_id,
+            chat_template=backbone.chat_template,
         )
         self._models: list[PeftModel] | None = None
         self._epoch: int = 0

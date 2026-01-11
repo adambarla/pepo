@@ -1,0 +1,17 @@
+_target_: pepo.model.config.BackboneConfig
+# Mistral 7B Base Configuration
+model_id: "HuggingFaceH4/mistral-7b-sft-beta"
+lora_r: 16
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_modules: "all-linear"
+
+tokenizer_id: null
+chat_template: null # use the provided one
+lora_bias: "none"
+lora_task_type: "CAUSAL_LM"
+compile: false
+
+train_batch_size: 64
+eval_batch_size: 256
+generator_batch_size: 128

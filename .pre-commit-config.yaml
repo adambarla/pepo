@@ -30,7 +30,7 @@ repos:
       # Type checking
       - id: ty
         name: ty
-        entry: uv run ty check
+        entry: uvx ty check
         language: system
         types: [python]
         # args: [] # Add any args if needed

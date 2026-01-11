@@ -1,17 +1,13 @@
+defaults:
+  - /trainer@trainer: ensemble
+  - _self_
+
 _target_: pepo.model.reppo.REPPORewardModel
 num_networks: ${L}
-model_id: ${..model_id}
-tokenizer_id: ${..tokenizer_id}
-chat_template: ${..chat_template}
-lora_r: ${..lora_r}
-lora_alpha: ${..lora_alpha}
-lora_dropout: ${..lora_dropout}
-lora_target_modules: ${..lora_target_modules}
-lora_task_type: "FEATURE_EXTRACTION"
-compile: false
+# backbone is injected by reppo.yaml
 debug: ${..debug}
 trainer:
-  train_batch_size: ${..train_batch_size}
-  eval_batch_size: ${..eval_batch_size}
+  train_batch_size: ${...backbone.train_batch_size}
+  eval_batch_size: ${...backbone.eval_batch_size}
   gradient_accumulation_steps: 1
   training_epochs: 2

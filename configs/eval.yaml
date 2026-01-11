@@ -1,7 +1,9 @@
 defaults:
-  - model: llama_instruct
+  - backbone: smollm
+  - model: reppo
   - dataset: ultrafeedback
   - evaluator: alpaca
+  - backbone@ref_backbone: null
   - model@ref_model: null #in CLI override as model@ref_model=...
   - _self_
 
@@ -31,6 +33,7 @@ dataset:
 model:
   num_networks: ${L}
   alpha: ${a}
+  beta: ${b}
   generator:
     max_new_tokens: ${mt}
     max_prompt_length: 512
@@ -45,15 +48,18 @@ evaluator:
 ref_model:
   num_networks: ${ref_L}
   alpha: ${ref_a}
+  beta: ${ref_b}
   generator:
     max_new_tokens: ${mt}
 
 e: 3
 L: 4
 a: 0.1
+b: 0.1
 ref_e: 3
 ref_L: 4
 ref_a: 0.1
+ref_b: 0.1
 
 mt: 1024
 ns: null
@@ -62,7 +68,7 @@ overwrite: false
 seed: 42
 debug: false
 log_level: "info"
-sync: true  # If false, disables wandb logging
+sync: false  # If false, disables wandb logging
 
 hydra:
   run:

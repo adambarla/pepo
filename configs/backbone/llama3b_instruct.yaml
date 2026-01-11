@@ -1,0 +1,17 @@
+_target_: pepo.model.config.BackboneConfig
+# Llama 3.2 3B Instruct Base Configuration
+model_id: "meta-llama/Llama-3.2-3B-Instruct"
+lora_r: 16
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_modules: "all-linear"
+
+tokenizer_id: null
+chat_template: null # use the provided one
+lora_bias: "none"
+lora_task_type: "CAUSAL_LM"
+compile: false
+
+train_batch_size: 32
+eval_batch_size: 64
+generator_batch_size: 128
