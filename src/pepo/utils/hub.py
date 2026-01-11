@@ -1,14 +1,14 @@
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import dotenv
 from huggingface_hub import HfApi, login
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, PreTrainedModel
+from transformers import PreTrainedModel
 
 if TYPE_CHECKING:
-    from transformers import AutoTokenizer
+    from transformers import PreTrainedTokenizerBase
 
 dotenv.load_dotenv()
 
@@ -213,8 +213,8 @@ class HubManager:
     def push_model(
         self,
         model_name: str,
-        model: AutoModelForCausalLM,
-        tokenizer: "AutoTokenizer",
+        model: PeftModel,
+        tokenizer: "PreTrainedTokenizerBase",
         private: bool = False,
         epoch: Optional[int] = None,
     ) -> None:
@@ -248,13 +248,13 @@ class HubManager:
         logger.info(f"Pushing model to {repo_id}...")
 
         # Push model
-        model.push_to_hub(
-            repo_id,
+        cast(Any, model).push_to_hub(
+            repo_id=repo_id,
             commit_message=commit_message,
             private=private,
         )
         tokenizer.push_to_hub(
-            repo_id,
+            repo_id=repo_id,
             commit_message=commit_message,
             private=private,
         )

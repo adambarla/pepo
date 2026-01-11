@@ -7,7 +7,7 @@ import torch
 from datasets import Dataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase
 
 from pepo.data.collators.base import DataCollator
 from pepo.utils.device import DeviceManager
@@ -47,7 +47,7 @@ class LogprobAnnotator(BaseAnnotator):
         self.dataloader_prefetch_factor = dataloader_prefetch_factor
 
     def annotate(self, dataset: Dataset, **kwargs: Any) -> Dataset:
-        tokenizer: AutoTokenizer = kwargs["tokenizer"]
+        tokenizer: PreTrainedTokenizerBase = kwargs["tokenizer"]
         device_manager: DeviceManager = kwargs["device_manager"]
         force: bool = kwargs.get("force", False)
         if not device_manager:
@@ -68,12 +68,12 @@ class LogprobAnnotator(BaseAnnotator):
         )
 
         # Load models sequentially
-        models: list[AutoModelForCausalLM] = []
+        models: list[PreTrainedModel] = []
         for gpu_id in available_gpus:
             device_str = f"cuda:{gpu_id}"
             logger.info(f"Loading reference model on {device_str}...")
             model = cast(
-                AutoModelForCausalLM,
+                PreTrainedModel,
                 AutoModelForCausalLM.from_pretrained(
                     self.ref_model_id,
                     dtype=device_manager.dtype,
@@ -104,7 +104,7 @@ class LogprobAnnotator(BaseAnnotator):
                 shards.append(None)
 
         def worker(
-            model: AutoModelForCausalLM,
+            model: PreTrainedModel,
             gpu_id: int,
             shard_idx: int,
             sub_dataset: Dataset,
@@ -132,7 +132,7 @@ class LogprobAnnotator(BaseAnnotator):
                 )
 
                 dataloader = DataLoader(
-                    sub_dataset,
+                    cast(torch.utils.data.Dataset[Any], sub_dataset),
                     batch_size=self.inference_batch_size,
                     shuffle=False,
                     collate_fn=collator,

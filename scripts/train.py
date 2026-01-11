@@ -46,7 +46,7 @@ except ValueError:
     pass  # Already registered
 
 
-@hydra.main(config_path="../configs", config_name="train", version_base="1.1")  # type: ignore
+@hydra.main(config_path="../configs", config_name="train", version_base="1.1")
 def main(cfg: DictConfig) -> None:
     # Setup logging
     debug = cfg.get("debug", False)

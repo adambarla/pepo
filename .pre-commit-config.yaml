@@ -28,12 +28,12 @@ repos:
         types: [python]
 
       # Type checking
-      - id: mypy
-        name: mypy
-        entry: uv run mypy
+      - id: ty
+        name: ty
+        entry: uv run ty check
         language: system
         types: [python]
-        args: [--incremental, --config-file=pyproject.toml, --show-error-codes]
+        # args: [] # Add any args if needed
 
   # General hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks

@@ -1,12 +1,14 @@
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
 if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
+
     from .model import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -46,7 +48,7 @@ class Generator:
     def _process_prompts(
         self,
         prompts: list[str],
-        tokenizer: Any,
+        tokenizer: "PreTrainedTokenizerBase",
         apply_chat_template: bool = True,
     ) -> tuple[list[str], list[str]]:
         """
@@ -59,10 +61,13 @@ class Generator:
 
         for prompt in prompts:
             if apply_chat_template:
-                formatted = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
-                    tokenize=False,
-                    add_generation_prompt=True,
+                formatted = cast(
+                    str,
+                    tokenizer.apply_chat_template(
+                        [{"role": "user", "content": prompt}],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    ),
                 )
             else:
                 formatted = prompt

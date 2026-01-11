@@ -26,7 +26,7 @@ def init_device_manager(
     if isinstance(dtype, str):
         dtype = getattr(torch, dtype)
     # Cast to ensure type is torch.dtype after potential string conversion
-    dtype_resolved: torch.dtype = dtype  # type: ignore[assignment]
+    dtype_resolved: torch.dtype = dtype
     _instance = DeviceManager(gpu_ids=gpu_ids, dtype=dtype_resolved)
     return _instance
 

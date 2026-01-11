@@ -3,7 +3,12 @@ from typing import Optional, cast
 
 import torch
 from peft import LoraConfig, PeftModel, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+)
 
 from .utils import DeviceManager, HubManager
 
@@ -26,7 +31,7 @@ class CheckpointManager:
         model_id: str,
         tokenizer_id: Optional[str] = None,
         chat_template: Optional[str] = None,
-    ) -> AutoTokenizer:
+    ) -> PreTrainedTokenizerBase:
         tid = tokenizer_id or model_id
         tokenizer = AutoTokenizer.from_pretrained(tid)
 
@@ -55,7 +60,7 @@ class CheckpointManager:
         init_new: bool = False,
         epoch: Optional[int] = None,
         custom_modules: Optional[dict[str, torch.nn.Module]] = None,
-        model_class: type[PreTrainedModel] = AutoModelForCausalLM,
+        model_class: type[PreTrainedModel] = AutoModelForCausalLM,  # type: ignore[assignment]
     ) -> PeftModel:
         """
         Load a single model (base + LoRA).
@@ -135,7 +140,7 @@ class CheckpointManager:
         self,
         model: PeftModel,
         model_name: str,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         epochs: Optional[int] = None,
     ) -> None:
         """

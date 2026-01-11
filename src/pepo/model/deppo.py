@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, cast
 
 if TYPE_CHECKING:
     from ..utils import DeviceManager, HubManager
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 import torch
 import torch.nn.functional as F
 from peft import LoraConfig, PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import PreTrainedTokenizerBase
 
 from ..generator import Generator
 from ..loader import CheckpointManager
@@ -78,8 +78,8 @@ class DEPPOModel(BaseModel):
             r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
-            bias=lora_bias,
-            task_type=lora_task_type,
+            bias=cast(Literal["none", "all", "lora_only"], lora_bias),
+            task_type=cast(Literal["CAUSAL_LM"], lora_task_type),
             target_modules=lora_target_modules,
         )
 
@@ -102,7 +102,7 @@ class DEPPOModel(BaseModel):
         return self._num_models
 
     @property
-    def tokenizer(self) -> AutoTokenizer:
+    def tokenizer(self) -> PreTrainedTokenizerBase:
         return self._tokenizer
 
     @property
@@ -247,7 +247,7 @@ class DEPPOModel(BaseModel):
             epochs=epochs,
         )
 
-    def get_tokenizer(self) -> AutoTokenizer:
+    def get_tokenizer(self) -> PreTrainedTokenizerBase:
         return self._tokenizer
 
     def can_load_from_epoch(self, epoch: int) -> bool:
@@ -383,7 +383,7 @@ class DEPPOModel(BaseModel):
 
     def _predict_submodel(
         self,
-        model: AutoModelForCausalLM,
+        model: PeftModel,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:

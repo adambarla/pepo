@@ -5,6 +5,7 @@ import threading
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+from peft import PeftModel
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import get_scheduler
@@ -328,7 +329,7 @@ class EnsembleTrainer(BaseTrainer):
     def _train_epoch(
         self,
         model_idx: int,
-        model: torch.nn.Module,
+        model: PeftModel,
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler.LRScheduler,
         train_loader: DataLoader[dict[str, torch.Tensor]],
@@ -384,7 +385,7 @@ class EnsembleTrainer(BaseTrainer):
 
             samples_count += 1
             scaled_loss = loss / grad_acc_steps
-            scaled_loss.backward()  # type: ignore[no-untyped-call]
+            scaled_loss.backward()
 
             if (step + 1) % grad_acc_steps == 0:
                 optimizer.step()
@@ -436,7 +437,7 @@ class EnsembleTrainer(BaseTrainer):
     def _eval_epoch(
         self,
         model_idx: int,
-        model: torch.nn.Module,
+        model: PeftModel,
         eval_loader: DataLoader[dict[str, torch.Tensor]],
         device: torch.device,
         epoch: int,

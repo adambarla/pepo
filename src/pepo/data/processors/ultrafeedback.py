@@ -1,8 +1,8 @@
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from datasets import Dataset
-from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerBase
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ class UltraFeedbackProcessor:
         self.max_length = max_length
         self.max_prompt_length = max_prompt_length
 
-    def process(self, dataset: Dataset, tokenizer: AutoTokenizer) -> Dataset:
+    def process(self, dataset: Dataset, tokenizer: PreTrainedTokenizerBase) -> Dataset:
         original_size = len(dataset)
         processed = dataset.map(
             lambda ex: self._process_batch(ex, tokenizer),
@@ -31,7 +31,7 @@ class UltraFeedbackProcessor:
         return processed
 
     def _process_batch(
-        self, examples: dict[str, list[Any]], tokenizer: AutoTokenizer
+        self, examples: dict[str, list[Any]], tokenizer: PreTrainedTokenizerBase
     ) -> dict[str, list[str]]:
         result: dict[str, list[str]] = {
             "prompt_text": [],
@@ -44,15 +44,18 @@ class UltraFeedbackProcessor:
             rejected = self._ensure_message_list(examples["rejected"][i])
             if prompt is None or chosen is None or rejected is None:
                 continue
-            prompt_str = tokenizer.apply_chat_template(
-                prompt, tokenize=False, add_generation_prompt=True
+            prompt_str = cast(
+                str,
+                tokenizer.apply_chat_template(
+                    prompt, tokenize=False, add_generation_prompt=True
+                ),
             )
             chosen_str = (
-                tokenizer.apply_chat_template(chosen, tokenize=False)
+                cast(str, tokenizer.apply_chat_template(chosen, tokenize=False))
                 + tokenizer.eos_token
             )
             rejected_str = (
-                tokenizer.apply_chat_template(rejected, tokenize=False)
+                cast(str, tokenizer.apply_chat_template(rejected, tokenize=False))
                 + tokenizer.eos_token
             )
             if not self._is_valid_length(
@@ -76,7 +79,11 @@ class UltraFeedbackProcessor:
         return None
 
     def _is_valid_length(
-        self, prompt: str, chosen: str, rejected: str, tokenizer: AutoTokenizer
+        self,
+        prompt: str,
+        chosen: str,
+        rejected: str,
+        tokenizer: PreTrainedTokenizerBase,
     ) -> bool:
         if self.max_prompt_length is not None:
             if (

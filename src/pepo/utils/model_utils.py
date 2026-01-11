@@ -3,13 +3,14 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM
+from peft import PeftModel
+from transformers import PreTrainedModel
 
 logger = logging.getLogger(__name__)
 
 
 def get_log_probs(
-    model: AutoModelForCausalLM,
+    model: PreTrainedModel | PeftModel,
     device: torch.device,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
@@ -69,4 +70,4 @@ def get_log_probs(
                 f"DEBUG: CrossEntropyLoss vs log_softmax comparison - "
                 f"Max diff: {max_diff:.2e}, Mean diff: {mean_diff:.2e}"
             )
-    return log_probs_sum  # type: ignore[no-any-return]
+    return log_probs_sum

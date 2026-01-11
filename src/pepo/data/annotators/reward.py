@@ -1,13 +1,13 @@
 import copy
 import logging
 import threading
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import torch
 from datasets import Dataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerBase
 
 from pepo.data.collators.base import DataCollator
 from pepo.utils.device import DeviceManager
@@ -31,7 +31,7 @@ class RewardAnnotator(BaseAnnotator):
         self,
         reward_model: "REPPORewardModel",
         device_manager: DeviceManager,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         force: bool = False,
         max_length: Optional[int] = None,
         max_prompt_length: Optional[int] = None,
@@ -118,9 +118,8 @@ class RewardAnnotator(BaseAnnotator):
             )
 
             dataloader = DataLoader(
-                dataset,
+                cast(torch.utils.data.Dataset[Any], dataset),
                 batch_size=batch_size,
-                shuffle=False,
                 collate_fn=collator,
                 pin_memory=True,
                 num_workers=0,  # Avoid nested multiprocessing issues if possible?

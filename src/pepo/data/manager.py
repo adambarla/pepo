@@ -1,7 +1,7 @@
 import copy
 import hashlib
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 if TYPE_CHECKING:
     from ..utils import DeviceManager
@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from datasets import Dataset, DatasetDict, load_dataset
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerBase
 
 from ..utils import get_device_manager, get_hub_manager
 from .annotators import BaseAnnotator
@@ -31,7 +31,7 @@ class DataManager:
         eval_split_name: str,
         seed: int,
         n_splits: int,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         processor: Optional[DataProcessor] = None,
         collator: Optional[DataCollator] = None,
         max_length: Optional[int] = None,
@@ -119,12 +119,18 @@ class DataManager:
         ):
             logger.info(f"Loading processed dataset from Hub: {processed_name}")
             repo_id = self._hub_manager.get_repo_id(processed_name)
-            train_data = load_dataset(repo_id, split=self.train_split_name)
-            eval_data = load_dataset(repo_id, split=self.eval_split_name)
+            train_data = cast(
+                Dataset, load_dataset(repo_id, split=self.train_split_name)
+            )
+            eval_data = cast(Dataset, load_dataset(repo_id, split=self.eval_split_name))
         else:
             # Load raw and process
-            train_raw = load_dataset(self.dataset_id, split=self.train_split_name)
-            eval_raw = load_dataset(self.dataset_id, split=self.eval_split_name)
+            train_raw = cast(
+                Dataset, load_dataset(self.dataset_id, split=self.train_split_name)
+            )
+            eval_raw = cast(
+                Dataset, load_dataset(self.dataset_id, split=self.eval_split_name)
+            )
             logger.info(
                 f"Loaded {self.dataset_id}: "
                 f"train={len(train_raw)}, eval={len(eval_raw)}"
@@ -219,8 +225,10 @@ class DataManager:
             logger.info(f"Loading annotated dataset from Hub: {new_name}")
             repo_id = self._hub_manager.get_repo_id(new_name)
             # Load and update internal state
-            self._split_train(load_dataset(repo_id, split=self.train_split_name))
-            eval_ds = load_dataset(repo_id, split=self.eval_split_name)
+            self._split_train(
+                cast(Dataset, load_dataset(repo_id, split=self.train_split_name))
+            )
+            eval_ds = cast(Dataset, load_dataset(repo_id, split=self.eval_split_name))
             self.eval_dataset = self._sort_by_length(eval_ds)
             return
 
@@ -282,7 +290,7 @@ class DataManager:
             len(dataset), batch_size, shuffle=do_shuffle, seed=self.seed
         )
         return DataLoader(
-            dataset,
+            cast(torch.utils.data.Dataset[Any], dataset),
             batch_sampler=sampler,
             collate_fn=collator,
             num_workers=self.dataloader_num_workers,

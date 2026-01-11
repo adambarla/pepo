@@ -2,7 +2,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import torch
-from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerBase
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,7 @@ class DataCollator:
 
     def __init__(
         self,
-        tokenizer: Optional[AutoTokenizer] = None,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
         max_length: Optional[int] = None,
         max_prompt_length: Optional[int] = None,
     ):
@@ -21,12 +21,12 @@ class DataCollator:
         self.max_prompt_length = max_prompt_length
 
     @property
-    def tokenizer(self) -> AutoTokenizer:
+    def tokenizer(self) -> PreTrainedTokenizerBase:
         if self._tokenizer is None:
             raise ValueError("Tokenizer not set. Call set_tokenizer() first.")
         return self._tokenizer
 
-    def set_tokenizer(self, tokenizer: AutoTokenizer) -> None:
+    def set_tokenizer(self, tokenizer: PreTrainedTokenizerBase) -> None:
         self._tokenizer = tokenizer
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:

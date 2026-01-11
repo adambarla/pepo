@@ -26,7 +26,7 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
-from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerBase
 
 from pepo.utils import constants, set_seed, setup_logging
 
@@ -89,7 +89,7 @@ def binary_search_batch_size(
 def test_train_batch_size(
     model: Any,
     cfg: DictConfig,
-    tokenizer: AutoTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
     logger: logging.Logger,
 ) -> Tuple[Optional[int], Optional[str]]:
     """Test training batch size with real data (without eval)."""
@@ -143,7 +143,10 @@ def test_train_batch_size(
 
 
 def test_eval_batch_size(
-    model: Any, cfg: DictConfig, tokenizer: AutoTokenizer, logger: logging.Logger
+    model: Any,
+    cfg: DictConfig,
+    tokenizer: PreTrainedTokenizerBase,
+    logger: logging.Logger,
 ) -> Tuple[Optional[int], Optional[str]]:
     """Test evaluation batch size with optimizer states loaded (1 batch only).
 
@@ -202,7 +205,10 @@ def test_eval_batch_size(
 
 
 def test_gen_batch_size(
-    model: Any, cfg: DictConfig, tokenizer: AutoTokenizer, logger: logging.Logger
+    model: Any,
+    cfg: DictConfig,
+    tokenizer: PreTrainedTokenizerBase,
+    logger: logging.Logger,
 ) -> Tuple[Optional[int], Optional[str]]:
     """Test generation batch size."""
     logger.info("Testing GENERATION batch size...")
@@ -220,7 +226,7 @@ def test_gen_batch_size(
         cleanup_cuda()
         try:
             input_ids = torch.randint(
-                0, tokenizer.vocab_size, (batch_size, target_len), dtype=torch.long
+                0, len(tokenizer), (batch_size, target_len), dtype=torch.long
             )
             attention_mask = torch.ones_like(input_ids)
             generator.generate(
@@ -286,9 +292,7 @@ def update_model_config(
             logger.info(f"Updated {u}")
 
 
-@hydra.main(  # type: ignore[untyped-decorator]
-    config_path="../configs", config_name="benchmark.yaml", version_base="1.1"
-)
+@hydra.main(config_path="../configs", config_name="benchmark.yaml", version_base="1.1")
 def main(cfg: DictConfig) -> None:
     from pepo.utils import init_device_manager, init_hub_manager
 

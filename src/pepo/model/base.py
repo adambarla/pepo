@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from peft import PeftModel
-from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerBase
 
 if TYPE_CHECKING:
     from ..generator import Generator
@@ -33,7 +33,7 @@ class BaseModel(ABC):
 
     @property
     @abstractmethod
-    def tokenizer(self) -> AutoTokenizer:
+    def tokenizer(self) -> PreTrainedTokenizerBase:
         """Tokenizer for the model."""
 
     @property
@@ -55,7 +55,7 @@ class BaseModel(ABC):
     def loss_fn(
         self,
         batch: dict[str, torch.Tensor],
-        model: torch.nn.Module,
+        model: PeftModel,
         device: torch.device,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """
@@ -141,7 +141,7 @@ class BaseModel(ABC):
     def unload(self) -> None:
         """Unload models from memory."""
 
-    def get_tokenizer(self) -> AutoTokenizer:
+    def get_tokenizer(self) -> PreTrainedTokenizerBase:
         """Get the tokenizer."""
         return self.tokenizer
 

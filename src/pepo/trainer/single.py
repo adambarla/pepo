@@ -282,7 +282,7 @@ class SingleModelTrainer(BaseTrainer):
 
             loss, metrics = model.loss_fn(batch, model.models[0], device)
             scaled_loss = loss / grad_acc_steps
-            scaled_loss.backward()  # type: ignore[no-untyped-call]
+            scaled_loss.backward()
 
             if "loss" not in metrics:
                 metrics["loss"] = loss.item()

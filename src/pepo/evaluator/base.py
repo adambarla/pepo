@@ -1,9 +1,9 @@
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 
 from ..model import BaseModel
 from ..utils import sanitize_filename
@@ -61,10 +61,13 @@ class BaseEvaluator(ABC):
         """
         Load dataset from HuggingFace.
         """
-        dataset = load_dataset(
-            self.dataset_id,
-            split=self.dataset_split,
-            trust_remote_code=True,
+        dataset = cast(
+            Dataset,
+            load_dataset(
+                self.dataset_id,
+                split=self.dataset_split,
+                trust_remote_code=True,
+            ),
         )
         if self.num_samples is not None and self.num_samples > 0:
             dataset = dataset.select(range(min(self.num_samples, len(dataset))))

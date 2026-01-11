@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, cast
 
 if TYPE_CHECKING:
     from ..trainer import BaseTrainer
@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from peft import LoraConfig, PeftModel
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, PreTrainedModel, PreTrainedTokenizerBase
 
 from ..data import RewardDataCollator
 from ..data.annotators.reward import RewardAnnotator
@@ -64,7 +64,7 @@ class RewardHead(nn.Module):
         last_hidden = hidden_states[batch_indices, seq_lens]  # (B, H)
 
         # Project to scalar
-        return self.linear(last_hidden).squeeze(-1)  # type: ignore[no-any-return]
+        return self.linear(last_hidden).squeeze(-1)
 
 
 class REPPORewardModel(BaseModel):
@@ -128,8 +128,8 @@ class REPPORewardModel(BaseModel):
             r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
-            bias=lora_bias,
-            task_type=lora_task_type,
+            bias=cast(Literal["none", "all", "lora_only"], lora_bias),
+            task_type=cast(Literal["CAUSAL_LM", "FEATURE_EXTRACTION"], lora_task_type),
             target_modules=lora_target_modules,
             modules_to_save=["reward_head"],
         )
@@ -208,7 +208,7 @@ class REPPORewardModel(BaseModel):
                     init_new=init_new,
                     epoch=epoch,
                     custom_modules={"reward_head": reward_head},
-                    model_class=AutoModel,
+                    model_class=cast(type[PreTrainedModel], AutoModel),
                 )
             )
 
@@ -257,7 +257,7 @@ class REPPORewardModel(BaseModel):
         )
 
     @property
-    def tokenizer(self) -> AutoTokenizer:
+    def tokenizer(self) -> PreTrainedTokenizerBase:
         return self._tokenizer
 
     @property
@@ -296,7 +296,7 @@ class REPPORewardModel(BaseModel):
             attention_mask=attention_mask,
         )
         hidden_states = outputs.last_hidden_state
-        return reward_head(hidden_states, attention_mask)  # type: ignore[no-any-return]
+        return reward_head(hidden_states, attention_mask)
 
     def loss_fn(
         self,
@@ -471,8 +471,8 @@ class REPPOModel(BaseModel):
             r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
-            bias=lora_bias,
-            task_type=lora_task_type,
+            bias=cast(Literal["none", "all", "lora_only"], lora_bias),
+            task_type=cast(Literal["CAUSAL_LM"], lora_task_type),
             target_modules=lora_target_modules,
         )
 
@@ -490,7 +490,7 @@ class REPPOModel(BaseModel):
         )
 
     @property
-    def tokenizer(self) -> AutoTokenizer:
+    def tokenizer(self) -> PreTrainedTokenizerBase:
         return self._tokenizer
 
     @property
@@ -661,8 +661,8 @@ class REPPOModel(BaseModel):
         r_p = batch["rejected_input_ids"].to(device)
         r_m = batch["rejected_attention_mask"].to(device)
         r_r = batch["rejected_response_mask"].to(device)
-        lp_c = get_log_probs(model, device, c_p, c_m, c_r)
-        lp_r = get_log_probs(model, device, r_p, r_m, r_r)
+        lp_c = get_log_probs(cast(PreTrainedModel, model), device, c_p, c_m, c_r)
+        lp_r = get_log_probs(cast(PreTrainedModel, model), device, r_p, r_m, r_r)
 
         if "reference_chosen_logps" in batch:
             lrf_c = batch["reference_chosen_logps"].to(device)
@@ -673,8 +673,12 @@ class REPPOModel(BaseModel):
                 if isinstance(model, PeftModel)
                 else torch.no_grad()
             ):
-                lrf_c = get_log_probs(model, device, c_p, c_m, c_r)
-                lrf_r = get_log_probs(model, device, r_p, r_m, r_r)
+                lrf_c = get_log_probs(
+                    cast(PreTrainedModel, model), device, c_p, c_m, c_r
+                )
+                lrf_r = get_log_probs(
+                    cast(PreTrainedModel, model), device, r_p, r_m, r_r
+                )
 
         rs_w = batch["rewards_chosen"].to(device)
         rs_l = batch["rewards_rejected"].to(device)
