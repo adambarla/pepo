@@ -170,6 +170,16 @@ class BaseModel(ABC):
         if isinstance(self._trainer, functools.partial):
             self._trainer = self._trainer()
 
+    @property
+    def trainer(self) -> Optional["BaseTrainer"]:
+        """Get the trainer instance."""
+        return self._trainer
+
+    @trainer.setter
+    def trainer(self, value: Optional["BaseTrainer"]) -> None:
+        """Set the trainer instance."""
+        self._trainer = value
+
     @abstractmethod
     def train(
         self,

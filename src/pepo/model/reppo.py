@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     from ..trainer import BaseTrainer
     from ..utils import DeviceManager, HubManager
 
-import functools
 
 import torch
 import torch.nn as nn
@@ -145,9 +144,6 @@ class REPPORewardModel(BaseModel):
         self.epochs_per_model: list[Optional[int]] = [0] * self._num_models
         self.trainer = trainer
 
-        if trainer is not None:
-            self.trainer = trainer
-
         logger.info(
             f"REPPORewardModel initialized with L={self._num_models}, "
             f"model_id={self.model_id}"
@@ -177,11 +173,6 @@ class REPPORewardModel(BaseModel):
     @property
     def hub_manager(self) -> HubManager:
         return self._hub_manager
-
-    def init_trainer(self) -> None:
-        """Initialize the trainer if it's a partial."""
-        if isinstance(self.trainer, functools.partial):
-            self.trainer = self.trainer()
 
     def load(
         self, init_new: bool = False, epoch: Optional[int] = None, **kwargs: Any

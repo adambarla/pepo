@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import functools
 import logging
 import math
 import threading
@@ -114,11 +113,6 @@ class DEPPOModel(BaseModel):
     def hub_manager(self) -> HubManager:
         return self._hub_manager
 
-    def init_trainer(self) -> None:
-        """Initialize the trainer if it's a partial."""
-        if isinstance(self._trainer, functools.partial):
-            self._trainer = self._trainer()
-
     def train(
         self,
         data_manager: Any,
@@ -147,7 +141,12 @@ class DEPPOModel(BaseModel):
             continue_training=continue_training,
         )
 
-    def load(self, init_new: bool = False, epoch: Optional[int] = None) -> None:
+    def load(
+        self,
+        init_new: bool = False,
+        epoch: Optional[int] = None,
+        **kwargs: Any,
+    ) -> None:
         """
         Load models into memory.
 

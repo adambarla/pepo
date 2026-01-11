@@ -97,9 +97,8 @@ def test_train_batch_size(
 
     data_manager = instantiate(
         cfg.dataset,
-        n_splits=model.num_networks,
+        n_splits=model.num_models,
         tokenizer=tokenizer,
-        ref_model_id=model.model_id,
         inference_batch_size=cfg.model.trainer.eval_batch_size,
         device_manager=model.device_manager,
         shuffle_train=False,
@@ -127,13 +126,13 @@ def test_train_batch_size(
                 model.hub_manager.should_push = original_push
                 model.trainer.optimizers = []
                 model.trainer.schedulers = []
-                model.epochs_per_network = [0] * model.num_networks
+                model.epochs_per_model = [0] * model.num_models
             return True
         except (RuntimeError, torch.cuda.OutOfMemoryError, InterruptedError):
             if model.trainer:
                 model.trainer.optimizers = []
                 model.trainer.schedulers = []
-            model.epochs_per_network = [0] * model.num_networks
+            model.epochs_per_model = [0] * model.num_models
             cleanup_cuda()
             return False
 
@@ -154,9 +153,8 @@ def test_eval_batch_size(
 
     data_manager = instantiate(
         cfg.dataset,
-        n_splits=model.num_networks,
+        n_splits=model.num_models,
         tokenizer=tokenizer,
-        ref_model_id=model.model_id,
         inference_batch_size=cfg.model.trainer.eval_batch_size,
         device_manager=model.device_manager,
         shuffle_train=False,
@@ -183,7 +181,7 @@ def test_eval_batch_size(
             )
             for batch in loader:
                 with torch.no_grad():
-                    model._loss_fn(batch, submodel, device)
+                    model.loss_fn(batch, submodel, device)
                 break  # Only 1 batch
 
             # Cleanup
@@ -249,7 +247,7 @@ def update_model_config(
     mapping = {
         "train_batch_size:": ("training", "train_batch_size"),
         "eval_batch_size:": ("evaluation", "eval_batch_size"),
-        "batch_size:": ("generation", "generator.batch_size"),
+        "generator_batch_size:": ("generation", "generator_batch_size"),
     }
 
     new_lines = []
@@ -324,24 +322,24 @@ def main(cfg: DictConfig) -> None:
     # Test eval first (with optimizer states loaded for realistic memory usage)
     if "eval" in tasks:
         if not model._models:
-            model.load_models(init_new=True)
+            model.load(init_new=True)
         batch, err = test_eval_batch_size(model, cfg, tokenizer, logger)
         results["evaluation"] = {"optimal_batch_size": batch, "error": err}
 
     # Test training (without eval)
     if "train" in tasks:
         if not model._models:
-            model.load_models(init_new=True)
+            model.load(init_new=True)
         batch, err = test_train_batch_size(model, cfg, tokenizer, logger)
         results["training"] = {"optimal_batch_size": batch, "error": err}
 
     if "gen" in tasks:
         if not model._models:
-            model.load_models(init_new=True)
+            model.load(init_new=True)
         batch, err = test_gen_batch_size(model, cfg, tokenizer, logger)
         results["generation"] = {"optimal_batch_size": batch, "error": err}
 
-    model.unload_models()
+    model.unload()
 
     logger.info("=" * 40)
     logger.info("RESULTS")
