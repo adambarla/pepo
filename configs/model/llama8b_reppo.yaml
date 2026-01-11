@@ -1,5 +1,5 @@
-
 defaults:
+  - /reward_model@reward_model: reppo
   - /trainer@reward_model.trainer: ensemble
   - /trainer@trainer: single
   - /generator@generator: greedy
@@ -21,22 +21,8 @@ _target_: pepo.model.reppo.REPPOModel
 wandb:
   tags: ["reppo"]
 
-reward_model:
-  _target_: pepo.model.reppo.REPPORewardModel
-  num_networks: ${L}
-  model_id: ${..model_id}
-  lora_r: ${..lora_r}
-  lora_alpha: ${..lora_alpha}
-  lora_dropout: ${..lora_dropout}
-  lora_target_modules: ${..lora_target_modules}
-  lora_task_type: "FEATURE_EXTRACTION"
-  compile: false
-  debug: ${..debug}
-  trainer:
-    train_batch_size: ${...train_batch_size}
-    eval_batch_size: ${...eval_batch_size}
-    gradient_accumulation_steps: 1
-    training_epochs: 2
+tokenizer_id: null
+chat_template: null
 
 lora_bias: "none"
 lora_task_type: "CAUSAL_LM"
