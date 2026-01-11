@@ -511,9 +511,9 @@ class REPPOModel(BaseModel):
     def load(
         self, init_new: bool = False, epoch: Optional[int] = None, **kwargs: Any
     ) -> None:
-        """Load Policy Model (self) AND Reward Model (helper)."""
+        """Load Policy Model (self) AND Reward Model (optionally)."""
         # Load Reward Model Helper
-        if kwargs.get("load_reward_model", True):
+        if kwargs.get("load_reward_model", False) or init_new:
             self.reward_model.load(init_new=init_new, epoch=epoch)
 
         # Load Policy (Self)
@@ -702,5 +702,26 @@ class REPPOModel(BaseModel):
         device_input_ids: list[torch.Tensor],
         device_attention_masks: list[torch.Tensor],
     ) -> torch.Tensor:
-        """Inference prediction."""
-        raise NotImplementedError("REPPOModel predict not implemented yet.")
+        """Inference prediction using the single policy model.
+
+        Note: device_input_ids and device_attention_masks are lists of length 1,
+        as REPPO has only one policy model (hardcoded L=1).
+        """
+        if self._models is None:
+            raise RuntimeError(
+                "Models are not loaded. Call model.load() before using the model."
+            )
+
+        if len(device_input_ids) != 1 or len(device_attention_masks) != 1:
+            raise ValueError(
+                f"REPPOModel.predict expects input lists of length 1, "
+                f"got {len(device_input_ids)} and {len(device_attention_masks)}"
+            )
+
+        with torch.no_grad():
+            self.policy.eval()
+            log_probs = self._predict_submodel(
+                self.policy, device_input_ids[0], device_attention_masks[0]
+            )
+
+        return log_probs

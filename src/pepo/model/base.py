@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+import torch.nn.functional as F
 from peft import PeftModel
 from transformers import PreTrainedTokenizerBase
 
@@ -238,3 +239,25 @@ class BaseModel(ABC):
             prompts=prompts,
             apply_chat_template=apply_chat_template,
         )
+
+    def _predict_submodel(
+        self,
+        model: PeftModel,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute log probabilities for the next token using a specific model.
+
+        Args:
+            model: The PeftModel to used for prediction.
+            input_ids: (B, T) input IDs.
+            attention_mask: (B, T) attention mask.
+
+        Returns:
+            (B, V) log probabilities for the last token.
+        """
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        logits = outputs.logits  # (B, T, V)
+        last_logits = logits[:, -1, :]
+        log_probs = F.log_softmax(last_logits, dim=-1)
+        return log_probs

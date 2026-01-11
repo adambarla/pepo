@@ -381,18 +381,6 @@ class DEPPOModel(BaseModel):
 
         return loss, metrics
 
-    def _predict_submodel(
-        self,
-        model: PeftModel,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        logits = outputs.logits  # (B, T, V)
-        last_logits = logits[:, -1, :]
-        log_probs = F.log_softmax(last_logits, dim=-1)
-        return log_probs
-
     def predict(
         self,
         device_input_ids: list[torch.Tensor],
