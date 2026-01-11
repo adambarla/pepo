@@ -55,6 +55,7 @@ class CheckpointManager:
         init_new: bool = False,
         epoch: Optional[int] = None,
         custom_modules: Optional[dict[str, torch.nn.Module]] = None,
+        model_class: type[PreTrainedModel] = AutoModelForCausalLM,
     ) -> PeftModel:
         """
         Load a single model (base + LoRA).
@@ -71,6 +72,8 @@ class CheckpointManager:
             custom_modules: Optional dictionary of modules to attach to the base model
                 under given attribute names before wrapping with PEFT.
                 Useful for 'modules_to_save'.
+            model_class: Class to use for loading base model.
+                Defaults to AutoModelForCausalLM.
         """
         load_from_hub = not init_new and epoch is not None
         device_map = self.device_manager.get_device_for_model(model_idx)
@@ -82,7 +85,7 @@ class CheckpointManager:
 
         base_model = cast(
             PreTrainedModel,
-            AutoModelForCausalLM.from_pretrained(
+            model_class.from_pretrained(
                 model_id,
                 dtype=dtype,
                 device_map=device_map,

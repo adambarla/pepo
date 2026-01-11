@@ -31,6 +31,7 @@ reward_model:
   lora_alpha: ${..lora_alpha}
   lora_dropout: ${..lora_dropout}
   lora_target_modules: ${..lora_target_modules}
+  lora_task_type: "FEATURE_EXTRACTION"
   debug: ${..debug}
   trainer:
     train_batch_size: ${...train_batch_size}

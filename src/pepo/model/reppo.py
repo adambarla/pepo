@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from peft import LoraConfig, PeftModel
-from transformers import AutoTokenizer
+from transformers import AutoModel, AutoTokenizer
 
 from ..data import RewardDataCollator
 from ..data.annotators.reward import RewardAnnotator
@@ -217,6 +217,7 @@ class REPPORewardModel(BaseModel):
                     init_new=init_new,
                     epoch=epoch,
                     custom_modules={"reward_head": reward_head},
+                    model_class=AutoModel,
                 )
             )
 
@@ -302,9 +303,8 @@ class REPPORewardModel(BaseModel):
         outputs = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            output_hidden_states=True,
         )
-        hidden_states = outputs.hidden_states[-1]
+        hidden_states = outputs.last_hidden_state
         return reward_head(hidden_states, attention_mask)  # type: ignore[no-any-return]
 
     def loss_fn(
