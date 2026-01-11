@@ -1,9 +1,47 @@
 import logging
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import torch
 
 logger = logging.getLogger(__name__)
+
+# Singleton instance
+_instance: Optional["DeviceManager"] = None
+
+
+def init_device_manager(
+    gpu_ids: Optional[List[int]] = None,
+    dtype: Union[str, torch.dtype] = torch.bfloat16,
+) -> "DeviceManager":
+    """Initialize the global DeviceManager singleton.
+
+    Args:
+        gpu_ids: Optional list of GPU IDs. If None, uses all available GPUs.
+        dtype: Data type for models (e.g., torch.bfloat16 or "bfloat16").
+
+    Returns:
+        The initialized DeviceManager instance.
+    """
+    global _instance
+    if isinstance(dtype, str):
+        dtype = getattr(torch, dtype)
+    # Cast to ensure type is torch.dtype after potential string conversion
+    dtype_resolved: torch.dtype = dtype
+    _instance = DeviceManager(gpu_ids=gpu_ids, dtype=dtype_resolved)
+    return _instance
+
+
+def get_device_manager() -> "DeviceManager":
+    """Get the global DeviceManager singleton.
+
+    Raises:
+        RuntimeError: If init_device_manager was not called first.
+    """
+    if _instance is None:
+        raise RuntimeError(
+            "DeviceManager not initialized. Call init_device_manager() first."
+        )
+    return _instance
 
 
 class DeviceManager:

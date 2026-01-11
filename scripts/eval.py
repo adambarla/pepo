@@ -1,14 +1,22 @@
 import os
 import warnings
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from pepo.evaluator.base import BaseEvaluator
-from pepo.model import PEPOModel
-from pepo.utils import constants, setup_logging, strip_hydra_targets
+from pepo.model import BaseModel
+from pepo.utils import (
+    WandbManager,
+    WandbRun,
+    constants,
+    init_device_manager,
+    init_hub_manager,
+    setup_logging,
+    strip_hydra_targets,
+)
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -29,7 +37,7 @@ except ValueError:
     pass  # Already registered
 
 
-@hydra.main(config_path="../configs", config_name="eval", version_base="1.1")  # type: ignore
+@hydra.main(config_path="../configs", config_name="eval", version_base="1.1")
 def main(cfg: DictConfig) -> None:
     # Setup logging
     debug = cfg.get("debug", False)
@@ -41,22 +49,26 @@ def main(cfg: DictConfig) -> None:
     logger.debug(f"Config: \n{OmegaConf.to_yaml(cfg, resolve=True)}")
     logger.info("PEPO Evaluation Script - Starting")
 
-    device_manager = instantiate(cfg.device)
-    hub_manager = instantiate(cfg.hub)
-
-    model: PEPOModel = instantiate(
-        cfg.model,
-        device_manager=device_manager,
-        hub_manager=hub_manager,
+    # Initialize global managers
+    init_device_manager(
+        gpu_ids=cfg.get("gpu_ids"),
+        dtype=cfg.get("dtype", "bfloat16"),
     )
-    epoch = cfg.get("e", None)
+    init_hub_manager(
+        base_dir=cfg.get("hub_base_dir", "PessimisticDPO"),
+        push=cfg.get("push_to_hub", False),  # Eval typically doesn't push
+        load_trainable=False,  # Eval loads frozen models
+    )
+
+    model: BaseModel = instantiate(cfg.model)
+    epoch: Optional[int] = cfg.get("e", None)
 
     if model.generator is None:
         raise ValueError("Generator not found in model")
 
     wandb_config = cfg.get("wandb", OmegaConf.create({"enabled": False}))
-    wandb_manager = None
-    wandb_run = None
+    wandb_manager: Optional[WandbManager] = None
+    wandb_run: Optional[WandbRun] = None
     if wandb_config.enabled:
         resolved_cfg_plain = OmegaConf.to_container(
             cfg,
@@ -71,22 +83,18 @@ def main(cfg: DictConfig) -> None:
         )
     if wandb_manager is not None:
         wandb_run = wandb_manager.get_evaluation_handler(
-            model=model, generator=model.generator
+            model=model, generator=model.generator, epoch=epoch
         )
     if wandb_run is not None:
-        wandb_run.init_eval_run()
+        wandb_run.init_run()
         logger.info(f"WandB evaluation run initialized: {wandb_run.run_id}")
 
     evaluator: BaseEvaluator = instantiate(cfg.evaluator, wandb_run=wandb_run)
 
-    model_ref = None
-    epoch_ref = None
+    model_ref: Optional[BaseModel] = None
+    epoch_ref: Optional[int] = None
     if cfg.get("ref_model", None) is not None and "_target_" in cfg.ref_model:
-        model_ref = instantiate(
-            cfg.ref_model,
-            device_manager=device_manager,
-            hub_manager=hub_manager,
-        )
+        model_ref = instantiate(cfg.ref_model)
         epoch_ref = cfg.get("ref_e", None)
 
     evaluator.evaluate(

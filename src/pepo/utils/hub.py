@@ -1,18 +1,59 @@
 import logging
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import dotenv
 from huggingface_hub import HfApi, login
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, PreTrainedModel
+from transformers import PreTrainedModel
 
 if TYPE_CHECKING:
-    from transformers import AutoTokenizer
+    from transformers import PreTrainedTokenizerBase
 
 dotenv.load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+# Singleton instance
+_instance: Optional["HubManager"] = None
+
+
+def init_hub_manager(
+    base_dir: str = "PessimisticDPO",
+    push: bool = True,
+    load_trainable: bool = True,
+    hf_token: Optional[str] = None,
+) -> "HubManager":
+    """Initialize the global HubManager singleton.
+
+    Args:
+        base_dir: HuggingFace username/organization.
+        push: Whether to push models/datasets to hub.
+        load_trainable: Whether to load models with trainable parameters.
+        hf_token: HuggingFace token. If None, uses HF_TOKEN env var.
+
+    Returns:
+        The initialized HubManager instance.
+    """
+    global _instance
+    _instance = HubManager(
+        base_dir=base_dir,
+        push=push,
+        load_trainable=load_trainable,
+        hf_token=hf_token,
+    )
+    return _instance
+
+
+def get_hub_manager() -> "HubManager":
+    """Get the global HubManager singleton.
+
+    Raises:
+        RuntimeError: If init_hub_manager was not called first.
+    """
+    if _instance is None:
+        raise RuntimeError("HubManager not initialized. Call init_hub_manager() first.")
+    return _instance
 
 
 class HubManager:
@@ -69,14 +110,33 @@ class HubManager:
             self.api.model_info(repo_id)
             return True
         except Exception:
-            logger.warning(f"Failed to load {repo_id}")
             return False
 
-    def get_repo_id(self, model_name: str, epoch: Optional[int] = None) -> str:
+    def dataset_exists(self, name: str, epoch: Optional[int] = None) -> bool:
+        """Check if dataset exists on the Hub."""
+        repo_id = self.get_repo_id(name, epoch)
+        try:
+            self.api.dataset_info(repo_id)
+            return True
+        except Exception:
+            return False
+
+    def load_dataset(self, name: str, split: Optional[str] = None) -> Any:
+        """Load dataset from the Hub."""
+        from datasets import load_dataset
+
+        repo_id = self.get_repo_id(name)
+        return load_dataset(repo_id, split=split)
+
+    def get_repo_id(self, name: str, epoch: Optional[int] = None) -> str:
         if epoch is not None:
-            return f"{self.base_dir}/{model_name}-e{epoch}"
+            return f"{self.base_dir}/{name}-e{epoch}"
         else:
-            return f"{self.base_dir}/{model_name}"
+            return f"{self.base_dir}/{name}"
+
+    def get_full_repo_id(self, name: str, epoch: Optional[int] = None) -> str:
+        """Get full repo ID (org/name) for loading datasets."""
+        return self.get_repo_id(name, epoch)
 
     def load_model(
         self,
@@ -153,9 +213,8 @@ class HubManager:
     def push_model(
         self,
         model_name: str,
-        model: AutoModelForCausalLM,
-        tokenizer: "AutoTokenizer",
-        model_idx: int,
+        model: PeftModel,
+        tokenizer: "PreTrainedTokenizerBase",
         private: bool = False,
         epoch: Optional[int] = None,
     ) -> None:
@@ -181,24 +240,21 @@ class HubManager:
         # Generate commit message based on epoch
         if epoch is not None:
             commit_message = (
-                f"Upload PEPO ensemble model {model_idx} checkpoint after "
-                f"{epoch} epochs to {repo_id}"
+                f"Upload PEPO model checkpoint after {epoch} epochs to {repo_id}"
             )
         else:
-            commit_message = (
-                f"Upload final PEPO ensemble model {model_idx} to {repo_id}"
-            )
+            commit_message = f"Upload final PEPO model to {repo_id}"
 
         logger.info(f"Pushing model to {repo_id}...")
 
         # Push model
-        model.push_to_hub(
-            repo_id,
+        cast(Any, model).push_to_hub(
+            repo_id=repo_id,
             commit_message=commit_message,
             private=private,
         )
         tokenizer.push_to_hub(
-            repo_id,
+            repo_id=repo_id,
             commit_message=commit_message,
             private=private,
         )
@@ -206,3 +262,23 @@ class HubManager:
         logger.info(
             f"Model and tokenizer successfully pushed to: https://huggingface.co/{repo_id}"
         )
+
+    def push_dataset(
+        self,
+        dataset: Any,
+        name: str,
+        split: Optional[str] = None,
+        private: bool = False,
+    ) -> None:
+        """Push dataset to Hub. Skips if push disabled."""
+        if not self.should_push:
+            logger.warning(f"Hub push disabled. Skipping dataset push: {name}")
+            return
+        repo_id = self.get_repo_id(name)
+        logger.info(f"Pushing dataset to Hub: {repo_id}")
+
+        kwargs = {"repo_id": repo_id, "private": private}
+        if split:
+            kwargs["split"] = split
+        dataset.push_to_hub(**kwargs)
+        logger.info(f"Dataset pushed to: https://huggingface.co/{repo_id}")

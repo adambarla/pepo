@@ -9,7 +9,15 @@ warnings.filterwarnings(
 )
 
 from .evaluator import AlpacaEvalEvaluator, BaseEvaluator  # noqa: E402
-from .model import PEPOModel  # noqa: E402
-from .trainer import Trainer  # noqa: E402
+from .model import BaseModel, DEPPOModel  # noqa: E402
+from .trainer import BaseTrainer, EnsembleTrainer, SingleModelTrainer  # noqa: E402
 
-__all__ = ["PEPOModel", "BaseEvaluator", "AlpacaEvalEvaluator", "Trainer"]
+__all__ = [
+    "BaseModel",
+    "DEPPOModel",
+    "BaseTrainer",
+    "EnsembleTrainer",
+    "SingleModelTrainer",
+    "BaseEvaluator",
+    "AlpacaEvalEvaluator",
+]

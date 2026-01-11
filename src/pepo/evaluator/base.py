@@ -1,11 +1,11 @@
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 
-from ..model import PEPOModel
+from ..model import BaseModel
 from ..utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -37,9 +37,9 @@ class BaseEvaluator(ABC):
     @abstractmethod
     def evaluate(
         self,
-        model: PEPOModel,
+        model: BaseModel,
         epoch: Optional[int] = None,
-        ref_model: Optional[PEPOModel] = None,
+        ref_model: Optional[BaseModel] = None,
         ref_epoch: Optional[int] = None,
         overwrite: bool = False,
         **kwargs: Any,
@@ -48,9 +48,9 @@ class BaseEvaluator(ABC):
         Evaluate responses.
 
         Args:
-            model: PEPOModel instance.
+            model: BaseModel instance.
             epoch: Epoch of the model.
-            ref_model: Optional reference PEPOModel instance.
+            ref_model: Optional reference BaseModel instance.
             ref_epoch: Epoch of the reference model.
             overwrite: Whether to overwrite existing outputs.
             **kwargs: Additional arguments.
@@ -61,10 +61,13 @@ class BaseEvaluator(ABC):
         """
         Load dataset from HuggingFace.
         """
-        dataset = load_dataset(
-            self.dataset_id,
-            split=self.dataset_split,
-            trust_remote_code=True,
+        dataset = cast(
+            Dataset,
+            load_dataset(
+                self.dataset_id,
+                split=self.dataset_split,
+                trust_remote_code=True,
+            ),
         )
         if self.num_samples is not None and self.num_samples > 0:
             dataset = dataset.select(range(min(self.num_samples, len(dataset))))
@@ -75,14 +78,14 @@ class BaseEvaluator(ABC):
 
     def _get_filename(
         self,
-        model: PEPOModel,
+        model: BaseModel,
         epoch: Optional[int] = None,
     ) -> str:
         """
         Generate file names based on model name and generation configuration.
 
         Args:
-            model: PEPOModel instance.
+            model: BaseModel instance.
             epoch: Epoch of the model.
             **kwargs: Additional generation parameters.
 
@@ -101,8 +104,8 @@ class BaseEvaluator(ABC):
 
     def check_generator_consistency(
         self,
-        model: PEPOModel,
-        ref_model: Optional[PEPOModel] = None,
+        model: BaseModel,
+        ref_model: Optional[BaseModel] = None,
     ) -> None:
         """
         Check if the generator is consistent between model and reference model.
@@ -126,7 +129,7 @@ class BaseEvaluator(ABC):
 
     def _get_folder(
         self,
-        ref_model: Optional[PEPOModel] = None,
+        ref_model: Optional[BaseModel] = None,
         ref_epoch: Optional[int] = None,
     ) -> Path:
         """

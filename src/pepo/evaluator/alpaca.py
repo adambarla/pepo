@@ -10,7 +10,7 @@ from alpaca_eval import evaluate as alpaca_evaluate
 from alpaca_eval.constants import EVALUATORS_CONFIG_DIR
 from omegaconf import DictConfig, OmegaConf
 
-from ..model import PEPOModel
+from ..model import BaseModel
 from ..utils import WandbRun
 from .base import BaseEvaluator
 
@@ -53,9 +53,9 @@ class AlpacaEvalEvaluator(BaseEvaluator):
 
     def evaluate(
         self,
-        model: PEPOModel,
+        model: BaseModel,
         epoch: Optional[int] = None,
-        ref_model: Optional[PEPOModel] = None,
+        ref_model: Optional[BaseModel] = None,
         ref_epoch: Optional[int] = None,
         overwrite: bool = False,
         **kwargs: Any,
@@ -64,9 +64,9 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         Evaluate responses using AlpacaEval.
 
         Args:
-            model: PEPOModel instance (required).
+            model: BaseModel instance (required).
             epoch: Epoch of the model (optional). Used to load a specific checkpoint.
-            reference_model: PEPOModel instance (optional).
+            reference_model: BaseModel instance (optional).
             reference_epoch: Epoch of the reference model (optional).
             overwrite: Whether to overwrite existing outputs.
             **kwargs: Additional args.
@@ -114,6 +114,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
             epoch=epoch,
             consolidation_folder=folder,
             model_name=filename,
+            ref_model=ref_model,
         )
 
         return annotations_file
@@ -165,10 +166,11 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         all_annotations: list[Any],
         annotations_file: Path,
         leaderboard_file: Path,
-        model: PEPOModel,
+        model: BaseModel,
         epoch: Optional[int],
         consolidation_folder: Path,
         model_name: str,
+        ref_model: Optional[BaseModel] = None,
     ) -> None:
         """Save results to files and log to WandB."""
         df_leaderboard.to_csv(leaderboard_file, index=True)
@@ -192,6 +194,8 @@ class AlpacaEvalEvaluator(BaseEvaluator):
                 generator_config = model.generator.get_name()
 
             metric_prefix = f"eval/{self.dataset_id}/{generator_config}"
+            if ref_model is not None:
+                metric_prefix = f"{metric_prefix}/{ref_model.get_name()}"
 
             target_idx = None
             if model_name in df_leaderboard.index:
@@ -224,14 +228,14 @@ class AlpacaEvalEvaluator(BaseEvaluator):
                     ]
 
                 if epoch is not None:
-                    metrics_to_log[f"{metric_prefix}/epoch"] = epoch
+                    metrics_to_log["eval/epoch"] = epoch
 
                 if metrics_to_log:
                     self.wandb_run.log(metrics_to_log)
 
     def _get_or_generate(
         self,
-        model: PEPOModel,
+        model: BaseModel,
         epoch: Optional[int] = None,
         overwrite: bool = False,
     ) -> Path:
@@ -255,7 +259,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
     def _generate_responses(
         self,
         save_path: Path,
-        model: PEPOModel,
+        model: BaseModel,
         epoch: Optional[int] = None,
     ) -> None:
         logger.info(
@@ -265,9 +269,9 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         instructions = [item["instruction"] for item in self.dataset]
         save_path.parent.mkdir(exist_ok=True, parents=True)
 
-        model.load_models(epoch=epoch)
+        model.load(epoch=epoch)
         outputs = model.generate_responses(prompts=instructions)
-        model.unload_models()
+        model.unload()
 
         model_name = model.get_name(epoch=epoch)
         formatted_outputs = []

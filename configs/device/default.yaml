@@ -1,5 +1,0 @@
-# Default Device Manager Configuration
-_target_: pepo.utils.device.DeviceManager
-
-gpu_ids: null  # list of GPU IDs (null = auto-detect), e.g. [0, 1, 2, 3]
-dtype: bfloat16

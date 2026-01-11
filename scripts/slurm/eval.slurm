@@ -8,6 +8,6 @@
 #SBATCH --account=infra01
 #SBATCH --exclusive --mem=450G
 
-cd ~/PEPO
+cd ~/pepo
 
-uv run --no-sync scripts/eval.py "$@"
+uv run scripts/eval.py "$@"

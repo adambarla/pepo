@@ -1,8 +1,7 @@
 defaults:
-  - model: llama_instruct
+  - backbone: smollm
+  - model: reppo
   - dataset: ultrafeedback
-  - hub: default
-  - device: default
   - _self_
 
 wandb:
@@ -14,16 +13,15 @@ wandb:
   entity: "pepo-team"
   mode: "online"
 
-hub:
-  push: ${sync} # Push trained models
+# Global manager settings (flat config, not Hydra instantiated)
+push_to_hub: ${sync}
+hub_base_dir: "PessimisticDPO"
+gpu_ids: null  # list of GPU IDs (null = auto-detect)
+dtype: bfloat16
 
 dataset:
-  max_length: 1024
-  max_prompt_length: 512
   n_splits: ${L}
-  cache_dir: ${oc.env:SCRATCH}/pepo/cache
   seed: ${seed}
-  force_recompute: false
 
 model:
   num_networks: ${L}

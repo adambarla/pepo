@@ -1,10 +1,15 @@
 import logging
 import os
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
+
+    from .model import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +22,6 @@ class Generator:
         max_prompt_length: int = 512,
         max_new_tokens: int = 1024,
         batch_size: int = 10,
-        use_ensemble: bool = True,
         greedy_sampling: bool = True,
         temperature: float = 1.0,
         top_p: float = 0.9,
@@ -29,7 +33,6 @@ class Generator:
             max_prompt_length: Maximum length for input prompts (truncation).
             max_new_tokens: Maximum number of new tokens to generate.
             batch_size: Batch size for generation.
-            use_ensemble: Whether to use ensemble generation (pessimistic).
             greedy_sampling: If True, use greedy (argmax). If False, use top-p.
             temperature: Sampling temperature (only used if greedy_sampling=False).
             top_p: Top-p nucleus sampling threshold
@@ -38,7 +41,6 @@ class Generator:
         self.max_prompt_length = max_prompt_length
         self.max_new_tokens = max_new_tokens
         self.batch_size = batch_size
-        self.use_ensemble = use_ensemble
         self.greedy_sampling = greedy_sampling
         self.temperature = temperature
         self.top_p = top_p
@@ -46,7 +48,7 @@ class Generator:
     def _process_prompts(
         self,
         prompts: list[str],
-        tokenizer: Any,
+        tokenizer: "PreTrainedTokenizerBase",
         apply_chat_template: bool = True,
     ) -> tuple[list[str], list[str]]:
         """
@@ -59,10 +61,13 @@ class Generator:
 
         for prompt in prompts:
             if apply_chat_template:
-                formatted = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
-                    tokenize=False,
-                    add_generation_prompt=True,
+                formatted = cast(
+                    str,
+                    tokenizer.apply_chat_template(
+                        [{"role": "user", "content": prompt}],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    ),
                 )
             else:
                 formatted = prompt
@@ -108,7 +113,7 @@ class Generator:
 
     def generate(
         self,
-        model: Any,
+        model: "BaseModel",
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -116,7 +121,7 @@ class Generator:
         Generate tokens from input_ids using the model.
 
         Args:
-            model: PEPOModel instance.
+            model: BaseModel instance.
             input_ids: Input token IDs (B, T).
             attention_mask: Attention mask (B, T). If None, inferred from pad tokens.
 
@@ -133,7 +138,7 @@ class Generator:
         # Prepare inputs on each device
         device_input_ids = []
         device_attention_masks = []
-        for model_idx in range(model.num_networks):
+        for model_idx in range(model.num_models):
             device = torch.device(model.device_manager.get_device_for_model(model_idx))
             device_input_ids.append(input_ids.to(device))
             device_attention_masks.append(attention_mask.to(device))
@@ -146,16 +151,7 @@ class Generator:
             if i > 0 and i % 100 == 0:
                 model.device_manager.clear_cache()
 
-            if self.use_ensemble:
-                log_probs = model.predict(device_input_ids, device_attention_masks)
-            else:
-                submodel = model.models[0]
-                with torch.no_grad():
-                    with submodel.disable_adapter():
-                        submodel.eval()
-                        log_probs = model._predict_submodel(
-                            submodel, device_input_ids[0], device_attention_masks[0]
-                        )
+            log_probs = model.predict(device_input_ids, device_attention_masks)
 
             if self.greedy_sampling:
                 # argmax is equivalent to resampling until not missing token
@@ -168,7 +164,7 @@ class Generator:
                 sampled_token_ids == model.tokenizer.eos_token_id
             )
 
-            for model_idx in range(model.num_networks):
+            for model_idx in range(model.num_models):
                 device = torch.device(
                     model.device_manager.get_device_for_model(model_idx)
                 )
@@ -202,13 +198,11 @@ class Generator:
             parts.append("top-p")
             parts.append(f"t{self.temperature}")
             parts.append(f"p{self.top_p}")
-        if not self.use_ensemble:
-            parts.append("single")
         return "-".join(parts)
 
     def generate_responses(
         self,
-        model: Any,
+        model: "BaseModel",
         prompts: list[str],
         apply_chat_template: bool = True,
     ) -> list[dict[str, Any]]:
@@ -216,7 +210,7 @@ class Generator:
         Generate responses for a list of prompts.
 
         Args:
-            model: PEPOModel instance.
+            model: BaseModel instance.
             prompts: List of prompt strings.
             apply_chat_template: Whether to apply chat template to prompts.
 
@@ -234,7 +228,6 @@ class Generator:
         logger.info(f"  max_prompt_length: {self.max_prompt_length}")
         logger.info(f"  max_new_tokens: {self.max_new_tokens}")
         logger.info(f"  batch_size: {self.batch_size}")
-        logger.info(f"  use_ensemble: {self.use_ensemble}")
         logger.info(f"  greedy_sampling: {self.greedy_sampling}")
         if not self.greedy_sampling:
             logger.info(f"  temperature: {self.temperature}")

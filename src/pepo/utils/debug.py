@@ -2,12 +2,12 @@ import logging
 from typing import Optional
 
 import torch
-from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerBase
 
 
 def debug_tokens(
     input_ids: torch.Tensor,
-    tokenizer: AutoTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
     attn_mask_shifted: torch.Tensor,
     response_mask: torch.Tensor,
     log_probs: torch.Tensor,

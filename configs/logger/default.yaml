@@ -1,8 +1,0 @@
-# Default Logger Configuration
-# Note: setup_logging() is now called directly in scripts
-# This config is kept for compatibility but is not used
-_target_: pepo.utils.logger.setup_logging
-
-level: ${log_level}
-log_file: null
-model_name: null

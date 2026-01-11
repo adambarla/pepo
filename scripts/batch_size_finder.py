@@ -26,7 +26,7 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
-from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerBase
 
 from pepo.utils import constants, set_seed, setup_logging
 
@@ -89,7 +89,7 @@ def binary_search_batch_size(
 def test_train_batch_size(
     model: Any,
     cfg: DictConfig,
-    tokenizer: AutoTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
     logger: logging.Logger,
 ) -> Tuple[Optional[int], Optional[str]]:
     """Test training batch size with real data (without eval)."""
@@ -97,9 +97,8 @@ def test_train_batch_size(
 
     data_manager = instantiate(
         cfg.dataset,
-        n_splits=model.num_networks,
+        n_splits=model.num_models,
         tokenizer=tokenizer,
-        ref_model_id=model.model_id,
         inference_batch_size=cfg.model.trainer.eval_batch_size,
         device_manager=model.device_manager,
         shuffle_train=False,
@@ -127,13 +126,13 @@ def test_train_batch_size(
                 model.hub_manager.should_push = original_push
                 model.trainer.optimizers = []
                 model.trainer.schedulers = []
-                model.epochs_per_network = [0] * model.num_networks
+                model.epochs_per_model = [0] * model.num_models
             return True
         except (RuntimeError, torch.cuda.OutOfMemoryError, InterruptedError):
             if model.trainer:
                 model.trainer.optimizers = []
                 model.trainer.schedulers = []
-            model.epochs_per_network = [0] * model.num_networks
+            model.epochs_per_model = [0] * model.num_models
             cleanup_cuda()
             return False
 
@@ -144,7 +143,10 @@ def test_train_batch_size(
 
 
 def test_eval_batch_size(
-    model: Any, cfg: DictConfig, tokenizer: AutoTokenizer, logger: logging.Logger
+    model: Any,
+    cfg: DictConfig,
+    tokenizer: PreTrainedTokenizerBase,
+    logger: logging.Logger,
 ) -> Tuple[Optional[int], Optional[str]]:
     """Test evaluation batch size with optimizer states loaded (1 batch only).
 
@@ -154,9 +156,8 @@ def test_eval_batch_size(
 
     data_manager = instantiate(
         cfg.dataset,
-        n_splits=model.num_networks,
+        n_splits=model.num_models,
         tokenizer=tokenizer,
-        ref_model_id=model.model_id,
         inference_batch_size=cfg.model.trainer.eval_batch_size,
         device_manager=model.device_manager,
         shuffle_train=False,
@@ -183,7 +184,7 @@ def test_eval_batch_size(
             )
             for batch in loader:
                 with torch.no_grad():
-                    model._loss_fn(batch, submodel, device)
+                    model.loss_fn(batch, submodel, device)
                 break  # Only 1 batch
 
             # Cleanup
@@ -204,7 +205,10 @@ def test_eval_batch_size(
 
 
 def test_gen_batch_size(
-    model: Any, cfg: DictConfig, tokenizer: AutoTokenizer, logger: logging.Logger
+    model: Any,
+    cfg: DictConfig,
+    tokenizer: PreTrainedTokenizerBase,
+    logger: logging.Logger,
 ) -> Tuple[Optional[int], Optional[str]]:
     """Test generation batch size."""
     logger.info("Testing GENERATION batch size...")
@@ -222,7 +226,7 @@ def test_gen_batch_size(
         cleanup_cuda()
         try:
             input_ids = torch.randint(
-                0, tokenizer.vocab_size, (batch_size, target_len), dtype=torch.long
+                0, len(tokenizer), (batch_size, target_len), dtype=torch.long
             )
             attention_mask = torch.ones_like(input_ids)
             generator.generate(
@@ -249,7 +253,7 @@ def update_model_config(
     mapping = {
         "train_batch_size:": ("training", "train_batch_size"),
         "eval_batch_size:": ("evaluation", "eval_batch_size"),
-        "batch_size:": ("generation", "generator.batch_size"),
+        "generator_batch_size:": ("generation", "generator_batch_size"),
     }
 
     new_lines = []
@@ -288,10 +292,10 @@ def update_model_config(
             logger.info(f"Updated {u}")
 
 
-@hydra.main(  # type: ignore[untyped-decorator]
-    config_path="../configs", config_name="benchmark.yaml", version_base="1.1"
-)
+@hydra.main(config_path="../configs", config_name="benchmark.yaml", version_base="1.1")
 def main(cfg: DictConfig) -> None:
+    from pepo.utils import init_device_manager, init_hub_manager
+
     hydra_cfg = HydraConfig.get()
     work_dir = Path(hydra_cfg.runtime.cwd)
 
@@ -305,11 +309,16 @@ def main(cfg: DictConfig) -> None:
         tasks = [tasks]
 
     set_seed(cfg.seed)
-    device_manager = instantiate(cfg.device)
-    hub_manager = instantiate(cfg.hub)
-    model = instantiate(
-        cfg.model, device_manager=device_manager, hub_manager=hub_manager
+    init_device_manager(
+        gpu_ids=cfg.get("gpu_ids"),
+        dtype=cfg.get("dtype", "bfloat16"),
     )
+    init_hub_manager(
+        base_dir=cfg.get("hub_base_dir", "PessimisticDPO"),
+        push=False,
+        load_trainable=True,
+    )
+    model = instantiate(cfg.model)
     tokenizer = model.get_tokenizer()
 
     results: dict[str, dict[str, Any]] = {}
@@ -317,24 +326,24 @@ def main(cfg: DictConfig) -> None:
     # Test eval first (with optimizer states loaded for realistic memory usage)
     if "eval" in tasks:
         if not model._models:
-            model.load_models(init_new=True)
+            model.load(init_new=True)
         batch, err = test_eval_batch_size(model, cfg, tokenizer, logger)
         results["evaluation"] = {"optimal_batch_size": batch, "error": err}
 
     # Test training (without eval)
     if "train" in tasks:
         if not model._models:
-            model.load_models(init_new=True)
+            model.load(init_new=True)
         batch, err = test_train_batch_size(model, cfg, tokenizer, logger)
         results["training"] = {"optimal_batch_size": batch, "error": err}
 
     if "gen" in tasks:
         if not model._models:
-            model.load_models(init_new=True)
+            model.load(init_new=True)
         batch, err = test_gen_batch_size(model, cfg, tokenizer, logger)
         results["generation"] = {"optimal_batch_size": batch, "error": err}
 
-    model.unload_models()
+    model.unload()
 
     logger.info("=" * 40)
     logger.info("RESULTS")
@@ -344,8 +353,9 @@ def main(cfg: DictConfig) -> None:
         else:
             logger.info(f"{task}: FAILED ({r['error']})")
 
-    for yaml_file in (work_dir / "configs" / "model").glob("*.yaml"):
+    for yaml_file in (work_dir / "configs" / "backbone").glob("*.yaml"):
         if cfg.model.model_id in yaml_file.read_text():
+            # Assuming backbone config now, structure is flat in the file
             update_model_config(yaml_file, results, logger)
             break
 

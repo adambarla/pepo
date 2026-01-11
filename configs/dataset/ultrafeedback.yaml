@@ -1,18 +1,20 @@
 # UltraFeedback Binarized Dataset Configuration
-_target_: pepo.utils.data.DataManager
+defaults:
+  - base
+
 dataset_id: "HuggingFaceH4/ultrafeedback_binarized"
-split: "train_sft"
-train_split: 0.95
-eval_split: 0.05
-seed: 42
-n_splits: null # this has to be set depending on the number of models in the ensemble
-max_length: 1024 # Maximum sequence length for responses
-max_prompt_length: 512 # Maximum sequence length for prompts
-num_proc: null # Number of processes for preprocessing (null = use all available CPUs)
-cache_dir: ${oc.env:SCRATCH}/pepo/cache # Directory to cache preprocessed datasets (null = no caching)
-force_recompute: false # If true, skip loading from cache and recompute the dataset
-# DataLoader configuration for GPU utilization optimization
-dataloader_num_workers: 0 # Best for GH200/fast data. Eliminates overhead since loading is already instant.
-dataloader_pin_memory: true # Always use with GPU. Enables faster non-blocking DMA transfer to device.
-dataloader_persistent_workers: false # Ignored when workers=0. Normally keeps workers alive to avoid respawn lag.
-dataloader_prefetch_factor: null # Ignored when workers=0. Normally buffers batches to smooth out loading spikes.
+train_split_name: "train_sft"
+eval_split_name: "test_sft"
+
+max_length: 1024
+max_prompt_length: 512
+
+processor:
+  _target_: pepo.data.UltraFeedbackProcessor
+  max_length: ${..max_length}
+  max_prompt_length: ${..max_prompt_length}
+
+collator:
+  _target_: pepo.data.DataCollator
+  max_length: ${..max_length}
+  max_prompt_length: ${..max_prompt_length}
