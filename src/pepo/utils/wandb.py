@@ -241,13 +241,13 @@ class WandbManager:
         return handler
 
     def find_training_run_group(
-        self, model_name: str, model_idx: int = 0
+        self, model: BaseModel, model_idx: int = 0
     ) -> Optional[str]:
         """
-        Find the group of the most recent training run for a given model name.
+        Find the group of the most recent training run for a given model.
 
         Args:
-            model_name: Model name to search for (base name without epoch suffix).
+            model: Model instance to search for.
             model_idx: Model index (default 0 for l0).
 
         Returns:
@@ -256,7 +256,7 @@ class WandbManager:
         if not self.enabled or self.wandb is None:
             return None
 
-        expected_name = f"{model_name}-l{model_idx}"
+        expected_name = model.get_name(model_idx=model_idx)
 
         try:
             api = self.wandb.Api()
@@ -363,7 +363,7 @@ class WandbManager:
 
         model_name = model.get_name()
         generator_name = generator.get_name()
-        group = self.find_training_run_group(model_name, model_idx=0)
+        group = self.find_training_run_group(model, model_idx=0)
         run_name = self._generate_eval_run_name(model_name, generator_name, epoch)
         existing_run_id = self.find_run_by_name(run_name)
 
