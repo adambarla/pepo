@@ -8,8 +8,21 @@ for arg in "$@"; do
     fi
 done
 
+BACKBONE=""
+for arg in "$@"; do
+    if [[ "$arg" == backbone=* ]]; then
+        BACKBONE="${arg#backbone=}"
+        break
+    fi
+done
+
 if [[ -z "$MODEL" ]]; then
     echo "Error: model= argument is required"
+    exit 1
+fi
+
+if [[ -z "$BACKBONE" ]]; then
+    echo "Error: backbone= argument is required"
     exit 1
 fi
 
@@ -33,13 +46,17 @@ JOB_NAME="tr_${MODEL}_${EPOCHS}"
 
 
 # for L in 1 2 3 4; do
-for L in 2 3; do
+for L in 1 2 3 4; do
     # if L is 1 a should be 0.0
-    A=0.1
-    if [[ $L -eq 1 ]]; then
-        A=0.0
+    # if model is deppo, adjust A and pass it , else don't
+    if [[ $MODEL == "deppo" ]]; then
+        if [[ $L -eq 1 ]]; then
+            A=0.0
+        fi
+        sbatch --job-name="${JOB_NAME}_${L}" scripts/slurm/train.slurm model=$MODEL e=$EPOCHS L=$L a=$A backbone=$BACKBONE $@
+    else
+        sbatch --job-name="${JOB_NAME}_${L}" scripts/slurm/train.slurm model=$MODEL e=$EPOCHS L=$L backbone=$BACKBONE $@
     fi
-    sbatch --job-name="${JOB_NAME}_${L}" scripts/slurm/train.slurm model=$MODEL e=$EPOCHS L=$L a=$A $@
 done
 
 # sbatch --job-name="tr_${MODEL}_${EPOCHS}_4" scripts/slurm/train.slurm model=$MODEL e=$EPOCHS L=4 a=0.1 $@

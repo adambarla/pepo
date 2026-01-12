@@ -11,7 +11,7 @@ wandb:
   _target_: pepo.utils.wandb.WandbManager
   enabled: ${sync}
   project: "pepo"
-  tags: []
+  tags: ["eval"]
   notes: null
   entity: "pepo-team"
   mode: "online"

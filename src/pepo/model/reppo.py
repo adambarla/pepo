@@ -546,8 +546,14 @@ class REPPOModel(BaseModel):
     ) -> str:
         """Get policy model name - policy for L reward models."""
         model_name = self.model_id.rsplit("/", 1)[-1]
-        # L refers to the number of reward models, not policy models
+        # L refers to the number of reward models
         repo_name = f"{model_name}-reppo-b{self.beta}-L{self.reward_model._num_models}"
+
+        if (
+            self.reward_model.trainer is not None
+            and self.reward_model.trainer.training_epochs is not None
+        ):
+            repo_name = f"{repo_name}-re{self.reward_model.trainer.training_epochs}"
         if epoch is not None:
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name

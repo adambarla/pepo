@@ -174,6 +174,8 @@ class BaseModel(ABC):
     @property
     def trainer(self) -> Optional["BaseTrainer"]:
         """Get the trainer instance."""
+        if isinstance(self._trainer, functools.partial):
+            self.init_trainer()
         return self._trainer
 
     @trainer.setter
