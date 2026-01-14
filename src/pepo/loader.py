@@ -81,12 +81,10 @@ class CheckpointManager:
                 Defaults to AutoModelForCausalLM.
         """
         load_from_hub = not init_new and epoch is not None
-        device_map = self.device_manager.get_device_for_model(model_idx)
+        device_map = "cpu"  # Models start on CPU, moved to GPU during training
         dtype = self.device_manager.dtype
 
-        logger.info(
-            f"Loading base model {model_id} for {model_name} on {device_map}..."
-        )
+        logger.info(f"Loading base model {model_id} for {model_name} on CPU...")
 
         base_model = cast(
             PreTrainedModel,
@@ -152,3 +150,20 @@ class CheckpointManager:
             tokenizer=tokenizer,
             epoch=epochs,
         )
+
+    def load_adapter(
+        self,
+        model: PeftModel,
+        model_name: str,
+        adapter_name: str,
+        epoch: Optional[int] = None,
+    ) -> None:
+        """
+        Load an additional adapter into an existing PeftModel.
+        """
+        if epoch is None:
+            raise ValueError("epoch must be provided to load an existing adapter.")
+
+        repo_id = self.hub_manager.get_repo_id(model_name, epoch)
+        logger.info(f"Loading adapter {adapter_name} from {repo_id}...")
+        model.load_adapter(repo_id, adapter_name=adapter_name)

@@ -174,6 +174,9 @@ class LogprobAnnotator(BaseAnnotator):
 
                 results[shard_idx] = (chosen_logps_shard, rejected_logps_shard)
 
+                # Synchronize to ensure all CUDA operations complete
+                torch.cuda.synchronize()
+
             except Exception as e:
                 logger.error(f"Worker on GPU {gpu_id} failed: {e}")
                 results[shard_idx] = e
@@ -192,7 +195,11 @@ class LogprobAnnotator(BaseAnnotator):
         for t in threads:
             t.join()
 
-        # Cleanup
+        # Cleanup - synchronize all GPUs first to ensure all operations complete
+        for gpu_id in available_gpus:
+            with torch.cuda.device(gpu_id):
+                torch.cuda.synchronize()
+
         for model in models:
             del model
         device_manager.clear_cache()

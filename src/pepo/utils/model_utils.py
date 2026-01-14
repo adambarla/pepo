@@ -71,3 +71,25 @@ def get_log_probs(
                 f"Max diff: {max_diff:.2e}, Mean diff: {mean_diff:.2e}"
             )
     return log_probs_sum
+
+
+def get_next_token_log_probs(
+    model: PreTrainedModel | PeftModel,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Compute log probabilities for the next token (the very last position).
+
+    Args:
+        model: The model to use for prediction.
+        input_ids: (B, T) input IDs.
+        attention_mask: (B, T) attention mask.
+
+    Returns:
+        (B, V) log probabilities for the last token.
+    """
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    logits = outputs.logits  # (B, T, V)
+    last_logits = logits[:, -1, :]
+    log_probs = F.log_softmax(last_logits, dim=-1)
+    return log_probs

@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 import torch
 import torch.nn.functional as F
@@ -45,12 +47,22 @@ class Generator:
         self.temperature = temperature
         self.top_p = top_p
 
+    def _is_formatted(self, prompt: list[Any]) -> bool:
+        for message in prompt:
+            if not isinstance(message, dict):
+                return False
+            if "role" not in message or not isinstance(message["role"], str):
+                return False
+            if "content" not in message or not isinstance(message["content"], str):
+                return False
+        return True
+
     def _process_prompts(
         self,
-        prompts: list[str],
+        prompts: list[Any],
         tokenizer: "PreTrainedTokenizerBase",
         apply_chat_template: bool = True,
-    ) -> tuple[list[str], list[str]]:
+    ) -> tuple[list[Any], list[str]]:
         """
         Apply chat template, filter long prompts, and sort by length.
 
@@ -61,17 +73,23 @@ class Generator:
 
         for prompt in prompts:
             if apply_chat_template:
+                if isinstance(prompt, list) and self._is_formatted(prompt):
+                    messages = prompt
+                elif isinstance(prompt, str):
+                    messages = [{"role": "user", "content": prompt}]
+                else:
+                    raise ValueError("Invalid prompt format")
                 formatted = cast(
                     str,
                     tokenizer.apply_chat_template(
-                        [{"role": "user", "content": prompt}],
+                        messages,
                         tokenize=False,
                         add_generation_prompt=True,
                     ),
                 )
             else:
                 formatted = prompt
-
+            logger.debug(f"Formatted prompt:\n{formatted}")
             tokens = tokenizer(formatted, truncation=False, add_special_tokens=False)
             length = len(tokens["input_ids"])
 
@@ -116,6 +134,7 @@ class Generator:
         model: "BaseModel",
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        token_callback: Optional[Callable[[str], None]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Generate tokens from input_ids using the model.
@@ -181,6 +200,17 @@ class Generator:
                 )
 
             pbar.set_postfix({"stopped": f"{stop_signal.sum().item()}/{batch_size}"})
+
+            # Streaming callback (only for first sequence in batch)
+            if token_callback is not None:
+                new_token_id = int(sampled_token_ids[0].item())
+                if new_token_id not in [
+                    model.tokenizer.eos_token_id,
+                    model.tokenizer.pad_token_id,
+                ]:
+                    token_text = model.tokenizer.decode([new_token_id])
+                    token_callback(token_text)
+
             if torch.all(stop_signal):
                 break
 
@@ -203,8 +233,9 @@ class Generator:
     def generate_responses(
         self,
         model: "BaseModel",
-        prompts: list[str],
+        prompts: list[Any],
         apply_chat_template: bool = True,
+        token_callback: Optional[Callable[[str], None]] = None,
     ) -> list[dict[str, Any]]:
         """
         Generate responses for a list of prompts.
@@ -224,14 +255,14 @@ class Generator:
         outputs = []
 
         logger.info(f"Generating responses for {len(prompts)} prompts")
-        logger.info("Generation parameters:")
-        logger.info(f"  max_prompt_length: {self.max_prompt_length}")
-        logger.info(f"  max_new_tokens: {self.max_new_tokens}")
-        logger.info(f"  batch_size: {self.batch_size}")
-        logger.info(f"  greedy_sampling: {self.greedy_sampling}")
+        logger.debug("Generation parameters:")
+        logger.debug(f"  max_prompt_length: {self.max_prompt_length}")
+        logger.debug(f"  max_new_tokens: {self.max_new_tokens}")
+        logger.debug(f"  batch_size: {self.batch_size}")
+        logger.debug(f"  greedy_sampling: {self.greedy_sampling}")
         if not self.greedy_sampling:
-            logger.info(f"  temperature: {self.temperature}")
-            logger.info(f"  top_p: {self.top_p}")
+            logger.debug(f"  temperature: {self.temperature}")
+            logger.debug(f"  top_p: {self.top_p}")
 
         for i in range(0, len(prompts), self.batch_size):
             batch_num = i // self.batch_size + 1
@@ -255,6 +286,7 @@ class Generator:
                 model=model,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
+                token_callback=token_callback if i == 0 else None,
             )
 
             starting_idx = input_ids.shape[1]
@@ -262,7 +294,9 @@ class Generator:
             output_ids = output_ids.where(output_mask.bool(), tokenizer.pad_token_id)
 
             for j, prompt in enumerate(batch_prompts):
-                response = tokenizer.decode(output_ids[j], skip_special_tokens=True)
+                response = tokenizer.decode(
+                    output_ids[j, starting_idx:], skip_special_tokens=True
+                )
                 outputs.append({"prompt": prompt, "output": response})
 
         logger.info(f"Successfully generated {len(outputs)} responses")

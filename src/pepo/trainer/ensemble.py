@@ -12,10 +12,13 @@ from transformers import get_scheduler
 
 from ..data import DataManager
 from ..utils import WandbManager, WandbRun
+from ..utils.device import move_to_device
 from .base import BaseTrainer
 
 if TYPE_CHECKING:
     from ..model import BaseModel
+
+from ..model import EnsembleModel
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,7 @@ class EnsembleTrainer(BaseTrainer):
         super().__init__(**kwargs)
         self.optimizers: list[torch.optim.Optimizer] = []
         self.schedulers: list[torch.optim.lr_scheduler.LRScheduler] = []
+        self.model: EnsembleModel  # Set in train()
 
     def _setup_training(
         self,
@@ -86,6 +90,10 @@ class EnsembleTrainer(BaseTrainer):
         """
         Train the ensemble models using threading for parallel GPU operation.
         """
+        if not isinstance(model, EnsembleModel):
+            raise TypeError(
+                f"EnsembleTrainer requires EnsembleModel, got {type(model).__name__}"
+            )
         self.model = model
 
         if max_epochs is None:
@@ -97,7 +105,7 @@ class EnsembleTrainer(BaseTrainer):
             )
 
         # Initial loading logic
-        if self.model._models is None:
+        if not self.model.is_loaded():
             if continue_training:
                 # Use find_latest_epoch from BaseModel
                 latest_epoch = self.model.find_latest_epoch(max_epoch=max_epochs)
@@ -206,9 +214,6 @@ class EnsembleTrainer(BaseTrainer):
         stop_event: Optional[threading.Event] = None,
     ) -> None:
         """Train a single model in a thread."""
-        gpu_id = self.model.device_manager._get_gpu_id_for_model(model_idx)
-        torch.cuda.set_device(gpu_id)
-        device = torch.device(self.model.device_manager.get_device_for_model(model_idx))
         model = self.model.models[model_idx]
 
         if wandb_run is not None and wandb_run.enabled:
@@ -230,7 +235,6 @@ class EnsembleTrainer(BaseTrainer):
                 model_idx=model_idx,
                 model=model,
                 eval_loader=eval_loader,
-                device=device,
                 epoch=start_epoch,
                 n_epochs=n_epochs,
                 global_step=global_step,
@@ -263,7 +267,6 @@ class EnsembleTrainer(BaseTrainer):
                 optimizer=optimizer,
                 scheduler=scheduler,
                 train_loader=train_loader,
-                device=device,
                 epoch=epoch,
                 n_epochs=n_epochs,
                 grad_acc_steps=grad_acc_steps,
@@ -286,7 +289,6 @@ class EnsembleTrainer(BaseTrainer):
                     model_idx=model_idx,
                     model=model,
                     eval_loader=eval_loader,
-                    device=device,
                     epoch=epoch,
                     n_epochs=n_epochs,
                     global_step=epoch * len(train_loader) // grad_acc_steps,
@@ -333,140 +335,52 @@ class EnsembleTrainer(BaseTrainer):
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler.LRScheduler,
         train_loader: DataLoader[dict[str, torch.Tensor]],
-        device: torch.device,
         epoch: int,
         n_epochs: int,
         grad_acc_steps: int,
         wandb_run: Optional[WandbRun],
         stop_event: Optional[threading.Event] = None,
     ) -> None:
-        logger.info(f"Model {model_idx} - Training epoch {epoch}/{n_epochs}")
-
-        n_batches = len(train_loader)
-        global_step = (epoch - 1) * n_batches // grad_acc_steps
-
-        model.train()
-        optimizer.zero_grad()
-
-        accumulated_metrics: dict[str, float] = {}
-        last_logged_metrics: dict[str, float] = {}
-        samples_count = 0
-
-        desc = f"Model {model_idx} - E{epoch}/{n_epochs}"
-        pbar = tqdm(
-            total=n_batches // self.log_interval,
-            desc=desc,
-            position=model_idx,
-            leave=False,
-            mininterval=1.0,
-        )
-
-        for step, batch in enumerate(train_loader):
-            if stop_event is not None and stop_event.is_set():
-                pbar.close()
-                raise InterruptedError(
-                    "Training stopped due to error in another thread"
-                )
-
-            if (
-                self.max_batches_per_epoch is not None
-                and step >= self.max_batches_per_epoch
-            ):
-                pbar.close()
-                break
-
-            loss, metrics = self.model.loss_fn(batch, model, device)
-            loss_val = loss.item()
-            if "loss" not in metrics:
-                metrics["loss"] = loss_val
-
-            for k, v in metrics.items():
-                accumulated_metrics[k] = accumulated_metrics.get(k, 0.0) + v
-
-            samples_count += 1
-            scaled_loss = loss / grad_acc_steps
-            scaled_loss.backward()
-
-            if (step + 1) % grad_acc_steps == 0:
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-                global_step += 1
-
-            if (step + 1) % self.log_interval == 0:
-                interval_metrics = {
-                    k: v - last_logged_metrics.get(k, 0.0)
-                    for k, v in accumulated_metrics.items()
-                }
-                last_logged_metrics = accumulated_metrics.copy()
-
-                avg_interval_metrics = self._compute_avg_metrics(
-                    interval_metrics, self.log_interval
-                )
-
-                current_loss = avg_interval_metrics.get("loss", 0.0)
-                pbar.set_postfix({"loss": f"{current_loss:.4f}"})
-                pbar.update(1)
-
-                current_lr = scheduler.get_last_lr()[0]
-                self._log_metrics(
-                    wandb_run=wandb_run,
-                    metrics=avg_interval_metrics,
-                    step=global_step,
-                    prefix="train",
-                    add_avg_prefix=False,  # Raw interval metrics
-                    additional_log_items={"train/learning_rate": current_lr},
-                )
-
-        pbar.close()
-
-        # Log epoch averages
-        if samples_count > 0:
-            avg_epoch_metrics = self._compute_avg_metrics(
-                accumulated_metrics, samples_count
-            )
-            self._log_metrics(
-                wandb_run=wandb_run,
-                metrics=avg_epoch_metrics,
-                step=global_step,
-                prefix="train",
-                add_avg_prefix=True,
-                additional_log_items={"train/epoch": epoch},
+        with self.model.device_manager.request_gpu() as device:
+            move_to_device(model, device, optimizer)
+            logger.info(
+                f"Model {model_idx} - Training epoch {epoch}/{n_epochs} on {device}"
             )
 
-    def _eval_epoch(
-        self,
-        model_idx: int,
-        model: PeftModel,
-        eval_loader: DataLoader[dict[str, torch.Tensor]],
-        device: torch.device,
-        epoch: int,
-        n_epochs: int,
-        global_step: int,
-        wandb_run: Optional[WandbRun] = None,
-    ) -> float:
-        logger.info(f"Model {model_idx} - Evaluating epoch {epoch}/{n_epochs}")
-        n_batches = len(eval_loader)
-        if n_batches == 0:
-            raise ValueError("Evaluation loader is empty")
+            n_batches = len(train_loader)
+            global_step = (epoch - 1) * n_batches // grad_acc_steps
 
-        model.eval()
-        accumulated_metrics: dict[str, float] = {}
+            model.train()
+            optimizer.zero_grad()
 
-        desc = f"Model {model_idx} - Eval E{epoch}/{n_epochs}"
-        pbar = tqdm(
-            eval_loader,
-            desc=desc,
-            position=model_idx,
-            leave=False,
-            total=n_batches,
-            mininterval=1.0,
-        )
+            accumulated_metrics: dict[str, float] = {}
+            last_logged_metrics: dict[str, float] = {}
+            samples_count = 0
 
-        with torch.no_grad():
-            for step, batch in enumerate(pbar):
+            desc = f"Model {model_idx} - E{epoch}/{n_epochs}"
+            pbar = tqdm(
+                total=n_batches // self.log_interval,
+                desc=desc,
+                position=model_idx,
+                leave=False,
+                mininterval=1.0,
+            )
+
+            for step, batch in enumerate(train_loader):
+                if stop_event is not None and stop_event.is_set():
+                    pbar.close()
+                    raise InterruptedError(
+                        "Training stopped due to error in another thread"
+                    )
+
+                if (
+                    self.max_batches_per_epoch is not None
+                    and step >= self.max_batches_per_epoch
+                ):
+                    pbar.close()
+                    break
+
                 loss, metrics = self.model.loss_fn(batch, model, device)
-
                 loss_val = loss.item()
                 if "loss" not in metrics:
                     metrics["loss"] = loss_val
@@ -474,23 +388,130 @@ class EnsembleTrainer(BaseTrainer):
                 for k, v in metrics.items():
                     accumulated_metrics[k] = accumulated_metrics.get(k, 0.0) + v
 
+                samples_count += 1
+                scaled_loss = loss / grad_acc_steps
+                scaled_loss.backward()
+
+                if (step + 1) % grad_acc_steps == 0:
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+                    global_step += 1
+
                 if (step + 1) % self.log_interval == 0:
-                    running_avg_loss = accumulated_metrics["loss"] / (step + 1)
+                    interval_metrics = {
+                        k: v - last_logged_metrics.get(k, 0.0)
+                        for k, v in accumulated_metrics.items()
+                    }
+                    last_logged_metrics = accumulated_metrics.copy()
 
-                    postfix_dict = {"loss": f"{running_avg_loss:.4f}"}
+                    avg_interval_metrics = self._compute_avg_metrics(
+                        interval_metrics, self.log_interval
+                    )
 
-                    pbar.set_postfix(postfix_dict)
+                    current_loss = avg_interval_metrics.get("loss", 0.0)
+                    pbar.set_postfix({"loss": f"{current_loss:.4f}"})
+                    pbar.update(1)
 
-        pbar.close()
+                    current_lr = scheduler.get_last_lr()[0]
+                    self._log_metrics(
+                        wandb_run=wandb_run,
+                        metrics=avg_interval_metrics,
+                        step=global_step,
+                        prefix="train",
+                        add_avg_prefix=False,  # Raw interval metrics
+                        additional_log_items={"train/learning_rate": current_lr},
+                    )
 
-        avg_epoch_metrics = self._compute_avg_metrics(accumulated_metrics, n_batches)
-        self._log_metrics(
-            wandb_run=wandb_run,
-            metrics=avg_epoch_metrics,
-            step=global_step,
-            prefix="eval",
-            add_avg_prefix=True,
-            additional_log_items={"eval/epoch": epoch},
-        )
+            pbar.close()
 
-        return avg_epoch_metrics.get("loss", 0.0)
+            # Log epoch averages
+            if samples_count > 0:
+                avg_epoch_metrics = self._compute_avg_metrics(
+                    accumulated_metrics, samples_count
+                )
+                self._log_metrics(
+                    wandb_run=wandb_run,
+                    metrics=avg_epoch_metrics,
+                    step=global_step,
+                    prefix="train",
+                    add_avg_prefix=True,
+                    additional_log_items={"train/epoch": epoch},
+                )
+
+            # Synchronize and move model back to CPU and clear cache
+            torch.cuda.synchronize()
+            move_to_device(model, torch.device("cpu"), optimizer)
+            torch.cuda.empty_cache()
+
+    def _eval_epoch(
+        self,
+        model_idx: int,
+        model: PeftModel,
+        eval_loader: DataLoader[dict[str, torch.Tensor]],
+        epoch: int,
+        n_epochs: int,
+        global_step: int,
+        wandb_run: Optional[WandbRun] = None,
+    ) -> float:
+        with self.model.device_manager.request_gpu() as device:
+            model.to(device)
+            logger.info(
+                f"Model {model_idx} - Evaluating epoch {epoch}/{n_epochs} on {device}"
+            )
+
+            n_batches = len(eval_loader)
+            if n_batches == 0:
+                raise ValueError("Evaluation loader is empty")
+
+            model.eval()
+            accumulated_metrics: dict[str, float] = {}
+
+            desc = f"Model {model_idx} - Eval E{epoch}/{n_epochs}"
+            pbar = tqdm(
+                eval_loader,
+                desc=desc,
+                position=model_idx,
+                leave=False,
+                total=n_batches,
+                mininterval=1.0,
+            )
+
+            with torch.no_grad():
+                for step, batch in enumerate(pbar):
+                    loss, metrics = self.model.loss_fn(batch, model, device)
+
+                    loss_val = loss.item()
+                    if "loss" not in metrics:
+                        metrics["loss"] = loss_val
+
+                    for k, v in metrics.items():
+                        accumulated_metrics[k] = accumulated_metrics.get(k, 0.0) + v
+
+                    if (step + 1) % self.log_interval == 0:
+                        running_avg_loss = accumulated_metrics["loss"] / (step + 1)
+
+                        postfix_dict = {"loss": f"{running_avg_loss:.4f}"}
+
+                        pbar.set_postfix(postfix_dict)
+
+            pbar.close()
+
+            avg_epoch_metrics = self._compute_avg_metrics(
+                accumulated_metrics, n_batches
+            )
+            self._log_metrics(
+                wandb_run=wandb_run,
+                metrics=avg_epoch_metrics,
+                step=global_step,
+                prefix="eval",
+                add_avg_prefix=True,
+                additional_log_items={"eval/epoch": epoch},
+            )
+
+            # Synchronize and move model back to CPU
+            torch.cuda.synchronize()
+            model.to("cpu")
+            torch.cuda.empty_cache()
+
+            return avg_epoch_metrics.get("loss", 0.0)

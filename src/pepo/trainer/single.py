@@ -10,10 +10,13 @@ from transformers import get_scheduler
 
 from ..data import DataManager
 from ..utils import WandbManager, WandbRun
+from ..utils.device import move_to_device
 from .base import BaseTrainer
 
 if TYPE_CHECKING:
     from ..model import BaseModel
+
+from ..model import SingleModel
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +30,11 @@ class SingleModelTrainer(BaseTrainer):
         super().__init__(**kwargs)
         self.optimizer: Optional[torch.optim.Optimizer] = None
         self.scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None
+        self.model: SingleModel  # Set in train()
 
     def _setup_training(
         self,
-        model: "BaseModel",
+        model: SingleModel,
         data_manager: DataManager,
         max_epochs: int,
         wandb_manager: Optional[WandbManager] = None,
@@ -43,8 +47,7 @@ class SingleModelTrainer(BaseTrainer):
         self.data_manager = data_manager
 
         # Subclasses can override if parameter selection is different.
-        # Default to the first model in the ensemble/container.
-        model_params = self.model.models[0].parameters()
+        model_params = self.model.model.parameters()
 
         self.optimizer = self.optimizer_factory(params=model_params)
 
@@ -81,6 +84,10 @@ class SingleModelTrainer(BaseTrainer):
         **kwargs: Any,
     ) -> None:
         """Sequential training loop."""
+        if not isinstance(model, SingleModel):
+            raise TypeError(
+                f"SingleModelTrainer requires SingleModel, got {type(model).__name__}"
+            )
         self.model = model
 
         if max_epochs is None:
@@ -91,13 +98,16 @@ class SingleModelTrainer(BaseTrainer):
                 "max_epochs not provided to train() and not configured in trainer."
             )
 
-        if self.model._models is None:
+        if not self.model.is_loaded():
             load_kwargs = kwargs.get("load_kwargs", {})
             self.model.load(init_new=not continue_training, **load_kwargs)
 
         self._setup_training(model, data_manager, max_epochs, wandb_manager)
 
         device = torch.device(model.device_manager.get_device_for_model(0))
+
+        # Move model and optimizer to GPU for training
+        move_to_device(model.model, device, self.optimizer)
 
         group = model.get_name()
         wandb_run = None
@@ -182,7 +192,7 @@ class SingleModelTrainer(BaseTrainer):
                         f"Pushing best model checkpoint."
                     )
                     model.checkpoint_manager.push_model(
-                        model=model.models[0],
+                        model=model.model,
                         model_name=model.get_name(),
                         tokenizer=model.tokenizer,
                         epochs=None,  # No epoch suffix = best model
@@ -205,7 +215,7 @@ class SingleModelTrainer(BaseTrainer):
 
     def _eval_epoch(
         self,
-        model: "BaseModel",
+        model: SingleModel,
         eval_loader: DataLoader[dict[str, torch.Tensor]],
         device: torch.device,
         epoch: int,
@@ -213,7 +223,7 @@ class SingleModelTrainer(BaseTrainer):
         wandb_run: Optional[WandbRun] = None,
     ) -> float:
         """Evaluate the model for one epoch."""
-        model.models[0].eval()
+        model.model.eval()
         accumulated_metrics: dict[str, float] = {}
         n_batches = len(eval_loader)
         if n_batches == 0:
@@ -228,7 +238,7 @@ class SingleModelTrainer(BaseTrainer):
 
         with torch.no_grad():
             for batch in eval_loader:
-                loss, metrics = model.loss_fn(batch, model.models[0], device)
+                loss, metrics = model.loss_fn(batch, model.model, device)
                 if "loss" not in metrics:
                     metrics["loss"] = loss.item()
 
@@ -252,7 +262,7 @@ class SingleModelTrainer(BaseTrainer):
 
     def _train_epoch(
         self,
-        model: "BaseModel",
+        model: SingleModel,
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler.LRScheduler,
         train_loader: DataLoader[dict[str, torch.Tensor]],
@@ -263,7 +273,7 @@ class SingleModelTrainer(BaseTrainer):
         wandb_run: Optional[WandbRun] = None,
         stop_event: Optional[Any] = None,
     ) -> dict[str, float]:
-        model.models[0].train()
+        model.model.train()
         global_step = (epoch - 1) * len(train_loader) // grad_acc_steps
 
         pbar = tqdm(
@@ -280,7 +290,7 @@ class SingleModelTrainer(BaseTrainer):
             if stop_event is not None and stop_event.is_set():
                 break
 
-            loss, metrics = model.loss_fn(batch, model.models[0], device)
+            loss, metrics = model.loss_fn(batch, model.model, device)
             scaled_loss = loss / grad_acc_steps
             scaled_loss.backward()
 
