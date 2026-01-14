@@ -1,12 +1,13 @@
 """Abstract base class for policy models."""
 
+from __future__ import annotations
+
 import functools
 import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
-import torch.nn.functional as F
 from peft import PeftModel
 from transformers import PreTrainedTokenizerBase
 
@@ -18,39 +19,88 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["BaseModel"]
+
 
 class BaseModel(ABC):
-    """
-    Abstract base class for policy models (DEPPO, REPPO).
+    """Abstract base class for policy models (DEPPO, REPPO)."""
 
-    This defines the interface that Trainer, Generator, and Evaluator
-    rely on. Subclasses implement loss_fn() and predict() differently.
-    """
+    def __init__(
+        self,
+        model_id: str,
+        device_manager: "DeviceManager",
+        hub_manager: "HubManager",
+        checkpoint_manager: "CheckpointManager",
+        tokenizer: PreTrainedTokenizerBase,
+        train_batch_size: int,
+        eval_batch_size: int,
+        generation_batch_size: int,
+        trainer: Optional["BaseTrainer"] = None,
+        generator: Optional["Generator"] = None,
+    ) -> None:
+        """Initialize base model attributes.
 
-    _models: Optional[list[PeftModel]]
-    _trainer: Optional["BaseTrainer"]
-    _checkpoint_manager: "CheckpointManager"
-    generator: Optional["Generator"]
+        Args:
+            model_id: HuggingFace model ID.
+            device_manager: Device manager for GPU allocation.
+            hub_manager: Hub manager for model storage.
+            checkpoint_manager: Checkpoint manager for saving/loading.
+            tokenizer: Tokenizer for the model.
+            train_batch_size: Batch size for training.
+            eval_batch_size: Batch size for evaluation/scoring.
+            generation_batch_size: Batch size for generation.
+            trainer: Optional trainer instance.
+            generator: Optional generator instance.
+        """
+        self.model_id = model_id
+        self._device_manager = device_manager
+        self._hub_manager = hub_manager
+        self._checkpoint_manager = checkpoint_manager
+        self._tokenizer = tokenizer
+        self._train_batch_size = train_batch_size
+        self._eval_batch_size = eval_batch_size
+        self._generation_batch_size = generation_batch_size
+        self._trainer = trainer
+        self.generator = generator
 
     @property
-    @abstractmethod
+    def train_batch_size(self) -> int:
+        """Batch size for training."""
+        return self._train_batch_size
+
+    @property
+    def eval_batch_size(self) -> int:
+        """Batch size for evaluation/scoring."""
+        return self._eval_batch_size
+
+    @property
+    def generation_batch_size(self) -> int:
+        """Batch size for generation."""
+        return self._generation_batch_size
+
+    @property
     def tokenizer(self) -> PreTrainedTokenizerBase:
         """Tokenizer for the model."""
+        return self._tokenizer
 
     @property
-    @abstractmethod
     def device_manager(self) -> "DeviceManager":
         """Device manager for GPU allocation."""
+        return self._device_manager
 
     @property
-    @abstractmethod
     def hub_manager(self) -> "HubManager":
         """Hub manager for model storage."""
+        return self._hub_manager
 
     @property
     def checkpoint_manager(self) -> "CheckpointManager":
         """Checkpoint manager for saving/loading models."""
         return self._checkpoint_manager
+
+    @abstractmethod
+    def is_loaded(self) -> bool:
+        """Check if models are loaded."""
 
     @abstractmethod
     def loss_fn(
@@ -59,46 +109,70 @@ class BaseModel(ABC):
         model: PeftModel,
         device: torch.device,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """
-        Compute loss for training.
+        """Compute loss for training.
 
         Args:
             batch: Training batch with input tensors.
-            model: The specific submodel to compute loss for.
+            model: The submodel to compute loss for.
             device: Device to run computation on.
 
         Returns:
-            Tuple of (loss, metrics_dict) where metrics_dict contains scalars to be
-            logged.
+            Tuple of (loss, metrics_dict).
         """
 
     @abstractmethod
     def predict(
         self,
-        device_input_ids: list[torch.Tensor],
-        device_attention_masks: list[torch.Tensor],
-    ) -> torch.Tensor:
-        """
-        Inference prediction.
-
-        For ensemble models, this handles parallel execution and aggregation.
-        For single models, this is a simple forward pass.
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        device: torch.device,
+        past_key_values: Optional[Any] = None,
+        use_cache: bool = False,
+    ) -> tuple[torch.Tensor, Optional[Any]]:
+        """Single-token prediction.
 
         Args:
-            device_input_ids: Input IDs per device/model.
-            device_attention_masks: Attention masks per device/model.
+            input_ids: Input token IDs (B, T) on CPU.
+            attention_mask: Attention mask (B, T) on CPU.
+            device: Device the model is on.
+            past_key_values: Optional key values for caching.
+            use_cache: Whether to use KV caching.
 
         Returns:
-            Aggregated predictions (e.g., min log probs for DEPPO).
+            Tuple of (Log probs for next token (B, V) on CPU, past_key_values).
+        """
+
+    @abstractmethod
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        max_new_tokens: int,
+        greedy_sampling: bool = True,
+        temperature: float = 1.0,
+        top_p: float = 0.9,
+        token_callback: Optional[Callable[[str], None]] = None,
+        use_cache: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Generate tokens.
+
+        Args:
+            input_ids: Input token IDs (B, T) on CPU.
+            attention_mask: Attention mask (B, T) on CPU.
+            max_new_tokens: Maximum tokens to generate.
+            greedy_sampling: If True, use argmax. If False, use top-p.
+            temperature: Sampling temperature.
+            top_p: Top-p nucleus sampling threshold.
+            token_callback: Optional callback for streaming tokens.
+            use_cache: Whether to use KV caching.
+
+        Returns:
+            Tuple of (output_ids, output_mask) on CPU.
         """
 
     @abstractmethod
     def can_load_from_epoch(self, epoch: int) -> bool:
         """Check if model can be loaded from epoch."""
-
-    @abstractmethod
-    def load_from_epoch(self, epoch: int) -> None:
-        """Load model from epoch."""
 
     @abstractmethod
     def save(self) -> None:
@@ -162,9 +236,9 @@ class BaseModel(ABC):
             **kwargs: Additional optional arguments.
         """
 
-    @abstractmethod
     def _get_base_model_name(self) -> str:
         """Get the base model name (e.g. from model_id)."""
+        return self.model_id.rsplit("/", 1)[-1]
 
     def init_trainer(self) -> None:
         """Initialize the trainer if it's a partial."""
@@ -202,34 +276,21 @@ class BaseModel(ABC):
             continue_training: Whether to continue from checkpoint.
         """
 
-    @property
-    def num_models(self) -> int:
-        """Number of models (L for ensemble, 1 for single)."""
-        if self._models is None:
-            raise ValueError("Models not loaded. Call load() first.")
-        return len(self.models)
-
-    @property
-    def models(self) -> list[PeftModel]:
-        """List of loaded models. Raises if not loaded."""
-        if self._models is None:
-            raise ValueError("Models not loaded. Call load() first.")
-        return self._models
-
     def generate_responses(
         self,
-        prompts: list[str],
+        prompts: list[Any],
         apply_chat_template: bool = True,
-    ) -> list[dict[str, Any]]:
-        """
-        Generate responses for a list of prompts.
+        token_callback: Optional[Callable[[str], None]] = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Generate responses for a list of prompts.
 
         Args:
-            prompts: List of prompt strings.
+            prompts: List of prompt strings or histories.
             apply_chat_template: Whether to apply chat template.
+            token_callback: Optional callback for streaming tokens.
 
         Returns:
-            List of dicts with 'prompt' and 'output' keys.
+            Tuple of (List of dicts with 'prompt' and 'output' keys, metrics dict).
         """
         if self.generator is None:
             raise ValueError(
@@ -240,26 +301,5 @@ class BaseModel(ABC):
             model=self,
             prompts=prompts,
             apply_chat_template=apply_chat_template,
+            token_callback=token_callback,
         )
-
-    def _predict_submodel(
-        self,
-        model: PeftModel,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute log probabilities for the next token using a specific model.
-
-        Args:
-            model: The PeftModel to used for prediction.
-            input_ids: (B, T) input IDs.
-            attention_mask: (B, T) attention mask.
-
-        Returns:
-            (B, V) log probabilities for the last token.
-        """
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        logits = outputs.logits  # (B, T, V)
-        last_logits = logits[:, -1, :]
-        log_probs = F.log_softmax(last_logits, dim=-1)
-        return log_probs

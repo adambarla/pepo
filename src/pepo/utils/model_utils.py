@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -71,3 +72,85 @@ def get_log_probs(
                 f"Max diff: {max_diff:.2e}, Mean diff: {mean_diff:.2e}"
             )
     return log_probs_sum
+
+
+def get_next_token_log_probs(
+    model: PreTrainedModel | PeftModel,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    past_key_values: Optional[list[torch.Tensor]] = None,
+    use_cache: bool = False,
+) -> tuple[torch.Tensor, Optional[list[torch.Tensor]]]:
+    """Compute log probabilities for the next token (the very last position).
+
+    Args:
+        model: The model to use for prediction.
+        input_ids: (B, T) input IDs.
+        attention_mask: (B, T) attention mask.
+        past_key_values: Optional past key values for caching.
+        use_cache: Whether to use KV caching.
+
+    Returns:
+        Tuple of (
+            (B, V) log probabilities for the last token,
+            Optional past_key_values
+        ).
+    """
+    if past_key_values is not None:
+        # If we have cache, we only need to pass the last token
+        # But we still need the full attention mask for position embeddings
+        model_kwargs = {
+            "use_cache": use_cache,
+            "past_key_values": past_key_values,
+        }
+        # Only pass the last token
+        input_ids_step = input_ids[:, -1:]
+    else:
+        model_kwargs = {"use_cache": use_cache}
+        input_ids_step = input_ids
+
+    outputs = model(
+        input_ids=input_ids_step,
+        attention_mask=attention_mask,
+        **model_kwargs,
+    )
+    logits = outputs.logits  # (B, T_step, V)
+    last_logits = logits[:, -1, :]
+    log_probs = F.log_softmax(last_logits, dim=-1)
+
+    return log_probs, outputs.past_key_values
+
+
+def top_p_sample(
+    logits: torch.Tensor,
+    temperature: float = 1.0,
+    top_p: float = 0.9,
+) -> torch.Tensor:
+    """Sample from logits using top-p (nucleus) sampling.
+
+    Args:
+        logits: (B, V) logits for each token in vocabulary.
+        temperature: Sampling temperature.
+        top_p: Nucleus sampling threshold.
+
+    Returns:
+        (B,) sampled token indices.
+    """
+    scaled_logits = logits / temperature
+    probs = F.softmax(scaled_logits, dim=-1)
+
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+    sorted_indices_to_remove = cumulative_probs > top_p
+    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+    sorted_indices_to_remove[..., 0] = 0
+
+    indices_to_remove = sorted_indices_to_remove.scatter(
+        1, sorted_indices, sorted_indices_to_remove
+    )
+    logits = logits.clone()
+    logits[indices_to_remove] = float("-inf")
+    filtered_probs = F.softmax(logits, dim=-1)
+    sampled_indices = torch.multinomial(filtered_probs, num_samples=1).squeeze(-1)
+    return sampled_indices

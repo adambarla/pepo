@@ -1,7 +1,5 @@
 _target_: pepo.trainer.SingleModelTrainer
 _partial_: true
-train_batch_size: 4
-eval_batch_size: 32
 gradient_accumulation_steps: 1
 early_stopping_patience: null
 early_stopping_min_delta: 0.001

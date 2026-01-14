@@ -44,19 +44,16 @@ class RewardAnnotator(BaseAnnotator):
         self.max_prompt_length = max_prompt_length
 
     def annotate(self, dataset: Dataset, **kwargs: Any) -> Dataset:
-        force: bool = kwargs.get("force", False)
-        semaphore_limit: Optional[int] = kwargs.get("semaphore_limit")
-        """
-        Annotate dataset with rewards.
+        """Annotate dataset with rewards.
 
         Args:
             dataset: Dataset to annotate.
             force: Whether to force recomputation (combines with self.force).
-            semaphore_limit: Max concurrent threads (defaults to num_available_gpus).
 
         Returns:
             Annotated dataset.
         """
+        force: bool = kwargs.get("force", False)
         effective_force = self.force or force
 
         # Check if first model's rewards exist as a heuristic
@@ -71,13 +68,11 @@ class RewardAnnotator(BaseAnnotator):
         trainer = self.reward_model.trainer
         batch_size = getattr(trainer, "eval_batch_size", 8) if trainer else 8
 
-        limit = semaphore_limit or self.device_manager.num_available_gpus
-        gpu_semaphore = threading.Semaphore(value=limit)
         dataset_lock = threading.Lock()
 
         logger.info(
             f"Starting reward annotation with {num_models} models "
-            f"({limit} concurrent threads)..."
+            f"({self.device_manager.num_available_gpus} GPUs available)..."
         )
 
         # Container for safe update in threads
@@ -85,7 +80,7 @@ class RewardAnnotator(BaseAnnotator):
         threads = []
 
         for i in range(num_models):
-            args = (i, dataset, batch_size, gpu_semaphore, dataset_lock, shared_dataset)
+            args = (i, dataset, batch_size, dataset_lock, shared_dataset)
             t = threading.Thread(target=self._annotate_single_model, args=args)
             t.start()
             threads.append(t)
@@ -100,15 +95,13 @@ class RewardAnnotator(BaseAnnotator):
         model_idx: int,
         dataset: Dataset,
         batch_size: int,
-        gpu_semaphore: threading.Semaphore,
         dataset_lock: threading.Lock,
         shared_dataset: list[Dataset],
     ) -> None:
-        gpu_semaphore.acquire()
-        try:
-            device = torch.device(self.device_manager.get_device_for_model(model_idx))
+        with self.device_manager.request_gpu() as device:
             model = self.reward_model.models[model_idx]
             reward_head = self.reward_model.reward_heads[model_idx]
+            model.to(device)
 
             tokenizer_copy = copy.deepcopy(self.tokenizer)
             collator = DataCollator(
@@ -122,7 +115,7 @@ class RewardAnnotator(BaseAnnotator):
                 batch_size=batch_size,
                 collate_fn=collator,
                 pin_memory=True,
-                num_workers=0,  # Avoid nested multiprocessing issues if possible?
+                num_workers=0,
             )
 
             rewards_chosen = []
@@ -131,12 +124,6 @@ class RewardAnnotator(BaseAnnotator):
             desc = f"Model {model_idx} Inference"
             for batch in tqdm(dataloader, desc=desc, position=model_idx, leave=False):
                 with torch.no_grad():
-                    # REPPORewardModel._compute_reward takes tensors on device
-                    # But validation/sanitization might happen there or here.
-                    # We send tensors to device here.
-                    # Note: _compute_reward signature:
-                    # (input_ids, attention_mask, model, reward_head, device)
-
                     r_c = self.reward_model._compute_reward(
                         batch["chosen_input_ids"].to(device),
                         batch["chosen_attention_mask"].to(device),
@@ -166,13 +153,9 @@ class RewardAnnotator(BaseAnnotator):
                 shared_dataset[0] = current_ds
                 logger.info(f"Model {model_idx} annotation merged.")
 
-        except Exception as e:
-            logger.error(f"Error in annotation thread for model {model_idx}: {e}")
-            # Don't re-raise to avoid crashing other threads/main thread immediately?
-            # But we should fail eventually.
-            raise e
-        finally:
-            gpu_semaphore.release()
+            # Move model back to CPU
+            model.to("cpu")
+            torch.cuda.empty_cache()
 
     def get_signature(self) -> dict[str, Any]:
         # Hash based on model name and epoch (which captures parameters state)

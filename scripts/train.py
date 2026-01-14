@@ -1,7 +1,7 @@
 import os
 
 # Prevent CUDA memory fragmentation (must be set before any CUDA operations)
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import multiprocessing
@@ -81,7 +81,6 @@ def main(cfg: DictConfig) -> None:
     data_manager: DataManager = instantiate(
         cfg.dataset,
         tokenizer=model.get_tokenizer(),
-        inference_batch_size=cfg.model.trainer.eval_batch_size,
         device_manager=device_manager,
     )
 

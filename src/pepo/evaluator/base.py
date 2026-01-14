@@ -20,6 +20,7 @@ class BaseEvaluator(ABC):
         dataset_split: str,
         output_dir: str,
         num_samples: Optional[int] = None,
+        stop_after_generation: bool = False,
     ) -> None:
         """
         Initialize base evaluator.
@@ -33,6 +34,7 @@ class BaseEvaluator(ABC):
         self.dataset_split = dataset_split
         self.output_dir = Path(output_dir)
         self.num_samples = num_samples
+        self.stop_after_generation = stop_after_generation
 
     @abstractmethod
     def evaluate(

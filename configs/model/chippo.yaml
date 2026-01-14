@@ -1,0 +1,20 @@
+defaults:
+  - /trainer@trainer: single
+  - /generator@generator: greedy
+  - _self_
+
+_target_: pepo.model.chippo.CHIPPOModel
+backbone: ${backbone}
+
+wandb:
+  tags: ["chippo"]
+
+debug: ${debug}
+beta_chi: 0.1
+alpha_chi: 1.0
+gamma_chi: 1.0
+r_max_chi: 10.0
+use_internal_clipping: true
+
+trainer:
+  training_epochs: 1
