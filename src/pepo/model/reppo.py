@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from peft import LoraConfig, PeftModel
-from transformers import AutoModel, PreTrainedModel, PreTrainedTokenizerBase
+from transformers import AutoConfig, AutoModel, PreTrainedModel, PreTrainedTokenizerBase
 
 from ..data import RewardDataCollator
 from ..data.annotators.reward import RewardAnnotator
@@ -169,7 +169,6 @@ class REPPORewardModel(BaseModel):
         # We need to know hidden_size to init reward heads if init_new=True
         # For simplicity, we load the first model to get the config
         # This is a bit redundant but ensures we have the right hidden_size
-        from transformers import AutoConfig
 
         config = AutoConfig.from_pretrained(self.model_id)
         hidden_size = config.hidden_size
@@ -179,9 +178,8 @@ class REPPORewardModel(BaseModel):
 
         self._models = []
         for model_idx in range(self._num_models):
-            device = torch.device(self._device_manager.get_device_for_model(model_idx))
-            # Always create a head; if loading from hub, PEFT will overwrite its weights
-            reward_head = RewardHead(hidden_size).to(device=device, dtype=model_dtype)
+            # Reward head stays on CPU, moved to GPU during training
+            reward_head = RewardHead(hidden_size).to(dtype=model_dtype)
 
             self._models.append(
                 self.checkpoint_manager.load_model(
@@ -387,7 +385,8 @@ class REPPORewardModel(BaseModel):
         self,
         device_input_ids: list[torch.Tensor],
         device_attention_masks: list[torch.Tensor],
-    ) -> torch.Tensor:
+        **kwargs: Any,
+    ) -> Any:
         """Inference prediction (unused for reward model training)."""
         raise NotImplementedError("Predict not implemented for Reward Model")
 
@@ -424,21 +423,6 @@ class REPPOModel(BaseModel):
         self.debug = debug
         self._num_models = 1
         self._force_annotation = force_annotation
-
-        # If reward_model has _partial_, we need to inject backbone
-        if hasattr(reward_model, "_partial_") and reward_model._partial_:
-            # This case shouldn't happen with the new config structure where we don't
-            # usually partial init the reward model. But if it is a DictConfig or
-            # partial, let's assume it's fully instantiated.
-            pass
-
-        # In Hydra composition, reward_model is instantiated with defaults
-        # However, it needs backbone. We should pass backbone to it if it's missing.
-        # But wait, reward_model is a sub-config in reppo.yaml.
-        # We need to explicitly pass backbone to reward_model in YAML or here.
-        # Since reward_model is likely already instantiated by Hydra when passed here,
-        # we face a chicken-egg problem.
-        # Solution: In `reppo.yaml`, we will set `reward_model.backbone: ${backbone}`.
 
         self.reward_model = reward_model
 
@@ -502,27 +486,21 @@ class REPPOModel(BaseModel):
         self, init_new: bool = False, epoch: Optional[int] = None, **kwargs: Any
     ) -> None:
         """Load Policy Model (self) AND Reward Model (optionally)."""
-        # Load Reward Model Helper
-        if kwargs.get("load_reward_model", False) or init_new:
-            self.reward_model.load(init_new=init_new, epoch=epoch)
-
-        # Load Policy (Self)
         if self._models is not None:
-            logger.warning("Policy already loaded. Unload first to reload.")
-            # We allow proceeding, similar to reload
-        else:
-            model = self.checkpoint_manager.load_model(
-                model_id=self.model_id,
-                model_name=self.get_name(),
-                model_idx=0,
-                lora_config=self.lora_config,
-                init_new=init_new,
-                epoch=epoch,
-            )
-            self._models = [model]
-            if epoch is not None:
-                self._epoch = epoch
-            logger.info("Loaded REPPO Policy model")
+            return
+
+        model = self.checkpoint_manager.load_model(
+            model_id=self.model_id,
+            model_name=self.get_name(),
+            model_idx=0,
+            lora_config=self.lora_config,
+            init_new=init_new,
+            epoch=epoch,
+        )
+        self._models = [model]
+        if epoch is not None:
+            self._epoch = epoch
+        logger.info("Loaded REPPO Policy model")
 
     def unload(self) -> None:
         """Unload Policy Model (self) AND Reward Model (helper)."""
@@ -600,12 +578,12 @@ class REPPOModel(BaseModel):
             continue_training=continue_training,
             force_annotation=self._force_annotation,
         )
-        # Phase 2: Policy Training
         logger.info("Starting Phase 2: Policy Training")
-        # Force annotation if reward training was forced
+
         r_trainer = self.reward_model.trainer
-        r_force = r_trainer.force if r_trainer else False
-        force_annotation = self._force_annotation or r_force
+        force_annotation = self._force_annotation or (
+            r_trainer.force if r_trainer else False
+        )
 
         reward_annotator = RewardAnnotator(
             reward_model=self.reward_model,
@@ -642,7 +620,6 @@ class REPPOModel(BaseModel):
             max_epochs=max_epochs,
             wandb_manager=wandb_manager,
             continue_training=policy_continue,
-            load_kwargs={"load_reward_model": False},
         )
 
     def loss_fn(
@@ -697,7 +674,8 @@ class REPPOModel(BaseModel):
         self,
         device_input_ids: list[torch.Tensor],
         device_attention_masks: list[torch.Tensor],
-    ) -> torch.Tensor:
+        **kwargs: Any,
+    ) -> Any:
         """Inference prediction using the single policy model.
 
         Note: device_input_ids and device_attention_masks are lists of length 1,
@@ -714,10 +692,16 @@ class REPPOModel(BaseModel):
                 f"got {len(device_input_ids)} and {len(device_attention_masks)}"
             )
 
+        past_key_values = kwargs.get("past_key_values", None)
+        pkv = past_key_values[0] if past_key_values is not None else None
+
         with torch.no_grad():
             self.policy.eval()
-            log_probs = self._predict_submodel(
-                self.policy, device_input_ids[0], device_attention_masks[0]
+            log_probs, next_pkv = self._predict_submodel(
+                self.policy,
+                device_input_ids[0],
+                device_attention_masks[0],
+                past_key_values=pkv,
             )
 
-        return log_probs
+        return log_probs, [next_pkv]

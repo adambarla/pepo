@@ -10,6 +10,7 @@ from transformers import get_scheduler
 
 from ..data import DataManager
 from ..utils import WandbManager, WandbRun
+from ..utils.device import move_to_device
 from .base import BaseTrainer
 
 if TYPE_CHECKING:
@@ -98,6 +99,9 @@ class SingleModelTrainer(BaseTrainer):
         self._setup_training(model, data_manager, max_epochs, wandb_manager)
 
         device = torch.device(model.device_manager.get_device_for_model(0))
+
+        # Move model and optimizer to GPU for training
+        move_to_device(model.models[0], device, self.optimizer)
 
         group = model.get_name()
         wandb_run = None

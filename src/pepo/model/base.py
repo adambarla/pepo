@@ -77,7 +77,8 @@ class BaseModel(ABC):
         self,
         device_input_ids: list[torch.Tensor],
         device_attention_masks: list[torch.Tensor],
-    ) -> torch.Tensor:
+        **kwargs: Any,
+    ) -> Any:
         """
         Inference prediction.
 
@@ -247,7 +248,8 @@ class BaseModel(ABC):
         model: PeftModel,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        **kwargs: Any,
+    ) -> Any:
         """Compute log probabilities for the next token using a specific model.
 
         Args:

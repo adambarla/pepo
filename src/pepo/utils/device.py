@@ -1,5 +1,8 @@
+import contextlib
 import logging
-from typing import List, Optional, Union
+import queue
+import threading
+from typing import Iterator, List, Optional, Union
 
 import torch
 
@@ -7,6 +10,26 @@ logger = logging.getLogger(__name__)
 
 # Singleton instance
 _instance: Optional["DeviceManager"] = None
+
+
+def move_to_device(
+    model: torch.nn.Module,
+    device: torch.device,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+) -> None:
+    """Move model and optimizer state to device.
+
+    Args:
+        model: The model to move.
+        device: Target device.
+        optimizer: Optional optimizer whose state should also be moved.
+    """
+    model.to(device)
+    if optimizer is not None:
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
 
 
 def init_device_manager(
@@ -47,7 +70,7 @@ def get_device_manager() -> "DeviceManager":
 class DeviceManager:
     """
     Device manager for distributing models across GPUs.
-    Supports one GPU per model (simple approach).
+    Supports dynamic GPU acquisition via request_gpu() context manager.
     """
 
     def __init__(
@@ -65,6 +88,14 @@ class DeviceManager:
         self.dtype = dtype
 
         self._available_gpus = self._get_available_gpus()
+
+        # Semaphore limits concurrent GPU access to number of GPUs
+        self._gpu_semaphore = threading.Semaphore(value=len(self._available_gpus))
+        # Queue tracks which GPUs are free (FIFO for fairness)
+        self._gpu_queue: queue.Queue[int] = queue.Queue()
+        for gpu_id in self._available_gpus:
+            self._gpu_queue.put(gpu_id)
+
         self._log_environment_info()
 
     def _get_available_gpus(self) -> List[int]:
@@ -100,6 +131,23 @@ class DeviceManager:
 
     def _get_gpu_id_for_model(self, model_idx: int) -> int:
         return self._available_gpus[model_idx % len(self._available_gpus)]
+
+    @contextlib.contextmanager
+    def request_gpu(self) -> Iterator[torch.device]:
+        self._gpu_semaphore.acquire()
+        gpu_id = self._gpu_queue.get()
+
+        try:
+            yield torch.device(f"cuda:{gpu_id}")
+        finally:
+            try:
+                with torch.cuda.device(gpu_id):
+                    torch.cuda.synchronize()
+            except Exception:
+                pass
+            finally:
+                self._gpu_queue.put(gpu_id)
+                self._gpu_semaphore.release()
 
     @property
     def num_available_gpus(self) -> int:

@@ -81,12 +81,10 @@ class CheckpointManager:
                 Defaults to AutoModelForCausalLM.
         """
         load_from_hub = not init_new and epoch is not None
-        device_map = self.device_manager.get_device_for_model(model_idx)
+        device_map = "cpu"  # Models start on CPU, moved to GPU during training
         dtype = self.device_manager.dtype
 
-        logger.info(
-            f"Loading base model {model_id} for {model_name} on {device_map}..."
-        )
+        logger.info(f"Loading base model {model_id} for {model_name} on CPU...")
 
         base_model = cast(
             PreTrainedModel,
