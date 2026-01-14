@@ -1,0 +1,48 @@
+exclude: '^(alpaca_eval|arena-hard-auto|LLM|figures)/'
+
+repos:
+  - repo: local
+    hooks:
+      # Clean Jupyter notebooks
+      - id: nb-clean
+        name: nb-clean
+        entry: uv run nb-clean clean
+        language: system
+        files: \.ipynb$
+        description: "Clean Jupyter notebooks by removing outputs and metadata"
+
+      # Ruff: Linting + Import Sorting
+      - id: ruff
+        name: ruff check
+        entry: uv run ruff check
+        language: system
+        types: [python]
+        # --select I enables isort rules
+        args: [--fix, --exit-non-zero-on-fix, --show-fixes, --select, "I,E,F"]
+
+      # Ruff: Formatting (Replaces Black)
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+
+      # Type checking
+      - id: ty
+        name: ty
+        entry: uvx ty check
+        language: system
+        types: [python]
+        # args: [] # Add any args if needed
+
+  # General hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: debug-statements

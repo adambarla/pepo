@@ -1,0 +1,9 @@
+# Best of N Generator Configuration (Rejection Sampling)
+_target_: pepo.generator.BestOfNGenerator
+
+max_prompt_length: 512
+max_new_tokens: 1024
+greedy_sampling: false
+temperature: 1.0
+top_p: 0.9
+max_trials: 16  # Max attempts per prompt before accepting best candidate

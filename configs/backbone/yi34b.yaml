@@ -1,0 +1,17 @@
+_target_: pepo.model.config.BackboneConfig
+# Yi 34B Base Configuration
+model_id: "01-ai/Yi-34B-Chat"
+lora_r: 16
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_modules: "all-linear"
+
+tokenizer_id: null
+chat_template: null # use the provided one
+lora_bias: "none"
+lora_task_type: "CAUSAL_LM"
+compile: false
+
+train_batch_size: 4
+eval_batch_size: 32
+generator_batch_size: 16

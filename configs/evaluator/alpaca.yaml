@@ -1,0 +1,19 @@
+_target_: pepo.evaluator.alpaca.AlpacaEvalEvaluator
+
+dataset_id: "tatsu-lab/alpaca_eval"
+dataset_split: "eval"
+annotators_config:
+  llama3_70b_judge:
+    prompt_template: alpaca_eval_llama3_70b_fn
+    completions_kwargs:
+      batch_size: 1
+      max_new_tokens: 512
+      model_name: meta-llama/Meta-Llama-3-70B-Instruct
+      model_kwargs:
+        device_map: auto
+        dtype: float16
+    fn_completions: "huggingface_local_completions"
+    fn_completion_parser: "ranking_parser"
+
+output_dir: "${hydra:runtime.cwd}/outputs"
+num_samples: null

@@ -1,0 +1,8 @@
+# Greedy Sampling Generator Configuration
+_target_: pepo.generator.Generator
+
+max_prompt_length: 512
+max_new_tokens: 1024
+greedy_sampling: true
+temperature: 1.0
+top_p: 0.9

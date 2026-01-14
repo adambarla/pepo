@@ -1,0 +1,20 @@
+# UltraFeedback Binarized Dataset Configuration
+defaults:
+  - base
+
+dataset_id: "HuggingFaceH4/ultrafeedback_binarized"
+train_split_name: "train_sft"
+eval_split_name: "test_sft"
+
+max_length: 1024
+max_prompt_length: 512
+
+processor:
+  _target_: pepo.data.UltraFeedbackProcessor
+  max_length: ${..max_length}
+  max_prompt_length: ${..max_prompt_length}
+
+collator:
+  _target_: pepo.data.DataCollator
+  max_length: ${..max_length}
+  max_prompt_length: ${..max_prompt_length}

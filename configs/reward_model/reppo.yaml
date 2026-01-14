@@ -1,0 +1,13 @@
+defaults:
+  - /trainer@trainer: ensemble
+  - _self_
+
+_target_: pepo.model.reppo.REPPORewardModel
+num_networks: ${L}
+# backbone is injected by reppo.yaml
+debug: ${..debug}
+trainer:
+  train_batch_size: ${...backbone.train_batch_size}
+  eval_batch_size: ${...backbone.eval_batch_size}
+  gradient_accumulation_steps: 1
+  training_epochs: 2

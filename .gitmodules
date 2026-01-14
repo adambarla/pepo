@@ -1,0 +1,4 @@
+[submodule "alpaca_eval"]
+	path = alpaca_eval
+	url = https://github.com/adambarla/alpaca_eval.git
+	branch = fix/issue-449-model-caching

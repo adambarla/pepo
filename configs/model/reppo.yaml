@@ -1,0 +1,22 @@
+defaults:
+  - /reward_model@reward_model: reppo
+  - /trainer@trainer: single
+  - /generator@generator: greedy
+  - _self_
+
+_target_: pepo.model.reppo.REPPOModel
+backbone: ${backbone}
+reward_model:
+  backbone: ${backbone}
+  trainer:
+    training_epochs: 8
+
+wandb:
+  tags: ["reppo"]
+
+debug: ${debug}
+beta: 0.1
+force_annotation: false
+
+trainer:
+  training_epochs: 8
