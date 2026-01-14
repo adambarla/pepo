@@ -1,0 +1,52 @@
+defaults:
+  - backbone: smollm
+  - model: reppo
+  - dataset: ultrafeedback
+  - _self_
+
+wandb:
+  _target_: pepo.utils.wandb.WandbManager
+  enabled: ${sync}
+  project: "pepo"
+  tags: []
+  notes: null
+  entity: "pepo-team"
+  mode: "online"
+
+# Global manager settings (flat config, not Hydra instantiated)
+push_to_hub: ${sync}
+hub_base_dir: "PessimisticDPO"
+gpu_ids: null  # list of GPU IDs (null = auto-detect)
+dtype: bfloat16
+
+dataset:
+  n_splits: ${L}
+  seed: ${seed}
+
+model:
+  num_networks: ${L}
+  alpha: ${a}
+  beta: ${b}
+  generator:
+    max_new_tokens: 1024
+  trainer:
+    log_interval: 1
+    skip_eval: ${skip_eval}
+  debug: ${debug}
+  compile: false
+
+L: 4 # Number of submodels
+e: 3 # Epoch to evaluate at (also used as max_epochs when training)
+a: 0.1 # Alpha parameter for PEPO
+b: 0.1 # Beta parameter for PEPO
+overwrite: false
+seed: 42
+debug: false
+log_level: "info"
+continue: false
+sync: true  # If false, disables wandb logging and hub push (useful for test runs)
+skip_eval: false
+
+hydra:
+  run:
+    dir: outputs/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}

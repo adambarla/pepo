@@ -11,10 +11,10 @@ from tqdm import tqdm
 # ==============================================================================
 
 # --- Model Paths ---
-# Ensure these paths point to the outputs of your training scripts.
+# Models are loaded from Hugging Face Hub
 BASE_MODEL_ID = "HuggingFaceTB/SmolLM2-135M"
-PESSIMISTIC_MODEL_PATH = "./mc_dpo_smollm_ultrafeedback/final_checkpoint" # Model A
-DPO_MODEL_PATH = "./dpo_custom_tinyllama_ultrafeedback/final_checkpoint" # Model B
+PESSIMISTIC_MODEL_PATH = "ema1234/mc-dpo-smollm-ultrafeedback" # Model A - Replace with your HF repo
+DPO_MODEL_PATH = "ema1234/dpo-smollm-ultrafeedback" # Model B - Replace with your HF repo
 
 # --- Judge Model Configuration ---
 # Using a free, open-source model from Hugging Face.
@@ -40,7 +40,12 @@ print(f"Using device: {DEVICE}")
 # ==============================================================================
 
 def load_and_merge_lora_model(base_model_id, adapter_path, device, dtype):
-    """Loads a base model, applies a LoRA adapter, and merges the weights."""
+    """
+    Loads a base model, applies a LoRA adapter from HF Hub or local path, and merges the weights.
+    adapter_path can be either:
+    - A Hugging Face Hub repository (e.g., "username/model-name")
+    - A local path (e.g., "./model/checkpoint")
+    """
     print(f"Loading and merging model from: {adapter_path}...")
     
     base_model = AutoModelForCausalLM.from_pretrained(
@@ -49,6 +54,7 @@ def load_and_merge_lora_model(base_model_id, adapter_path, device, dtype):
         device_map=device
     )
     
+    # PeftModel.from_pretrained works with both HF Hub and local paths
     model = PeftModel.from_pretrained(base_model, adapter_path)
     model = model.merge_and_unload()
     model.eval()
@@ -63,8 +69,16 @@ def load_and_merge_lora_model(base_model_id, adapter_path, device, dtype):
 print("\n--- Loading models for comparison ---")
 
 # Tokenizer for the models being tested
-tokenizer = AutoTokenizer.from_pretrained(PESSIMISTIC_MODEL_PATH)
+# Load tokenizer from HF Hub or use base model tokenizer
+try:
+    tokenizer = AutoTokenizer.from_pretrained(PESSIMISTIC_MODEL_PATH)
+except:
+    print(f"Could not load tokenizer from {PESSIMISTIC_MODEL_PATH}, using base model tokenizer")
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
+    
 tokenizer.padding_side = "left"
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 
 # Load Model A (Pessimistic) and Model B (Standard DPO)
 model_A = load_and_merge_lora_model(BASE_MODEL_ID, PESSIMISTIC_MODEL_PATH, DEVICE, DTYPE)

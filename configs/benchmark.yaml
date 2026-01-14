@@ -1,0 +1,10 @@
+# Benchmark config - inherits from train.yaml and adds evaluator
+defaults:
+  - train  # Inherit all train settings
+  - evaluator: alpaca
+  - _self_
+
+# Override sync to false by default for benchmarking (no hub push)
+sync: false
+
+# Benchmark-specific settings can be added here

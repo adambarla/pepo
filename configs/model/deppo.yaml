@@ -1,0 +1,19 @@
+defaults:
+  - /trainer@trainer: ensemble
+  - /generator@generator: greedy
+  - _self_
+
+_target_: pepo.model.deppo.DEPPOModel
+backbone: ${backbone}
+
+alpha: 0.1
+beta: 0.1
+num_networks: ${L} # placeholder, will be overridden by L
+
+trainer:
+  train_batch_size: ${..backbone.train_batch_size}
+  eval_batch_size: ${..backbone.eval_batch_size}
+  gradient_accumulation_steps: 1
+
+generator:
+  batch_size: ${..backbone.generator_batch_size}

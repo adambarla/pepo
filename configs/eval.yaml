@@ -1,0 +1,75 @@
+defaults:
+  - backbone: smollm
+  - model: reppo
+  - dataset: ultrafeedback
+  - evaluator: alpaca
+  - backbone@ref_backbone: null
+  - model@ref_model: null #in CLI override as model@ref_model=...
+  - _self_
+
+wandb:
+  _target_: pepo.utils.wandb.WandbManager
+  enabled: ${sync}
+  project: "pepo"
+  tags: ["eval"]
+  notes: null
+  entity: "pepo-team"
+  mode: "online"
+
+# Global manager settings (flat config, not Hydra instantiated)
+push_to_hub: false  # Eval typically doesn't push
+hub_base_dir: "PessimisticDPO"
+gpu_ids: null
+dtype: bfloat16
+
+dataset:
+  max_length: 1024
+  max_prompt_length: 512
+  n_splits: ${L}
+  cache_dir: ${oc.env:SCRATCH}/pepo/cache # cache is $SCRATCH/pepo/cache
+  seed: ${seed}
+  force_recompute: false
+
+model:
+  num_networks: ${L}
+  alpha: ${a}
+  beta: ${b}
+  generator:
+    max_new_tokens: ${mt}
+    max_prompt_length: 512
+  trainer:
+    log_interval: 1
+  debug: ${debug}
+  compile: false
+
+evaluator:
+  num_samples: ${ns}
+
+ref_model:
+  num_networks: ${ref_L}
+  alpha: ${ref_a}
+  beta: ${ref_b}
+  generator:
+    max_new_tokens: ${mt}
+
+e: 3
+L: 4
+a: 0.1
+b: 0.1
+ref_e: 3
+ref_L: 4
+ref_a: 0.1
+ref_b: 0.1
+
+mt: 1024
+ns: null
+
+overwrite: false
+seed: 42
+debug: false
+log_level: "info"
+sync: false  # If false, disables wandb logging
+
+hydra:
+  run:
+    dir: outputs/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}
