@@ -150,3 +150,20 @@ class CheckpointManager:
             tokenizer=tokenizer,
             epoch=epochs,
         )
+
+    def load_adapter(
+        self,
+        model: PeftModel,
+        model_name: str,
+        adapter_name: str,
+        epoch: Optional[int] = None,
+    ) -> None:
+        """
+        Load an additional adapter into an existing PeftModel.
+        """
+        if epoch is None:
+            raise ValueError("epoch must be provided to load an existing adapter.")
+
+        repo_id = self.hub_manager.get_repo_id(model_name, epoch)
+        logger.info(f"Loading adapter {adapter_name} from {repo_id}...")
+        model.load_adapter(repo_id, adapter_name=adapter_name)

@@ -20,7 +20,7 @@ from ..generator import Generator
 from ..loader import CheckpointManager
 from ..trainer import EnsembleTrainer
 from ..utils import get_device_manager, get_hub_manager
-from ..utils.model_utils import get_log_probs
+from ..utils.model_utils import get_log_probs, get_next_token_log_probs
 from .base import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class DEPPOModel(BaseModel):
         trainer: Optional[EnsembleTrainer] = None,
         generator: Optional[Generator] = None,
         debug: bool = False,
-        **kwargs: Any,
+        shared_backbone: bool = False,
     ):
         """
         Initialize DEPPO Model.
@@ -57,6 +57,7 @@ class DEPPOModel(BaseModel):
         self._trainer = trainer
         self.generator = generator
         self.debug = debug
+        self.shared_backbone = shared_backbone
 
         self.compile_model = backbone.compile
 
@@ -158,9 +159,41 @@ class DEPPOModel(BaseModel):
     def _load_models(
         self, init_new: bool = False, epoch: Optional[int] = None
     ) -> list[PeftModel]:
-        models = []
-        logger.info(f"Loading {self._num_models} models...")
+        logger.info(
+            f"Loading {self._num_models} models "
+            f"(shared_backbone={self.shared_backbone})..."
+        )
 
+        if self.shared_backbone:
+            # Load the first model (base + adapter 0)
+            base_model = self.checkpoint_manager.load_model(
+                model_id=self.model_id,
+                model_name=self.get_name(model_idx=0),
+                model_idx=0,
+                lora_config=self.lora_config,
+                init_new=init_new,
+                epoch=epoch,
+            )
+
+            # Load remaining adapters into the same base model
+            for model_idx in range(1, self._num_models):
+                adapter_name = f"adapter_{model_idx}"
+                if not init_new:
+                    self.checkpoint_manager.load_adapter(
+                        model=base_model,
+                        model_name=self.get_name(model_idx=model_idx),
+                        adapter_name=adapter_name,
+                        epoch=epoch,
+                    )
+                else:
+                    raise NotImplementedError(
+                        "shared_backbone=True only supported "
+                        "for loading trained models."
+                    )
+
+            return [base_model] * self._num_models
+
+        models = []
         for model_idx in range(self._num_models):
             models.append(
                 self.checkpoint_manager.load_model(
@@ -377,12 +410,35 @@ class DEPPOModel(BaseModel):
         self,
         device_input_ids: list[torch.Tensor],
         device_attention_masks: list[torch.Tensor],
+        **kwargs: Any,
     ) -> torch.Tensor:
         """
         Predict using device-resident tensors.
         """
         self._check_models_loaded()
 
+        if self.shared_backbone:
+            # Sequential Execution
+            model = self.models[0]
+            log_probs_list = []
+
+            for model_idx in range(self._num_models):
+                adapter_name = "default" if model_idx == 0 else f"adapter_{model_idx}"
+                model.set_adapter(adapter_name)
+
+                # Full forward pass (no KV cache as requested for stability)
+                target_device = model.device
+                inp = device_input_ids[model_idx].to(target_device)
+                mask = device_attention_masks[model_idx].to(target_device)
+
+                log_probs = get_next_token_log_probs(model, inp, mask)
+                log_probs_list.append(log_probs.cpu())  # Move to CPU for aggregation
+
+            log_probs_tensor = torch.stack(log_probs_list, dim=0)  # (L, B, V)
+            min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
+            return min_log_probs
+
+        # Parallel Execution (Separate Models)
         log_probs_ensemble: list[Optional[torch.Tensor]] = [None] * self._num_models
         thread_exceptions: list[Optional[BaseException]] = [None] * self._num_models
 
@@ -395,7 +451,9 @@ class DEPPOModel(BaseModel):
             try:
                 with torch.no_grad():
                     model.eval()
-                    log_probs = self._predict_submodel(model, input_ids, attention_mask)
+                    log_probs = get_next_token_log_probs(
+                        model, input_ids, attention_mask
+                    )
                     log_probs_ensemble[model_idx] = log_probs
             except BaseException as e:
                 thread_exceptions[model_idx] = e

@@ -29,7 +29,7 @@ from ..data import RewardDataCollator
 from ..data.annotators.reward import RewardAnnotator
 from ..loader import CheckpointManager
 from ..utils import get_device_manager, get_hub_manager
-from ..utils.model_utils import get_log_probs
+from ..utils.model_utils import get_log_probs, get_next_token_log_probs
 from .base import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -675,7 +675,7 @@ class REPPOModel(BaseModel):
         device_input_ids: list[torch.Tensor],
         device_attention_masks: list[torch.Tensor],
         **kwargs: Any,
-    ) -> Any:
+    ) -> torch.Tensor:
         """Inference prediction using the single policy model.
 
         Note: device_input_ids and device_attention_masks are lists of length 1,
@@ -692,16 +692,12 @@ class REPPOModel(BaseModel):
                 f"got {len(device_input_ids)} and {len(device_attention_masks)}"
             )
 
-        past_key_values = kwargs.get("past_key_values", None)
-        pkv = past_key_values[0] if past_key_values is not None else None
-
         with torch.no_grad():
             self.policy.eval()
-            log_probs, next_pkv = self._predict_submodel(
+            log_probs = get_next_token_log_probs(
                 self.policy,
                 device_input_ids[0],
                 device_attention_masks[0],
-                past_key_values=pkv,
             )
 
-        return log_probs, [next_pkv]
+        return log_probs
