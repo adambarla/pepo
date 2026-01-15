@@ -1,12 +1,13 @@
 """Abstract base class for policy models."""
 
+from __future__ import annotations
+
 import functools
 import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
-import torch.nn.functional as F
 from peft import PeftModel
 from transformers import PreTrainedTokenizerBase
 
@@ -219,8 +220,9 @@ class BaseModel(ABC):
 
     def generate_responses(
         self,
-        prompts: list[str],
+        prompts: list[Any],
         apply_chat_template: bool = True,
+        token_callback: Optional[Callable[[str], None]] = None,
     ) -> list[dict[str, Any]]:
         """
         Generate responses for a list of prompts.
@@ -241,27 +243,5 @@ class BaseModel(ABC):
             model=self,
             prompts=prompts,
             apply_chat_template=apply_chat_template,
+            token_callback=token_callback,
         )
-
-    def _predict_submodel(
-        self,
-        model: PeftModel,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        **kwargs: Any,
-    ) -> Any:
-        """Compute log probabilities for the next token using a specific model.
-
-        Args:
-            model: The PeftModel to used for prediction.
-            input_ids: (B, T) input IDs.
-            attention_mask: (B, T) attention mask.
-
-        Returns:
-            (B, V) log probabilities for the last token.
-        """
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        logits = outputs.logits  # (B, T, V)
-        last_logits = logits[:, -1, :]
-        log_probs = F.log_softmax(last_logits, dim=-1)
-        return log_probs

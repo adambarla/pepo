@@ -42,6 +42,7 @@ class DEPPOModel(BaseModel):
         generator: Optional[Generator] = None,
         debug: bool = False,
         shared_backbone: bool = False,
+        **kwargs: Any,
     ):
         """
         Initialize DEPPO Model.
@@ -501,24 +502,3 @@ class DEPPOModel(BaseModel):
         )  # (L, B, V)
         min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
         return min_log_probs
-
-    def generate_responses(
-        self,
-        prompts: list[str],
-        apply_chat_template: bool = True,
-    ) -> list[dict[str, Any]]:
-        """
-        Generate responses for a list of prompts using the model's generator.
-        """
-        self._check_models_loaded()
-
-        if self.generator is None:
-            raise ValueError(
-                "Generator not set on model. Set model.generator before "
-                "calling generate_responses()."
-            )
-        return self.generator.generate_responses(
-            model=self,
-            prompts=prompts,
-            apply_chat_template=apply_chat_template,
-        )
