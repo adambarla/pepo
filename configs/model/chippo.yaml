@@ -5,7 +5,6 @@ defaults:
 
 _target_: pepo.model.chippo.CHIPPOModel
 backbone: ${backbone}
-num_networks: 1
 
 wandb:
   tags: ["chippo"]
