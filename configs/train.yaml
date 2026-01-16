@@ -36,7 +36,7 @@ model:
   compile: false
 
 L: 4 # Number of submodels
-e: 3 # Epoch to evaluate at (also used as max_epochs when training)
+e: 8 # Epoch to evaluate at (also used as max_epochs when training)
 a: 0.1 # Alpha parameter for PEPO
 b: 0.1 # Beta parameter for PEPO
 overwrite: false
