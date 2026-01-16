@@ -18,6 +18,8 @@ from .base import BaseTrainer
 if TYPE_CHECKING:
     from ..model import BaseModel
 
+from ..model import EnsembleModel
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +33,7 @@ class EnsembleTrainer(BaseTrainer):
         super().__init__(**kwargs)
         self.optimizers: list[torch.optim.Optimizer] = []
         self.schedulers: list[torch.optim.lr_scheduler.LRScheduler] = []
+        self.model: EnsembleModel  # Set in train()
 
     def _setup_training(
         self,
@@ -87,6 +90,10 @@ class EnsembleTrainer(BaseTrainer):
         """
         Train the ensemble models using threading for parallel GPU operation.
         """
+        if not isinstance(model, EnsembleModel):
+            raise TypeError(
+                f"EnsembleTrainer requires EnsembleModel, got {type(model).__name__}"
+            )
         self.model = model
 
         if max_epochs is None:
@@ -98,7 +105,7 @@ class EnsembleTrainer(BaseTrainer):
             )
 
         # Initial loading logic
-        if self.model._models is None:
+        if not self.model.is_loaded():
             if continue_training:
                 # Use find_latest_epoch from BaseModel
                 latest_epoch = self.model.find_latest_epoch(max_epoch=max_epochs)

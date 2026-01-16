@@ -8,20 +8,18 @@ import threading
 from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, cast
 
 if TYPE_CHECKING:
-    from ..utils import DeviceManager, HubManager
     from .config import BackboneConfig
 
 import torch
 import torch.nn.functional as F
 from peft import LoraConfig, PeftModel
-from transformers import PreTrainedTokenizerBase
 
 from ..generator import Generator
 from ..loader import CheckpointManager
 from ..trainer import EnsembleTrainer
 from ..utils import get_device_manager, get_hub_manager
 from ..utils.model_utils import get_log_probs, get_next_token_log_probs
-from .base import BaseModel
+from .base import EnsembleModel
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +27,7 @@ logger = logging.getLogger(__name__)
 _warned_missing_ref_logprobs = False
 
 
-class DEPPOModel(BaseModel):
+class DEPPOModel(EnsembleModel):
     """Direct Ensemble Pessimistic Preference Optimization Model."""
 
     def __init__(
@@ -44,29 +42,40 @@ class DEPPOModel(BaseModel):
         shared_backbone: bool = False,
         **kwargs: Any,
     ):
-        """
-        Initialize DEPPO Model.
-        """
-        self.alpha = alpha
-        self.beta = beta
-        self._num_models = num_networks
-        self.model_id = backbone.model_id
-        self._device_manager = get_device_manager()
-        self._hub_manager = get_hub_manager()
-        self.tokenizer_id = backbone.tokenizer_id
-        self.chat_template = backbone.chat_template
-        self._trainer = trainer
-        self.generator = generator
-        self.debug = debug
-        self.shared_backbone = shared_backbone
+        """Initialize DEPPO Model."""
+        device_manager = get_device_manager()
+        hub_manager = get_hub_manager()
 
-        self.compile_model = backbone.compile
-
-        self._checkpoint_manager = CheckpointManager(
-            device_manager=self._device_manager,
-            hub_manager=self._hub_manager,
+        checkpoint_manager = CheckpointManager(
+            device_manager=device_manager,
+            hub_manager=hub_manager,
             compile_model=backbone.compile,
         )
+
+        tokenizer = checkpoint_manager.load_tokenizer(
+            model_id=backbone.model_id,
+            tokenizer_id=backbone.tokenizer_id,
+            chat_template=backbone.chat_template,
+        )
+
+        super().__init__(
+            num_models=num_networks,
+            model_id=backbone.model_id,
+            device_manager=device_manager,
+            hub_manager=hub_manager,
+            checkpoint_manager=checkpoint_manager,
+            tokenizer=tokenizer,
+            trainer=trainer,
+            generator=generator,
+        )
+
+        self.alpha = alpha
+        self.beta = beta
+        self.tokenizer_id = backbone.tokenizer_id
+        self.chat_template = backbone.chat_template
+        self.debug = debug
+        self.shared_backbone = shared_backbone
+        self.compile_model = backbone.compile
 
         self.lora_config = LoraConfig(
             r=backbone.lora_r,
@@ -77,35 +86,10 @@ class DEPPOModel(BaseModel):
             target_modules=backbone.lora_target_modules,
         )
 
-        self._tokenizer = self.checkpoint_manager.load_tokenizer(
-            model_id=backbone.model_id,
-            tokenizer_id=backbone.tokenizer_id,
-            chat_template=backbone.chat_template,
-        )
-
-        self._models: list[PeftModel] | None = None  # lazy loaded
-        self.epochs_per_model: list[Optional[int]] = [0] * self._num_models
-
         logger.info(
             f"DEPPOModel initialized with alpha={self.alpha}, "
             f"beta={self.beta}, L={self._num_models}"
         )
-
-    @property
-    def num_models(self) -> int:
-        return self._num_models
-
-    @property
-    def tokenizer(self) -> PreTrainedTokenizerBase:
-        return self._tokenizer
-
-    @property
-    def device_manager(self) -> DeviceManager:
-        return self._device_manager
-
-    @property
-    def hub_manager(self) -> HubManager:
-        return self._hub_manager
 
     def train(
         self,
@@ -208,25 +192,6 @@ class DEPPOModel(BaseModel):
             )
         return models
 
-    def _check_models_loaded(self) -> None:
-        """Check if models are loaded."""
-        if self._models is None:
-            raise RuntimeError(
-                "Models are not loaded. Call model.load() before using the model."
-            )
-
-    @property
-    def models(self) -> list[PeftModel]:
-        if self._models is None:
-            raise RuntimeError(
-                "Models are not loaded. Call model.load() before accessing model.models"
-            )
-        return self._models
-
-    @models.setter
-    def models(self, value):
-        self._models = value
-
     def unload(self) -> None:
         """
         Unload all submodels from GPU memory to free up resources.
@@ -245,53 +210,6 @@ class DEPPOModel(BaseModel):
         self.epochs_per_model = [0] * self._num_models
 
         logger.info("All submodels unloaded from GPU memory")
-
-    def save(self) -> None:
-        """Save all ensemble models to Hub."""
-        for i in range(len(self.models)):
-            self._push_model(i)
-
-    def set_epoch(self, epoch: int, model_idx: Optional[int] = None) -> None:
-        """Set trained epoch for a model."""
-        if model_idx is not None:
-            self.epochs_per_model[model_idx] = epoch
-        else:
-            self.epochs_per_model = [epoch] * self._num_models
-
-    def get_epoch(self, model_idx: int = 0) -> int:
-        """Get trained epoch for a model."""
-        return self.epochs_per_model[model_idx] or 0
-
-    def _push_model(self, model_idx: int, epochs: Optional[int] = None) -> None:
-        """
-        Push single model to hub.
-        """
-        self.checkpoint_manager.push_model(
-            model=self.models[model_idx],
-            model_name=self.get_name(model_idx=model_idx),
-            tokenizer=self.tokenizer,
-            epochs=epochs,
-        )
-
-    def get_tokenizer(self) -> PreTrainedTokenizerBase:
-        return self._tokenizer
-
-    def can_load_from_epoch(self, epoch: int) -> bool:
-        """
-        Check if all submodels have checkpoints at the specified epoch.
-
-        Args:
-            epoch: The epoch number to check.
-
-        Returns:
-            True if all submodels have checkpoints at the specified epoch,
-            False otherwise.
-        """
-        for model_idx in range(self._num_models):
-            submodel_name = self.get_name(model_idx=model_idx)
-            if not self._hub_manager.model_exists(submodel_name, epoch):
-                return False
-        return True
 
     def load_from_epoch(self, epoch: int) -> None:
         """
@@ -324,15 +242,22 @@ class DEPPOModel(BaseModel):
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
 
-    def _get_base_model_name(self) -> str:
-        return self.model_id.rsplit("/", 1)[-1]
-
     def loss_fn(
         self,
         batch: Dict[str, torch.Tensor],
         model: PeftModel,
         device: torch.device,
     ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute DPO loss for the ensemble expert.
+
+        Args:
+            batch: Training batch.
+            model: Submodel (expert) to train.
+            device: Device to run computation on.
+
+        Returns:
+            Tuple of (loss, metrics).
+        """
         batch = {k: v.to(device) for k, v in batch.items()}
 
         chosen_ids = batch["chosen_input_ids"]
@@ -413,27 +338,42 @@ class DEPPOModel(BaseModel):
         device_attention_masks: list[torch.Tensor],
         **kwargs: Any,
     ) -> torch.Tensor:
+        """Pessimistic prediction across ensemble members.
+
+        Args:
+            device_input_ids: Input IDs per model.
+            device_attention_masks: Attention masks per model.
+
+        Returns:
+            Min log probs (B, V).
         """
-        Predict using device-resident tensors.
-        """
-        self._check_models_loaded()
+        if not self.is_loaded():
+            raise RuntimeError("Models not loaded. Call load() first.")
 
         if self.shared_backbone:
-            # Sequential Execution
+            # Sequential Execution for shared backbone
+            # The model should already be on a GPU before the generation loop.
+            # We don't acquire GPU here since this is called every token.
             model = self.models[0]
-            log_probs_list = []
+            device = model.device
 
-            for model_idx in range(self._num_models):
-                adapter_name = "default" if model_idx == 0 else f"adapter_{model_idx}"
-                model.set_adapter(adapter_name)
+            with torch.no_grad():
+                log_probs_list = []
 
-                # Full forward pass (no KV cache as requested for stability)
-                target_device = model.device
-                inp = device_input_ids[model_idx].to(target_device)
-                mask = device_attention_masks[model_idx].to(target_device)
+                for model_idx in range(self._num_models):
+                    adapter_name = (
+                        "default" if model_idx == 0 else f"adapter_{model_idx}"
+                    )
+                    model.set_adapter(adapter_name)
 
-                log_probs = get_next_token_log_probs(model, inp, mask)
-                log_probs_list.append(log_probs.cpu())  # Move to CPU for aggregation
+                    # Full forward pass (no KV cache as requested for stability)
+                    inp = device_input_ids[model_idx].to(device)
+                    mask = device_attention_masks[model_idx].to(device)
+
+                    log_probs = get_next_token_log_probs(model, inp, mask)
+                    log_probs_list.append(
+                        log_probs.cpu()
+                    )  # Move to CPU for aggregation
 
             log_probs_tensor = torch.stack(log_probs_list, dim=0)  # (L, B, V)
             min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
@@ -450,17 +390,32 @@ class DEPPOModel(BaseModel):
             attention_mask: torch.Tensor,
         ) -> None:
             try:
-                with torch.no_grad():
-                    model.eval()
-                    log_probs = get_next_token_log_probs(
-                        model, input_ids, attention_mask
-                    )
-                    log_probs_ensemble[model_idx] = log_probs
+                # Use semaphore to acquire a GPU
+                with self.device_manager.request_gpu() as device:
+                    with torch.no_grad():
+                        model.eval()
+                        # Ensure inputs are on the assigned device
+                        inp = input_ids.to(device)
+                        mask = attention_mask.to(device)
+
+                        # Ensure model is on the device (if not already)
+                        # Note: For generation, we assume models fit in VRAM.
+                        # Strict offloading per-token is too slow.
+                        if model.device != device:
+                            model.to(device)
+
+                        log_probs = get_next_token_log_probs(model, inp, mask)
+                        log_probs_ensemble[model_idx] = log_probs.cpu()
             except BaseException as e:
                 thread_exceptions[model_idx] = e
 
         threads = []
         for model_idx in range(self._num_models):
+            # We assume inputs are on CPU initially or we move them inside the thread
+            # To avoid pickling large tensors if they are on GPU, we pass them as is.
+            # But the caller of predict usually passes 'device_input_ids'.
+            # If they are already on GPU, passing to thread is fine (share memory).
+
             thread = threading.Thread(
                 target=predict_log_probs,
                 args=(

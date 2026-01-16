@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, cast
 
 if TYPE_CHECKING:
     from ..trainer import BaseTrainer
-    from ..utils import DeviceManager, HubManager
     from .config import BackboneConfig
 
 
@@ -23,14 +22,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from peft import LoraConfig, PeftModel
-from transformers import AutoConfig, AutoModel, PreTrainedModel, PreTrainedTokenizerBase
+from transformers import AutoConfig, AutoModel, PreTrainedModel
 
 from ..data import RewardDataCollator
 from ..data.annotators.reward import RewardAnnotator
 from ..loader import CheckpointManager
 from ..utils import get_device_manager, get_hub_manager
 from ..utils.model_utils import get_log_probs, get_next_token_log_probs
-from .base import BaseModel
+from .base import EnsembleModel, SingleModel
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +67,7 @@ class RewardHead(nn.Module):
         return self.linear(last_hidden).squeeze(-1)
 
 
-class REPPORewardModel(BaseModel):
+class REPPORewardModel(EnsembleModel):
     """Ensemble of L reward models: base LLM + LoRA + RewardHead.
 
     Each reward model shares the base LLM architecture but has:
@@ -86,27 +85,36 @@ class REPPORewardModel(BaseModel):
         debug: bool = False,
         **kwargs: Any,
     ):
-        """Initialize REPPO Reward Model ensemble.
+        """Initialize REPPO Reward Model ensemble."""
+        device_manager = get_device_manager()
+        hub_manager = get_hub_manager()
 
-        Args:
-            num_networks: Number of reward models (L).
-            backbone: Configuration for the backbone model.
-            trainer: Trainer configuration.
-            debug: Debug mode.
-        """
-        self._num_models = num_networks
-        self.model_id = backbone.model_id
-        self._device_manager = get_device_manager()
-        self._hub_manager = get_hub_manager()
+        checkpoint_manager = CheckpointManager(
+            device_manager=device_manager,
+            hub_manager=hub_manager,
+            compile_model=backbone.compile,
+        )
+
+        tokenizer = checkpoint_manager.load_tokenizer(
+            model_id=backbone.model_id,
+            tokenizer_id=backbone.tokenizer_id,
+            chat_template=backbone.chat_template,
+        )
+
+        super().__init__(
+            num_models=num_networks,
+            model_id=backbone.model_id,
+            device_manager=device_manager,
+            hub_manager=hub_manager,
+            checkpoint_manager=checkpoint_manager,
+            tokenizer=tokenizer,
+            trainer=trainer,
+        )
+
         self.tokenizer_id = backbone.tokenizer_id
         self.chat_template = backbone.chat_template
         self.debug = debug
-
-        self._checkpoint_manager = CheckpointManager(
-            device_manager=self._device_manager,
-            hub_manager=self._hub_manager,
-            compile_model=backbone.compile,
-        )
+        self._models_lock = threading.Lock()
 
         self.lora_config = LoraConfig(
             r=backbone.lora_r,
@@ -118,16 +126,6 @@ class REPPORewardModel(BaseModel):
             modules_to_save=["reward_head"],
         )
 
-        self._tokenizer = self.checkpoint_manager.load_tokenizer(
-            model_id=backbone.model_id,
-            tokenizer_id=backbone.tokenizer_id,
-            chat_template=backbone.chat_template,
-        )
-        self._models: list[PeftModel] | None = None
-        self._models_lock = threading.Lock()
-        self.epochs_per_model: list[Optional[int]] = [0] * self._num_models
-        self.trainer = trainer
-
         logger.info(
             f"REPPORewardModel initialized with L={self._num_models}, "
             f"model_id={self.model_id}"
@@ -136,27 +134,15 @@ class REPPORewardModel(BaseModel):
     @property
     def reward_heads(self) -> list[RewardHead]:
         """List of reward heads (extracted from PeftModels)."""
-        if self._models is None:
+        if not self.is_loaded():
             raise RuntimeError("Models not loaded. Call load() first.")
+        assert self._models is not None  # for type narrowing
         heads = []
         for model in self._models:
             if not hasattr(model, "reward_head"):
                 raise AttributeError("Model missing 'reward_head' attribute")
             heads.append(model.reward_head)
         return heads
-
-    @property
-    def num_models(self) -> int:
-        """Number of reward models in the ensemble."""
-        return self._num_models
-
-    @property
-    def device_manager(self) -> DeviceManager:
-        return self._device_manager
-
-    @property
-    def hub_manager(self) -> HubManager:
-        return self._hub_manager
 
     def load(
         self, init_new: bool = False, epoch: Optional[int] = None, **kwargs: Any
@@ -213,35 +199,6 @@ class REPPORewardModel(BaseModel):
         self.epochs_per_model = [0] * self._num_models
         logger.info("All submodels unloaded from GPU memory")
 
-    def save(self) -> None:
-        """Save all ensemble models to Hub."""
-        for i in range(self._num_models):
-            self._push_model(i)
-
-    def set_epoch(self, epoch: int, model_idx: Optional[int] = None) -> None:
-        """Set trained epoch for a model."""
-        if model_idx is not None:
-            self.epochs_per_model[model_idx] = epoch
-        else:
-            self.epochs_per_model = [epoch] * self._num_models
-
-    def get_epoch(self, model_idx: int = 0) -> int:
-        """Get trained epoch for a model."""
-        return self.epochs_per_model[model_idx] or 0
-
-    def _push_model(self, model_idx: int, epochs: Optional[int] = None) -> None:
-        """Push single model to hub."""
-        self.checkpoint_manager.push_model(
-            model=self.models[model_idx],
-            model_name=self.get_name(model_idx=model_idx),
-            tokenizer=self.tokenizer,
-            epochs=epochs,
-        )
-
-    @property
-    def tokenizer(self) -> PreTrainedTokenizerBase:
-        return self._tokenizer
-
     @property
     def models(self) -> list[PeftModel]:
         if self._models is None:
@@ -286,7 +243,16 @@ class REPPORewardModel(BaseModel):
         model: PeftModel,
         device: torch.device,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Bradley-Terry loss for preference learning."""
+        """Bradley-Terry loss for preference learning.
+
+        Args:
+            batch: Training batch.
+            model: Submodel to train.
+            device: Device to run computation on.
+
+        Returns:
+            Tuple of (loss, metrics).
+        """
         model_idx = self.models.index(model)
         reward_head = self.reward_heads[model_idx]
 
@@ -330,16 +296,6 @@ class REPPORewardModel(BaseModel):
         if epoch is not None:
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
-
-    def _get_base_model_name(self) -> str:
-        return self.model_id.rsplit("/", 1)[-1]
-
-    def can_load_from_epoch(self, epoch: int) -> bool:
-        for model_idx in range(self._num_models):
-            submodel_name = self.get_name(model_idx=model_idx)
-            if not self._hub_manager.model_exists(submodel_name, epoch):
-                return False
-        return True
 
     def load_from_epoch(self, epoch: int) -> None:
         if self._models is not None:
@@ -391,7 +347,7 @@ class REPPORewardModel(BaseModel):
         raise NotImplementedError("Predict not implemented for Reward Model")
 
 
-class REPPOModel(BaseModel):
+class REPPOModel(SingleModel):
     """REPPO Policy Model (Orchestrator).
 
     This model acts as the Policy Model for RLHF, but also manages a
@@ -414,32 +370,35 @@ class REPPOModel(BaseModel):
         **kwargs: Any,
     ):
         """Initialize REPPO Model (Policy)."""
-        self.model_id = backbone.model_id
-        self._device_manager = get_device_manager()
-        self._hub_manager = get_hub_manager()
-        # Unused Phase 2 attributes (kept for config compatibility)
-        self.generator = generator
-        self.beta = beta
-        self.debug = debug
-        self._num_models = 1
-        self._force_annotation = force_annotation
+        device_manager = get_device_manager()
+        hub_manager = get_hub_manager()
 
-        self.reward_model = reward_model
-
-        # Access reward trainer from the instantiated reward model
-        self._reward_trainer = reward_model.trainer
-
-        self._policy_trainer = trainer
-
-        # We set self._trainer to policy trainer to satisfy generic checks relying
-        # on model.trainer
-        self._trainer = self._policy_trainer
-
-        self._checkpoint_manager = CheckpointManager(
-            device_manager=self._device_manager,
-            hub_manager=self._hub_manager,
+        checkpoint_manager = CheckpointManager(
+            device_manager=device_manager,
+            hub_manager=hub_manager,
             compile_model=backbone.compile,
         )
+
+        tokenizer = checkpoint_manager.load_tokenizer(
+            model_id=backbone.model_id,
+            tokenizer_id=backbone.tokenizer_id,
+            chat_template=backbone.chat_template,
+        )
+
+        super().__init__(
+            model_id=backbone.model_id,
+            device_manager=device_manager,
+            hub_manager=hub_manager,
+            checkpoint_manager=checkpoint_manager,
+            tokenizer=tokenizer,
+            trainer=trainer,
+            generator=generator,
+        )
+
+        self.beta = beta
+        self.debug = debug
+        self._force_annotation = force_annotation
+        self.reward_model = reward_model
 
         self.lora_config = LoraConfig(
             r=backbone.lora_r,
@@ -450,46 +409,19 @@ class REPPOModel(BaseModel):
             target_modules=backbone.lora_target_modules,
         )
 
-        self._tokenizer = self.checkpoint_manager.load_tokenizer(
-            model_id=backbone.model_id,
-            tokenizer_id=backbone.tokenizer_id,
-            chat_template=backbone.chat_template,
-        )
-        self._models: list[PeftModel] | None = None
-        self._epoch: int = 0
-
         logger.info(
             f"REPPOModel initialized as Policy ({self.model_id}) "
             f"with helper Reward Model (L={self.reward_model._num_models})"
         )
 
-    @property
-    def tokenizer(self) -> PreTrainedTokenizerBase:
-        return self._tokenizer
-
-    @property
-    def device_manager(self) -> DeviceManager:
-        return self._device_manager
-
-    @property
-    def hub_manager(self) -> HubManager:
-        return self._hub_manager
-
-    @property
-    def policy(self) -> PeftModel:
-        """Alias for the single policy model."""
-        if self._models is None or len(self._models) == 0:
-            raise RuntimeError("Policy not loaded. Call load() first.")
-        return self._models[0]
-
     def load(
         self, init_new: bool = False, epoch: Optional[int] = None, **kwargs: Any
     ) -> None:
         """Load Policy Model (self) AND Reward Model (optionally)."""
-        if self._models is not None:
+        if self._model is not None:
             return
 
-        model = self.checkpoint_manager.load_model(
+        self._model = self.checkpoint_manager.load_model(
             model_id=self.model_id,
             model_name=self.get_name(),
             model_idx=0,
@@ -497,7 +429,6 @@ class REPPOModel(BaseModel):
             init_new=init_new,
             epoch=epoch,
         )
-        self._models = [model]
         if epoch is not None:
             self._epoch = epoch
         logger.info("Loaded REPPO Policy model")
@@ -506,12 +437,10 @@ class REPPOModel(BaseModel):
         """Unload Policy Model (self) AND Reward Model (helper)."""
         self.reward_model.unload()
 
-        if not self._models:
+        if self._model is None:
             return
-        for model in self._models:
-            del model
-        self._models = None
-        self._ref_policy = None
+        del self._model
+        self._model = None
         self._device_manager.clear_cache()
         self._epoch = 0
 
@@ -536,34 +465,19 @@ class REPPOModel(BaseModel):
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
 
-    def _get_base_model_name(self) -> str:
-        return self.model_id.rsplit("/", 1)[-1]
-
-    def can_load_from_epoch(self, epoch: int) -> bool:
-        return self._hub_manager.model_exists(self.get_name(), epoch)
-
     def load_from_epoch(self, epoch: int) -> None:
-        if self._models is not None:
-            # Partial unload if needed, or just rely on load handling it
-            pass
+        if self._model is not None:
+            self.unload()
         self.load(init_new=False, epoch=epoch)
 
     def save(self) -> None:
         """Save policy model to Hub."""
         self.checkpoint_manager.push_model(
-            model=self.policy,
+            model=self.model,
             model_name=self.get_name(),
             tokenizer=self.tokenizer,
             epochs=self._epoch,
         )
-
-    def set_epoch(self, epoch: int, model_idx: Optional[int] = None) -> None:
-        """Set trained epoch for policy (model_idx ignored)."""
-        self._epoch = epoch
-
-    def get_epoch(self, model_idx: int = 0) -> int:
-        """Get trained epoch for policy (model_idx ignored)."""
-        return self._epoch
 
     def train(
         self,
@@ -628,6 +542,16 @@ class REPPOModel(BaseModel):
         model: torch.nn.Module,
         device: torch.device,
     ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute RLHF loss for the policy.
+
+        Args:
+            batch: Training batch.
+            model: Policy model to train.
+            device: Device to run computation on.
+
+        Returns:
+            Tuple of (loss, metrics).
+        """
         c_p = batch["chosen_input_ids"].to(device)
         c_m = batch["chosen_attention_mask"].to(device)
         c_r = batch["chosen_response_mask"].to(device)
@@ -678,12 +602,16 @@ class REPPOModel(BaseModel):
     ) -> torch.Tensor:
         """Inference prediction using the single policy model.
 
-        Note: device_input_ids and device_attention_masks are lists of length 1,
-        as REPPO has only one policy model (hardcoded L=1).
+        Args:
+            device_input_ids: Input IDs (list of length 1).
+            device_attention_masks: Attention masks (list of length 1).
+
+        Returns:
+            Log probs for the next token (B, V).
         """
-        if self._models is None:
+        if self._model is None:
             raise RuntimeError(
-                "Models are not loaded. Call model.load() before using the model."
+                "Model not loaded. Call model.load() before using the model."
             )
 
         if len(device_input_ids) != 1 or len(device_attention_masks) != 1:
@@ -693,9 +621,9 @@ class REPPOModel(BaseModel):
             )
 
         with torch.no_grad():
-            self.policy.eval()
+            self._model.eval()
             log_probs = get_next_token_log_probs(
-                self.policy,
+                self._model,
                 device_input_ids[0],
                 device_attention_masks[0],
             )
