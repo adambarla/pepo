@@ -137,6 +137,15 @@ class SingleModelTrainer(BaseTrainer):
                 wandb_run=wandb_run,
             )
 
+        # Push epoch 0 checkpoint (baseline before training)
+        if model.checkpoint_manager:
+            model.checkpoint_manager.push_model(
+                model=model.model,
+                model_name=model.get_name(),
+                tokenizer=model.tokenizer,
+                epochs=0,
+            )
+
         logger.info(f"Starting single model training for {max_epochs} epochs")
 
         patience_counter = 0
