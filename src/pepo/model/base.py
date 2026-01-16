@@ -116,10 +116,6 @@ class BaseModel(ABC):
         """Check if model can be loaded from epoch."""
 
     @abstractmethod
-    def load_from_epoch(self, epoch: int) -> None:
-        """Load model from epoch."""
-
-    @abstractmethod
     def save(self) -> None:
         """Save all models to storage."""
 

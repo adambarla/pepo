@@ -207,7 +207,7 @@ class REPPORewardModel(EnsembleModel):
                 if self._models is None:
                     logger.info("Lazy loading models from current epoch state.")
                     epoch = self.get_epoch(0)
-                    self.load_from_epoch(epoch)
+                    self.load(epoch=epoch)
 
         if self._models is None:
             raise RuntimeError("Failed to lazy load models.")
@@ -296,11 +296,6 @@ class REPPORewardModel(EnsembleModel):
         if epoch is not None:
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
-
-    def load_from_epoch(self, epoch: int) -> None:
-        if self._models is not None:
-            self.unload()
-        self.load(init_new=False, epoch=epoch)
 
     def train(
         self,
@@ -419,7 +414,7 @@ class REPPOModel(SingleModel):
     ) -> None:
         """Load Policy Model (self) AND Reward Model (optionally)."""
         if self._model is not None:
-            return
+            self.unload()
 
         self._model = self.checkpoint_manager.load_model(
             model_id=self.model_id,
@@ -464,11 +459,6 @@ class REPPOModel(SingleModel):
         if epoch is not None:
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
-
-    def load_from_epoch(self, epoch: int) -> None:
-        if self._model is not None:
-            self.unload()
-        self.load(init_new=False, epoch=epoch)
 
     def save(self) -> None:
         """Save policy model to Hub."""

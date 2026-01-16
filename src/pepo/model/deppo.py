@@ -133,10 +133,8 @@ class DEPPOModel(EnsembleModel):
             epoch: If provided, load models from this epoch checkpoint.
         """
         if self._models is not None:
-            logger.warning(
-                "Models are already loaded. Unload them first if you want to reload."
-            )
-            return
+            self.unload()
+
         self._models = self._load_models(init_new=init_new, epoch=epoch)
         if epoch is not None:
             self.epochs_per_model = [epoch] * self._num_models
@@ -210,22 +208,6 @@ class DEPPOModel(EnsembleModel):
         self.epochs_per_model = [0] * self._num_models
 
         logger.info("All submodels unloaded from GPU memory")
-
-    def load_from_epoch(self, epoch: int) -> None:
-        """
-        Load models from a specific epoch checkpoint.
-
-        Args:
-            epoch: The epoch number to load from.
-        """
-        logger.info(f"Loading models from epoch {epoch} checkpoint...")
-
-        if self._models is not None:
-            logger.info("Unloading existing models before loading from checkpoint...")
-            self.unload()
-        self.load(init_new=False, epoch=epoch)
-
-        logger.info(f"Successfully loaded models from epoch {epoch} checkpoint")
 
     def get_name(
         self,

@@ -119,7 +119,7 @@ class EnsembleTrainer(BaseTrainer):
                     logger.info(
                         f"Continuing training from checkpoint: epoch {latest_epoch}"
                     )
-                    self.model.load_from_epoch(latest_epoch)
+                    self.model.load(epoch=latest_epoch)
                 else:
                     logger.warning(
                         f"Continue training enabled but cannot load from "

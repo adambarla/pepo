@@ -130,10 +130,7 @@ class CHIPPOModel(SingleModel):
             epoch: If provided, load model from this epoch checkpoint.
         """
         if self._model is not None:
-            logger.warning(
-                "Model is already loaded. Unload first if you want to reload."
-            )
-            return
+            self.unload()
 
         self._model = self.checkpoint_manager.load_model(
             model_id=self.model_id,
@@ -169,21 +166,6 @@ class CHIPPOModel(SingleModel):
             tokenizer=self.tokenizer,
             epochs=self._epoch,
         )
-
-    def load_from_epoch(self, epoch: int) -> None:
-        """Load model from a specific epoch checkpoint.
-
-        Args:
-            epoch: The epoch number to load from.
-        """
-        logger.info(f"Loading model from epoch {epoch} checkpoint...")
-
-        if self._model is not None:
-            logger.info("Unloading existing model before loading from checkpoint...")
-            self.unload()
-        self.load(init_new=False, epoch=epoch)
-
-        logger.info(f"Successfully loaded model from epoch {epoch} checkpoint")
 
     def get_name(
         self,
