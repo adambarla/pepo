@@ -16,9 +16,7 @@ from ..utils.device import move_to_device
 from .base import BaseTrainer
 
 if TYPE_CHECKING:
-    from ..model import BaseModel
-
-from ..model import EnsembleModel
+    from ..model import BaseModel, EnsembleModel
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +31,7 @@ class EnsembleTrainer(BaseTrainer):
         super().__init__(**kwargs)
         self.optimizers: list[torch.optim.Optimizer] = []
         self.schedulers: list[torch.optim.lr_scheduler.LRScheduler] = []
-        self.model: EnsembleModel  # Set in train()
+        self.model: "EnsembleModel"  # Set in train()
 
     def _setup_training(
         self,
@@ -90,6 +88,8 @@ class EnsembleTrainer(BaseTrainer):
         """
         Train the ensemble models using threading for parallel GPU operation.
         """
+        from ..model import EnsembleModel
+
         if not isinstance(model, EnsembleModel):
             raise TypeError(
                 f"EnsembleTrainer requires EnsembleModel, got {type(model).__name__}"

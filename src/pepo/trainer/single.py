@@ -14,9 +14,7 @@ from ..utils.device import move_to_device
 from .base import BaseTrainer
 
 if TYPE_CHECKING:
-    from ..model import BaseModel
-
-from ..model import SingleModel
+    from ..model import BaseModel, SingleModel
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +28,11 @@ class SingleModelTrainer(BaseTrainer):
         super().__init__(**kwargs)
         self.optimizer: Optional[torch.optim.Optimizer] = None
         self.scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None
-        self.model: SingleModel  # Set in train()
+        self.model: "SingleModel"  # Set in train()
 
     def _setup_training(
         self,
-        model: SingleModel,
+        model: "SingleModel",
         data_manager: DataManager,
         max_epochs: int,
         wandb_manager: Optional[WandbManager] = None,
@@ -84,6 +82,8 @@ class SingleModelTrainer(BaseTrainer):
         **kwargs: Any,
     ) -> None:
         """Sequential training loop."""
+        from ..model import SingleModel
+
         if not isinstance(model, SingleModel):
             raise TypeError(
                 f"SingleModelTrainer requires SingleModel, got {type(model).__name__}"
@@ -224,7 +224,7 @@ class SingleModelTrainer(BaseTrainer):
 
     def _eval_epoch(
         self,
-        model: SingleModel,
+        model: "SingleModel",
         eval_loader: DataLoader[dict[str, torch.Tensor]],
         device: torch.device,
         epoch: int,
@@ -271,7 +271,7 @@ class SingleModelTrainer(BaseTrainer):
 
     def _train_epoch(
         self,
-        model: SingleModel,
+        model: "SingleModel",
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler.LRScheduler,
         train_loader: DataLoader[dict[str, torch.Tensor]],

@@ -101,11 +101,12 @@ class EnsembleModel(BaseModel):
         device: torch.device,
         past_key_values: Optional[Any] = None,
         use_cache: bool = True,
+        model_indices: Optional[list[int]] = None,
     ) -> tuple[torch.Tensor, list[Any]]:
         """Single-token prediction for ensemble using shared backbone.
 
         Uses adapter switching to get predictions from each submodel sequentially,
-        then returns the minimum log probabilities across all models.
+        then returns the minimum log probabilities across specified models.
 
         Args:
             input_ids: Input token IDs (B, T) on CPU.
@@ -113,6 +114,8 @@ class EnsembleModel(BaseModel):
             device: Device the model is on.
             past_key_values: List of past_key_values for each model.
             use_cache: Whether to use KV caching.
+            model_indices: Which models to use. None = all models (pessimistic).
+                [0] = first model only (proposal mode).
 
         Returns:
             Tuple of (Min log probs (B, V) on CPU, updated past_key_values_list).
@@ -127,14 +130,22 @@ class EnsembleModel(BaseModel):
         model = self.models[0]
         new_past_key_values_list: list[Any] = []
 
+        # Determine which models to use
+        indices = (
+            model_indices
+            if model_indices is not None
+            else list(range(self._num_models))
+        )
+
         with torch.no_grad():
             log_probs_list = []
             inp = input_ids.to(device)
             mask = attention_mask.to(device)
 
-            for model_idx in range(self._num_models):
+            for model_idx in indices:
                 adapter_name = "default" if model_idx == 0 else f"adapter_{model_idx}"
-                model.set_adapter(adapter_name)
+                if model.active_adapter != adapter_name:
+                    model.set_adapter(adapter_name)
 
                 past_kv = (
                     past_key_values_list[model_idx]
@@ -149,7 +160,7 @@ class EnsembleModel(BaseModel):
                     past_key_values=past_kv,
                     use_cache=use_cache,
                 )
-                log_probs_list.append(log_probs.cpu())
+                log_probs_list.append(log_probs)
                 new_past_key_values_list.append(new_past)
 
         log_probs_tensor = torch.stack(log_probs_list, dim=0)  # (L, B, V)
@@ -166,6 +177,7 @@ class EnsembleModel(BaseModel):
         top_p: float = 0.9,
         token_callback: Optional[Callable[[str], None]] = None,
         use_cache: bool = True,
+        model_indices: Optional[list[int]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Generate tokens using ensemble prediction.
 
@@ -178,6 +190,8 @@ class EnsembleModel(BaseModel):
             top_p: Top-p nucleus sampling threshold.
             token_callback: Optional callback for streaming tokens.
             use_cache: Whether to use KV caching.
+            model_indices: Which models to use. None = all models (pessimistic).
+                [0] = first model only (proposal mode).
 
         Returns:
             Tuple of (output_ids, output_mask) on CPU.
@@ -205,6 +219,7 @@ class EnsembleModel(BaseModel):
                             device,
                             past_key_values_list,
                             use_cache=use_cache,
+                            model_indices=model_indices,
                         )
                         input_ids, attention_mask, stop_signal = self._generation_step(
                             log_probs,
@@ -247,6 +262,8 @@ class EnsembleModel(BaseModel):
             sampled_token_ids = torch.argmax(log_probs, dim=-1)
         else:
             sampled_token_ids = top_p_sample(log_probs, temperature, top_p)
+
+        sampled_token_ids = sampled_token_ids.cpu()
 
         stop_signal = stop_signal | (sampled_token_ids == self._tokenizer.eos_token_id)
 

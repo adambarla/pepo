@@ -4,17 +4,18 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 import torch
-import torch.nn.functional as F
+
+from .base import BaseGenerator
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
-    from .model import BaseModel
+    from ..model import BaseModel
 
 logger = logging.getLogger(__name__)
 
 
-class Generator:
+class Generator(BaseGenerator):
     """Simple generator class for producing model responses from instructions."""
 
     def __init__(
@@ -106,26 +107,6 @@ class Generator:
         formatted_prompts = [p[1] for p in processed]
 
         return original_prompts, formatted_prompts
-
-    def _top_p_sample(self, logits: torch.Tensor) -> torch.Tensor:
-        """Sample from logits using top-p (nucleus) sampling."""
-        scaled_logits = logits / self.temperature
-        probs = F.softmax(scaled_logits, dim=-1)
-
-        sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
-        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-
-        sorted_indices_to_remove = cumulative_probs > self.top_p
-        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-        sorted_indices_to_remove[..., 0] = 0
-
-        indices_to_remove = sorted_indices_to_remove.scatter(
-            1, sorted_indices, sorted_indices_to_remove
-        )
-        logits[indices_to_remove] = float("-inf")
-        filtered_probs = F.softmax(logits, dim=-1)
-        sampled_indices = torch.multinomial(filtered_probs, num_samples=1).squeeze(-1)
-        return sampled_indices
 
     def generate(
         self,
