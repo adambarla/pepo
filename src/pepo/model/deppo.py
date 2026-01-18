@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import threading
 from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, cast
 
 if TYPE_CHECKING:
@@ -18,7 +17,7 @@ from ..generator import Generator
 from ..loader import CheckpointManager
 from ..trainer import EnsembleTrainer
 from ..utils import get_device_manager, get_hub_manager
-from ..utils.model_utils import get_log_probs, get_next_token_log_probs
+from ..utils.model_utils import get_log_probs
 from .base import EnsembleModel
 
 logger = logging.getLogger(__name__)
@@ -39,7 +38,7 @@ class DEPPOModel(EnsembleModel):
         trainer: Optional[EnsembleTrainer] = None,
         generator: Optional[Generator] = None,
         debug: bool = False,
-        shared_backbone: bool = False,
+        shared_backbone: bool = True,
         **kwargs: Any,
     ):
         """Initialize DEPPO Model."""
@@ -74,7 +73,7 @@ class DEPPOModel(EnsembleModel):
         self.tokenizer_id = backbone.tokenizer_id
         self.chat_template = backbone.chat_template
         self.debug = debug
-        self.shared_backbone = shared_backbone
+        self._shared_backbone = shared_backbone
         self.compile_model = backbone.compile
 
         self.lora_config = LoraConfig(
@@ -90,6 +89,11 @@ class DEPPOModel(EnsembleModel):
             f"DEPPOModel initialized with alpha={self.alpha}, "
             f"beta={self.beta}, L={self._num_models}"
         )
+
+    @property
+    def shared_backbone(self) -> bool:
+        """Whether ensemble uses shared backbone."""
+        return self._shared_backbone
 
     def train(
         self,
@@ -132,7 +136,7 @@ class DEPPOModel(EnsembleModel):
             init_new: If True, initialize new models instead of loading from hub.
             epoch: If provided, load models from this epoch checkpoint.
         """
-        if self._models is not None:
+        if self.is_loaded():
             self.unload()
 
         self._models = self._load_models(init_new=init_new, epoch=epoch)
@@ -194,13 +198,12 @@ class DEPPOModel(EnsembleModel):
         """
         Unload all submodels from GPU memory to free up resources.
         """
-        if not self._models:
-            logger.info("Models are already unloaded")
-            return
+        if not self.is_loaded():
+            raise RuntimeError("Model not loaded. Call load() first.")
 
-        logger.info(f"Unloading {len(self._models)} submodels from GPU memory...")
+        logger.info(f"Unloading {len(self.models)} submodels from GPU memory...")
 
-        for model in self._models:
+        for model in self.models:
             del model
 
         self._models = None
@@ -313,129 +316,3 @@ class DEPPOModel(EnsembleModel):
             }
 
         return loss, metrics
-
-    def predict(
-        self,
-        device_input_ids: list[torch.Tensor],
-        device_attention_masks: list[torch.Tensor],
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        """Pessimistic prediction across ensemble members.
-
-        Args:
-            device_input_ids: Input IDs per model.
-            device_attention_masks: Attention masks per model.
-
-        Returns:
-            Min log probs (B, V).
-        """
-        if not self.is_loaded():
-            raise RuntimeError("Models not loaded. Call load() first.")
-
-        if self.shared_backbone:
-            # Sequential Execution for shared backbone
-            # The model should already be on a GPU before the generation loop.
-            # We don't acquire GPU here since this is called every token.
-            model = self.models[0]
-            device = model.device
-
-            with torch.no_grad():
-                log_probs_list = []
-
-                for model_idx in range(self._num_models):
-                    adapter_name = (
-                        "default" if model_idx == 0 else f"adapter_{model_idx}"
-                    )
-                    model.set_adapter(adapter_name)
-
-                    # Full forward pass (no KV cache as requested for stability)
-                    inp = device_input_ids[model_idx].to(device)
-                    mask = device_attention_masks[model_idx].to(device)
-
-                    log_probs = get_next_token_log_probs(model, inp, mask)
-                    log_probs_list.append(
-                        log_probs.cpu()
-                    )  # Move to CPU for aggregation
-
-            log_probs_tensor = torch.stack(log_probs_list, dim=0)  # (L, B, V)
-            min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
-            return min_log_probs
-
-        # Parallel Execution (Separate Models)
-        log_probs_ensemble: list[Optional[torch.Tensor]] = [None] * self._num_models
-        thread_exceptions: list[Optional[BaseException]] = [None] * self._num_models
-
-        def predict_log_probs(
-            model_idx: int,
-            model: PeftModel,
-            input_ids: torch.Tensor,
-            attention_mask: torch.Tensor,
-        ) -> None:
-            try:
-                # Use semaphore to acquire a GPU
-                with self.device_manager.request_gpu() as device:
-                    with torch.no_grad():
-                        model.eval()
-                        # Ensure inputs are on the assigned device
-                        inp = input_ids.to(device)
-                        mask = attention_mask.to(device)
-
-                        # Ensure model is on the device (if not already)
-                        # Note: For generation, we assume models fit in VRAM.
-                        # Strict offloading per-token is too slow.
-                        if model.device != device:
-                            model.to(device)
-
-                        log_probs = get_next_token_log_probs(model, inp, mask)
-                        log_probs_ensemble[model_idx] = log_probs.cpu()
-            except BaseException as e:
-                thread_exceptions[model_idx] = e
-
-        threads = []
-        for model_idx in range(self._num_models):
-            # We assume inputs are on CPU initially or we move them inside the thread
-            # To avoid pickling large tensors if they are on GPU, we pass them as is.
-            # But the caller of predict usually passes 'device_input_ids'.
-            # If they are already on GPU, passing to thread is fine (share memory).
-
-            thread = threading.Thread(
-                target=predict_log_probs,
-                args=(
-                    model_idx,
-                    self.models[model_idx],
-                    device_input_ids[model_idx],
-                    device_attention_masks[model_idx],
-                ),
-            )
-            thread.start()
-            threads.append(thread)
-
-        for thread in threads:
-            thread.join()
-
-        # Propagate any thread exceptions to main thread
-        for model_idx, exc in enumerate(thread_exceptions):
-            if exc is not None:
-                raise RuntimeError(
-                    f"Exception in submodel {model_idx} prediction"
-                ) from exc
-
-        if len(log_probs_ensemble) != self._num_models:
-            raise RuntimeError(
-                f"Expected {self._num_models} log prob tensors, "
-                f"got {len(log_probs_ensemble)}"
-            )
-        if len(log_probs_ensemble) == 1:
-            result = log_probs_ensemble[0]
-            if result is None:
-                raise RuntimeError("Unexpected None in log_probs_ensemble")
-            return result
-
-        log_probs_ensemble_filtered = [
-            log_probs.cpu() for log_probs in log_probs_ensemble if log_probs is not None
-        ]
-        log_probs_tensor: torch.Tensor = torch.stack(
-            log_probs_ensemble_filtered, dim=0
-        )  # (L, B, V)
-        min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
-        return min_log_probs

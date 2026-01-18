@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 import torch
 from peft import PeftModel
+from tqdm import tqdm
 from transformers import PreTrainedTokenizerBase
+
+from ..utils.model_utils import get_next_token_log_probs, top_p_sample
 
 if TYPE_CHECKING:
     from ..generator import Generator
@@ -97,18 +101,51 @@ class BaseModel(ABC):
     @abstractmethod
     def predict(
         self,
-        device_input_ids: list[torch.Tensor],
-        device_attention_masks: list[torch.Tensor],
-        **kwargs: Any,
-    ) -> Any:
-        """Inference prediction.
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        device: torch.device,
+        past_key_values: Optional[Any] = None,
+        use_cache: bool = False,
+    ) -> tuple[torch.Tensor, Optional[Any]]:
+        """Single-token prediction.
 
         Args:
-            device_input_ids: Input IDs per device/model.
-            device_attention_masks: Attention masks per device/model.
+            input_ids: Input token IDs (B, T) on CPU.
+            attention_mask: Attention mask (B, T) on CPU.
+            device: Device the model is on.
+            past_key_values: Optional key values for caching.
+            use_cache: Whether to use KV caching.
 
         Returns:
-            Aggregated predictions (e.g., min log probs for DEPPO).
+            Tuple of (Log probs for next token (B, V) on CPU, past_key_values).
+        """
+
+    @abstractmethod
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        max_new_tokens: int,
+        greedy_sampling: bool = True,
+        temperature: float = 1.0,
+        top_p: float = 0.9,
+        token_callback: Optional[Callable[[str], None]] = None,
+        use_cache: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Generate tokens.
+
+        Args:
+            input_ids: Input token IDs (B, T) on CPU.
+            attention_mask: Attention mask (B, T) on CPU.
+            max_new_tokens: Maximum tokens to generate.
+            greedy_sampling: If True, use argmax. If False, use top-p.
+            temperature: Sampling temperature.
+            top_p: Top-p nucleus sampling threshold.
+            token_callback: Optional callback for streaming tokens.
+            use_cache: Whether to use KV caching.
+
+        Returns:
+            Tuple of (output_ids, output_mask) on CPU.
         """
 
     @abstractmethod
@@ -317,6 +354,210 @@ class EnsembleModel(BaseModel):
                 tokenizer=self.tokenizer,
             )
 
+    @property
+    def shared_backbone(self) -> bool:
+        """Whether ensemble uses shared backbone. Override in subclass."""
+        return False
+
+    def _predict_shared(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        device: torch.device,
+        past_key_values_list: Optional[list[Any]] = None,
+        use_cache: bool = True,
+    ) -> tuple[torch.Tensor, list[Any]]:
+        """Sequential prediction using shared backbone with adapter switching.
+
+        Args:
+            input_ids: Input token IDs (B, T) on CPU.
+            attention_mask: Attention mask (B, T) on CPU.
+            device: Device the model is on.
+            past_key_values_list: List of past_key_values for each model.
+
+        Returns:
+            Tuple of (Min log probs (B, V) on CPU, updated past_key_values_list).
+        """
+
+        model = self.models[0]
+        new_past_key_values_list = []
+
+        with torch.no_grad():
+            log_probs_list = []
+            inp = input_ids.to(device)
+            mask = attention_mask.to(device)
+
+            for model_idx in range(self._num_models):
+                adapter_name = "default" if model_idx == 0 else f"adapter_{model_idx}"
+                model.set_adapter(adapter_name)
+
+                past_key_values = (
+                    past_key_values_list[model_idx]
+                    if past_key_values_list is not None
+                    else None
+                )
+
+                log_probs, new_past = get_next_token_log_probs(
+                    model,
+                    inp,
+                    mask,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                )
+                log_probs_list.append(log_probs.cpu())
+                new_past_key_values_list.append(new_past)
+
+        log_probs_tensor = torch.stack(log_probs_list, dim=0)  # (L, B, V)
+        min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
+        return min_log_probs, new_past_key_values_list
+
+    def predict(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        device: torch.device,
+        past_key_values: Optional[Any] = None,
+        use_cache: bool = True,
+    ) -> tuple[torch.Tensor, Optional[Any]]:
+        """Single-token prediction for ensemble.
+
+        Args:
+            input_ids: Input token IDs (B, T) on CPU.
+            attention_mask: Attention mask (B, T) on CPU.
+            device: Device to use (used for shared backbone, ignored for parallel).
+            past_key_values: List of past_key_values for each model.
+            use_cache: Whether to use KV caching.
+
+        Returns:
+            Tuple of (min log probs, updated past_key_values_list).
+        """
+        # Ensure past_key_values is a list if provided
+        past_key_values_list = cast(Optional[list[Any]], past_key_values)
+
+        if not self.shared_backbone:
+            raise NotImplementedError(
+                "EnsembleModel.predict() is only supported for shared backbone models. "
+                "For parallel execution, implement manual parallelization."
+            )
+
+        return self._predict_shared(
+            input_ids,
+            attention_mask,
+            device,
+            past_key_values_list,
+            use_cache=use_cache,
+        )
+
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        max_new_tokens: int,
+        greedy_sampling: bool = True,
+        temperature: float = 1.0,
+        top_p: float = 0.9,
+        token_callback: Optional[Callable[[str], None]] = None,
+        use_cache: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Generate tokens using ensemble prediction.
+
+        Args:
+            input_ids: Input token IDs (B, T) on CPU.
+            attention_mask: Attention mask (B, T) on CPU.
+            max_new_tokens: Maximum tokens to generate.
+            greedy_sampling: If True, use argmax. If False, use top-p.
+            temperature: Sampling temperature.
+            top_p: Top-p nucleus sampling threshold.
+            token_callback: Optional callback for streaming tokens.
+            use_cache: Whether to use KV caching.
+
+        Returns:
+            Tuple of (output_ids, output_mask) on CPU.
+        """
+
+        batch_size = input_ids.shape[0]
+        stop_signal = torch.zeros(batch_size, dtype=torch.bool)
+        disable_tqdm = os.environ.get("TQDM_DISABLE", "0") == "1"
+        past_key_values_list: list[Any] = [None] * self._num_models
+
+        if self.shared_backbone:
+            # Shared backbone: hold GPU for entire generation
+            with self._device_manager.request_gpu() as device:
+                try:
+                    self.models[0].to(device)
+
+                    pbar = tqdm(range(max_new_tokens), disable=disable_tqdm)
+                    for i in pbar:
+                        if i > 0 and i % 100 == 0:
+                            self._device_manager.clear_cache()
+
+                        log_probs, past_key_values_list = self._predict_shared(
+                            input_ids,
+                            attention_mask,
+                            device,
+                            past_key_values_list,
+                            use_cache=use_cache,
+                        )
+                        input_ids, attention_mask, stop_signal = self._generation_step(
+                            log_probs,
+                            input_ids,
+                            attention_mask,
+                            stop_signal,
+                            greedy_sampling,
+                            temperature,
+                            top_p,
+                            token_callback,
+                        )
+                        pbar.set_postfix(
+                            {"stopped": f"{stop_signal.sum().item()}/{batch_size}"}
+                        )
+                        if torch.all(stop_signal):
+                            break
+                finally:
+                    self.models[0].cpu()
+                    self._device_manager.clear_cache()
+        else:
+            raise NotImplementedError(
+                "Ensemble execution without shared backbone is not supported."
+            )
+
+        return input_ids, attention_mask
+
+    def _generation_step(
+        self,
+        log_probs: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        stop_signal: torch.Tensor,
+        greedy_sampling: bool,
+        temperature: float,
+        top_p: float,
+        token_callback: Optional[Callable[[str], None]],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Single generation step: sample and update tensors."""
+        if greedy_sampling:
+            sampled_token_ids = torch.argmax(log_probs, dim=-1)
+        else:
+            sampled_token_ids = top_p_sample(log_probs, temperature, top_p)
+
+        stop_signal = stop_signal | (sampled_token_ids == self._tokenizer.eos_token_id)
+
+        input_ids = torch.cat([input_ids, sampled_token_ids.unsqueeze(-1)], dim=1)
+        attention_mask = torch.cat(
+            [attention_mask, (~stop_signal).unsqueeze(-1).float()], dim=1
+        )
+
+        if token_callback is not None:
+            new_token_id = int(sampled_token_ids[0].item())
+            if new_token_id not in [
+                self._tokenizer.eos_token_id,
+                self._tokenizer.pad_token_id,
+            ]:
+                token_text = self._tokenizer.decode([new_token_id])
+                token_callback(token_text)
+
+        return input_ids, attention_mask, stop_signal
+
 
 class SingleModel(BaseModel):
     """Base class for single-model architectures (REPPOModel policy)."""
@@ -359,3 +600,120 @@ class SingleModel(BaseModel):
     def can_load_from_epoch(self, epoch: int) -> bool:
         """Check if model has checkpoint at the specified epoch."""
         return self.hub_manager.model_exists(self.get_name(), epoch)
+
+    def predict(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        device: torch.device,
+        past_key_values: Optional[list[torch.Tensor]] = None,
+        use_cache: bool = False,
+    ) -> tuple[torch.Tensor, Optional[list[torch.Tensor]]]:
+        """Single-token prediction. Assumes model already on device.
+
+        Args:
+            input_ids: Input token IDs (B, T) on CPU.
+            attention_mask: Attention mask (B, T) on CPU.
+            device: Device the model is on.
+
+        Returns:
+            Log probs for next token (B, V) on CPU.
+        """
+        with torch.no_grad():
+            self.model.eval()
+            log_probs, past_key_values = get_next_token_log_probs(
+                self.model,
+                input_ids.to(device),
+                attention_mask.to(device),
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+            )
+        return log_probs.cpu(), past_key_values
+
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        max_new_tokens: int,
+        greedy_sampling: bool = True,
+        temperature: float = 1.0,
+        top_p: float = 0.9,
+        token_callback: Optional[Callable[[str], None]] = None,
+        use_cache: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Generate tokens with GPU held for entire sequence.
+
+        Args:
+            input_ids: Input token IDs (B, T) on CPU.
+            attention_mask: Attention mask (B, T) on CPU.
+            max_new_tokens: Maximum tokens to generate.
+            greedy_sampling: If True, use argmax. If False, use top-p.
+            temperature: Sampling temperature.
+            top_p: Top-p nucleus sampling threshold.
+            token_callback: Optional callback for streaming tokens.
+            use_cache: Whether to use KV caching.
+
+        Returns:
+            Tuple of (output_ids, output_mask) on CPU.
+        """
+        batch_size = input_ids.shape[0]
+        stop_signal = torch.zeros(batch_size, dtype=torch.bool)
+        past_key_values = None
+
+        with self._device_manager.request_gpu() as device:
+            try:
+                self.model.to(device)
+
+                disable_tqdm = os.environ.get("TQDM_DISABLE", "0") == "1"
+                pbar = tqdm(range(max_new_tokens), disable=disable_tqdm)
+                for i in pbar:
+                    if i > 0 and i % 100 == 0:
+                        self._device_manager.clear_cache()
+
+                    log_probs, past_key_values = self.predict(
+                        input_ids,
+                        attention_mask,
+                        device,
+                        past_key_values=past_key_values,
+                        use_cache=use_cache,
+                    )
+
+                    if greedy_sampling:
+                        sampled_token_ids = torch.argmax(log_probs, dim=-1)
+                    else:
+                        sampled_token_ids = top_p_sample(log_probs, temperature, top_p)
+
+                    stop_signal = stop_signal | (
+                        sampled_token_ids == self._tokenizer.eos_token_id
+                    )
+
+                    input_ids = torch.cat(
+                        [input_ids, sampled_token_ids.unsqueeze(-1)], dim=1
+                    )
+                    attention_mask = torch.cat(
+                        [attention_mask, (~stop_signal).unsqueeze(-1).float()], dim=1
+                    )
+
+                    pbar.set_postfix(
+                        {"stopped": f"{stop_signal.sum().item()}/{batch_size}"}
+                    )
+
+                    if token_callback is not None:
+                        new_token_id = int(sampled_token_ids[0].item())
+                        if new_token_id not in [
+                            self._tokenizer.eos_token_id,
+                            self._tokenizer.pad_token_id,
+                        ]:
+                            token_text = self._tokenizer.decode([new_token_id])
+                            token_callback(token_text)
+
+                    if torch.all(stop_signal):
+                        break
+            finally:
+                # Ensure model is moved off GPU to prevent memory accumulation
+                # if it wasn't already on GPU (request_gpu implies temp slot)
+                # But to be safe and fix the user issue, we move to cpu.
+                self.model.cpu()
+                self._device_manager.clear_cache()
+
+        return input_ids, attention_mask

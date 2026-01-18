@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Literal, Optional, cast
 
 if TYPE_CHECKING:
     from ..trainer import BaseTrainer
@@ -28,7 +28,7 @@ from ..data import RewardDataCollator
 from ..data.annotators.reward import RewardAnnotator
 from ..loader import CheckpointManager
 from ..utils import get_device_manager, get_hub_manager
-from ..utils.model_utils import get_log_probs, get_next_token_log_probs
+from ..utils.model_utils import get_log_probs
 from .base import EnsembleModel, SingleModel
 
 logger = logging.getLogger(__name__)
@@ -334,12 +334,25 @@ class REPPORewardModel(EnsembleModel):
 
     def predict(
         self,
-        device_input_ids: list[torch.Tensor],
-        device_attention_masks: list[torch.Tensor],
-        **kwargs: Any,
-    ) -> Any:
-        """Inference prediction (unused for reward model training)."""
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Prediction is not supported for Reward Models."""
         raise NotImplementedError("Predict not implemented for Reward Model")
+
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        max_new_tokens: int,
+        greedy_sampling: bool = True,
+        temperature: float = 1.0,
+        top_p: float = 0.9,
+        token_callback: Optional[Callable[[str], None]] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Generation is not supported for Reward Models."""
+        raise NotImplementedError("Generate not implemented for Reward Model")
 
 
 class REPPOModel(SingleModel):
@@ -583,39 +596,3 @@ class REPPOModel(SingleModel):
                 "accuracy": (lp_c - lp_r > lrf_c - lrf_r).float().mean().item(),
             }
         return loss, metrics
-
-    def predict(
-        self,
-        device_input_ids: list[torch.Tensor],
-        device_attention_masks: list[torch.Tensor],
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        """Inference prediction using the single policy model.
-
-        Args:
-            device_input_ids: Input IDs (list of length 1).
-            device_attention_masks: Attention masks (list of length 1).
-
-        Returns:
-            Log probs for the next token (B, V).
-        """
-        if self._model is None:
-            raise RuntimeError(
-                "Model not loaded. Call model.load() before using the model."
-            )
-
-        if len(device_input_ids) != 1 or len(device_attention_masks) != 1:
-            raise ValueError(
-                f"REPPOModel.predict expects input lists of length 1, "
-                f"got {len(device_input_ids)} and {len(device_attention_masks)}"
-            )
-
-        with torch.no_grad():
-            self._model.eval()
-            log_probs = get_next_token_log_probs(
-                self._model,
-                device_input_ids[0],
-                device_attention_masks[0],
-            )
-
-        return log_probs

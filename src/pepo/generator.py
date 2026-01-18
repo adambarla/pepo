@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 import torch
 import torch.nn.functional as F
-from tqdm import tqdm
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
@@ -141,85 +139,31 @@ class Generator:
 
         Args:
             model: BaseModel instance.
-            input_ids: Input token IDs (B, T).
+            input_ids: Input token IDs (B, T) on CPU.
             attention_mask: Attention mask (B, T). If None, inferred from pad tokens.
+            token_callback: Optional callback for streaming tokens.
 
         Returns:
-            Tuple of (output_ids, output_mask) tensors.
+            Tuple of (output_ids, output_mask) tensors on CPU.
         """
         logger.debug(f"Generate input size: {input_ids.shape}")
         if attention_mask is None:
             attention_mask = (input_ids != model.tokenizer.pad_token_id).float()
 
-        batch_size = input_ids.shape[0]
-        max_length = input_ids.shape[1] + self.max_new_tokens
-
-        # Prepare inputs on each device
-        device_input_ids = []
-        device_attention_masks = []
-        for model_idx in range(model.num_models):
-            device = torch.device(model.device_manager.get_device_for_model(model_idx))
-            device_input_ids.append(input_ids.to(device))
-            device_attention_masks.append(attention_mask.to(device))
-
-        stop_signal = torch.zeros(batch_size, dtype=torch.bool).cpu()
-
-        disable_tqdm = os.environ.get("TQDM_DISABLE", "0") == "1"
-        pbar = tqdm(range(max_length - input_ids.shape[1]), disable=disable_tqdm)
-        for i in pbar:
-            if i > 0 and i % 100 == 0:
-                model.device_manager.clear_cache()
-
-            log_probs = model.predict(device_input_ids, device_attention_masks)
-
-            if self.greedy_sampling:
-                # argmax is equivalent to resampling until not missing token
-                # missing token has prob 1-sum(exp(logprobs))
-                sampled_token_ids = torch.argmax(log_probs, dim=-1)
-            else:
-                sampled_token_ids = self._top_p_sample(log_probs)
-
-            stop_signal = stop_signal.to(device=sampled_token_ids.device) | (
-                sampled_token_ids == model.tokenizer.eos_token_id
-            )
-
-            for model_idx in range(model.num_models):
-                device = torch.device(
-                    model.device_manager.get_device_for_model(model_idx)
-                )
-                new_token_tensor = sampled_token_ids.to(device).unsqueeze(-1)
-                device_input_ids[model_idx] = torch.cat(
-                    [device_input_ids[model_idx], new_token_tensor], dim=1
-                )
-                device_attention_masks[model_idx] = torch.cat(
-                    [
-                        device_attention_masks[model_idx],
-                        ~stop_signal.unsqueeze(-1).to(device),
-                    ],
-                    dim=1,
-                )
-
-            pbar.set_postfix({"stopped": f"{stop_signal.sum().item()}/{batch_size}"})
-
-            # Streaming callback (only for first sequence in batch)
-            if token_callback is not None:
-                new_token_id = int(sampled_token_ids[0].item())
-                if new_token_id not in [
-                    model.tokenizer.eos_token_id,
-                    model.tokenizer.pad_token_id,
-                ]:
-                    token_text = model.tokenizer.decode([new_token_id])
-                    token_callback(token_text)
-
-            if torch.all(stop_signal):
-                break
-
-        decoded = model.tokenizer.decode(
-            device_input_ids[0].cpu()[0], skip_special_tokens=True
+        output_ids, output_mask = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=self.max_new_tokens,
+            greedy_sampling=self.greedy_sampling,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            token_callback=token_callback,
         )
+
+        decoded = model.tokenizer.decode(output_ids[0], skip_special_tokens=True)
         logger.debug(f"Generated sequence idx=0:\n{decoded}")
 
-        return device_input_ids[0].cpu(), device_attention_masks[0].cpu()
+        return output_ids, output_mask
 
     def get_name(self) -> str:
         """Get generator name for file naming."""
