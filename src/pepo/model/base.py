@@ -359,28 +359,38 @@ class EnsembleModel(BaseModel):
         """Whether ensemble uses shared backbone. Override in subclass."""
         return False
 
-    def _predict_shared(
+    def predict(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         device: torch.device,
-        past_key_values_list: Optional[list[Any]] = None,
+        past_key_values: Optional[Any] = None,
         use_cache: bool = True,
     ) -> tuple[torch.Tensor, list[Any]]:
-        """Sequential prediction using shared backbone with adapter switching.
+        """Single-token prediction for ensemble using shared backbone.
+
+        Uses adapter switching to get predictions from each submodel sequentially,
+        then returns the minimum log probabilities across all models.
 
         Args:
             input_ids: Input token IDs (B, T) on CPU.
             attention_mask: Attention mask (B, T) on CPU.
             device: Device the model is on.
-            past_key_values_list: List of past_key_values for each model.
+            past_key_values: List of past_key_values for each model.
+            use_cache: Whether to use KV caching.
 
         Returns:
             Tuple of (Min log probs (B, V) on CPU, updated past_key_values_list).
         """
+        if not self.shared_backbone:
+            raise NotImplementedError(
+                "EnsembleModel.predict() is only supported for shared backbone models. "
+                "For parallel execution, implement manual parallelization."
+            )
 
+        past_key_values_list = cast(Optional[list[Any]], past_key_values)
         model = self.models[0]
-        new_past_key_values_list = []
+        new_past_key_values_list: list[Any] = []
 
         with torch.no_grad():
             log_probs_list = []
@@ -391,7 +401,7 @@ class EnsembleModel(BaseModel):
                 adapter_name = "default" if model_idx == 0 else f"adapter_{model_idx}"
                 model.set_adapter(adapter_name)
 
-                past_key_values = (
+                past_kv = (
                     past_key_values_list[model_idx]
                     if past_key_values_list is not None
                     else None
@@ -401,7 +411,7 @@ class EnsembleModel(BaseModel):
                     model,
                     inp,
                     mask,
-                    past_key_values=past_key_values,
+                    past_key_values=past_kv,
                     use_cache=use_cache,
                 )
                 log_probs_list.append(log_probs.cpu())
@@ -410,43 +420,6 @@ class EnsembleModel(BaseModel):
         log_probs_tensor = torch.stack(log_probs_list, dim=0)  # (L, B, V)
         min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
         return min_log_probs, new_past_key_values_list
-
-    def predict(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        device: torch.device,
-        past_key_values: Optional[Any] = None,
-        use_cache: bool = True,
-    ) -> tuple[torch.Tensor, Optional[Any]]:
-        """Single-token prediction for ensemble.
-
-        Args:
-            input_ids: Input token IDs (B, T) on CPU.
-            attention_mask: Attention mask (B, T) on CPU.
-            device: Device to use (used for shared backbone, ignored for parallel).
-            past_key_values: List of past_key_values for each model.
-            use_cache: Whether to use KV caching.
-
-        Returns:
-            Tuple of (min log probs, updated past_key_values_list).
-        """
-        # Ensure past_key_values is a list if provided
-        past_key_values_list = cast(Optional[list[Any]], past_key_values)
-
-        if not self.shared_backbone:
-            raise NotImplementedError(
-                "EnsembleModel.predict() is only supported for shared backbone models. "
-                "For parallel execution, implement manual parallelization."
-            )
-
-        return self._predict_shared(
-            input_ids,
-            attention_mask,
-            device,
-            past_key_values_list,
-            use_cache=use_cache,
-        )
 
     def generate(
         self,
@@ -491,7 +464,7 @@ class EnsembleModel(BaseModel):
                         if i > 0 and i % 100 == 0:
                             self._device_manager.clear_cache()
 
-                        log_probs, past_key_values_list = self._predict_shared(
+                        log_probs, past_key_values_list = self.predict(
                             input_ids,
                             attention_mask,
                             device,
