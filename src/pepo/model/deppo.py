@@ -18,7 +18,7 @@ from ..loader import CheckpointManager
 from ..trainer import EnsembleTrainer
 from ..utils import get_device_manager, get_hub_manager
 from ..utils.model_utils import get_log_probs
-from .base import EnsembleModel
+from .ensemble_base import EnsembleModel
 
 logger = logging.getLogger(__name__)
 

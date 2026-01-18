@@ -17,7 +17,7 @@ from ..loader import CheckpointManager
 from ..trainer import SingleModelTrainer
 from ..utils import get_device_manager, get_hub_manager
 from ..utils.model_utils import get_log_probs
-from .base import SingleModel
+from .single_base import SingleModel
 
 logger = logging.getLogger(__name__)
 

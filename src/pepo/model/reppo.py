@@ -29,7 +29,8 @@ from ..data.annotators.reward import RewardAnnotator
 from ..loader import CheckpointManager
 from ..utils import get_device_manager, get_hub_manager
 from ..utils.model_utils import get_log_probs
-from .base import EnsembleModel, SingleModel
+from .ensemble_base import EnsembleModel
+from .single_base import SingleModel
 
 logger = logging.getLogger(__name__)
 
@@ -337,7 +338,9 @@ class REPPORewardModel(EnsembleModel):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         device: torch.device,
-    ) -> torch.Tensor:
+        past_key_values: Optional[Any] = None,
+        use_cache: bool = True,
+    ) -> tuple[torch.Tensor, list[Any]]:
         """Prediction is not supported for Reward Models."""
         raise NotImplementedError("Predict not implemented for Reward Model")
 
@@ -350,6 +353,7 @@ class REPPORewardModel(EnsembleModel):
         temperature: float = 1.0,
         top_p: float = 0.9,
         token_callback: Optional[Callable[[str], None]] = None,
+        use_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Generation is not supported for Reward Models."""
         raise NotImplementedError("Generate not implemented for Reward Model")
