@@ -17,6 +17,3 @@ r_max_chi: 10.0
 
 trainer:
   training_epochs: 1
-
-generator:
-  batch_size: ${backbone.generator_batch_size}

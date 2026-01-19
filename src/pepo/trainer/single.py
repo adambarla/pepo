@@ -52,7 +52,7 @@ class SingleModelTrainer(BaseTrainer):
         train_loader = data_manager.get_dataloader(
             model_idx=0,
             partition="train",
-            batch_size=self.batch_size,
+            batch_size=self.model.train_batch_size,
         )
         num_training_steps = (
             len(train_loader) // self.gradient_accumulation_steps
@@ -129,7 +129,7 @@ class SingleModelTrainer(BaseTrainer):
             best_eval_loss = self._eval_epoch(
                 model=model,
                 eval_loader=data_manager.get_dataloader(
-                    0, "eval", self.eval_batch_size
+                    0, "eval", model.eval_batch_size
                 ),
                 device=device,
                 epoch=0,
@@ -161,7 +161,9 @@ class SingleModelTrainer(BaseTrainer):
                 model=model,
                 optimizer=self.optimizer,
                 scheduler=self.scheduler,
-                train_loader=data_manager.get_dataloader(0, "train", self.batch_size),
+                train_loader=data_manager.get_dataloader(
+                    0, "train", model.train_batch_size
+                ),
                 device=device,
                 epoch=epoch,
                 n_epochs=max_epochs,
@@ -176,13 +178,13 @@ class SingleModelTrainer(BaseTrainer):
             eval_loss = best_eval_loss
             if not self.skip_eval:
                 n_batches = len(
-                    data_manager.get_dataloader(0, "train", self.batch_size)
+                    data_manager.get_dataloader(0, "train", model.train_batch_size)
                 )
                 global_step = epoch * n_batches // self.gradient_accumulation_steps
                 eval_loss = self._eval_epoch(
                     model=model,
                     eval_loader=data_manager.get_dataloader(
-                        0, "eval", self.eval_batch_size
+                        0, "eval", model.eval_batch_size
                     ),
                     device=device,
                     epoch=epoch,

@@ -68,6 +68,9 @@ class CHIPPOModel(SingleModel):
             hub_manager=hub_manager,
             checkpoint_manager=checkpoint_manager,
             tokenizer=tokenizer,
+            train_batch_size=backbone.train_batch_size,
+            eval_batch_size=backbone.eval_batch_size,
+            generation_batch_size=backbone.generator_batch_size,
             trainer=trainer,
             generator=generator,
         )

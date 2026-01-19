@@ -70,6 +70,7 @@ class BestOfNGenerator(Generator):
         """Compute log probabilities for sequences across all ensemble members.
 
         Assumes shared_backbone mode (adapter switching on single model).
+        Uses batched processing with model.eval_batch_size.
 
         Args:
             model: BaseModel instance (ensemble with shared backbone).
@@ -84,46 +85,59 @@ class BestOfNGenerator(Generator):
 
         # Cast to Any to access EnsembleModel attributes
         model_any = cast(Any, model)
+        num_seqs = input_ids.shape[0]
+        eval_batch_size = model.eval_batch_size
 
         # Create response mask for each sequence
         response_mask = torch.zeros_like(input_ids, dtype=torch.float)
         for i, pl in enumerate(prompt_lengths):
             response_mask[i, pl:] = attention_mask[i, pl:].float()
 
-        log_probs_list: list[torch.Tensor] = []
+        # log_probs_per_model[model_idx] = tensor of shape (B,)
+        log_probs_per_model: list[torch.Tensor] = []
         shared_model = model_any.models[0]
 
         # Use architecture's DeviceManager to request GPU
         with model.device_manager.request_gpu() as device:
-            # Move model to allocated device
             shared_model.to(device)
-            # Use architecture's DeviceManager to request GPU
+            shared_model.eval()
 
             try:
-                model_device = device
-                for model_idx in range(model_any.num_models):
-                    adapter_name = (
-                        "default" if model_idx == 0 else f"adapter_{model_idx}"
-                    )
-                    shared_model.set_adapter(adapter_name)
+                with torch.no_grad():
+                    for model_idx in range(model_any.num_models):
+                        adapter_name = (
+                            "default" if model_idx == 0 else f"adapter_{model_idx}"
+                        )
+                        shared_model.set_adapter(adapter_name)
 
-                    lp = get_log_probs(
-                        shared_model,
-                        model_device,
-                        input_ids.to(model_device),
-                        attention_mask.to(model_device),
-                        response_mask.to(model_device),
-                    )
-                    log_probs_list.append(lp.cpu())
+                        # Process in batches to avoid OOM
+                        batch_log_probs = []
+                        for start in range(0, num_seqs, eval_batch_size):
+                            end = min(start + eval_batch_size, num_seqs)
+                            batch_ids = input_ids[start:end].to(device)
+                            batch_mask = attention_mask[start:end].to(device)
+                            batch_response_mask = response_mask[start:end].to(device)
+
+                            lp = get_log_probs(
+                                shared_model,
+                                device,
+                                batch_ids,
+                                batch_mask,
+                                batch_response_mask,
+                            )
+                            batch_log_probs.append(lp.cpu())
+
+                        # Concatenate all batches for this model
+                        log_probs_per_model.append(torch.cat(batch_log_probs, dim=0))
             finally:
                 # Ensure model returns to CPU to release resources
                 shared_model.cpu()
                 model.device_manager.clear_cache()
 
         # Stack: (L, B) and compute min over ensemble
-        log_probs_tensor = torch.stack(log_probs_list, dim=0)
+        log_probs_tensor = torch.stack(log_probs_per_model, dim=0)
         min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
-        proposal_log_probs = log_probs_list[0]
+        proposal_log_probs = log_probs_per_model[0]
 
         return proposal_log_probs, min_log_probs
 
@@ -162,11 +176,12 @@ class BestOfNGenerator(Generator):
             pending.append((idx, p, f))
 
         # Active slots
-        slots: list[Optional[Slot]] = [None] * self.batch_size
+        gen_batch_size = model.generation_batch_size
+        slots: list[Optional[Slot]] = [None] * gen_batch_size
 
         logger.info(
             f"Best-of-N generation (max_trials={self.max_trials}, "
-            f"batch_size={self.batch_size}) for {len(prompts)} prompts"
+            f"batch_size={gen_batch_size}) for {len(prompts)} prompts"
         )
 
         disable_tqdm = os.environ.get("TQDM_DISABLE", "0") == "1"
@@ -184,7 +199,7 @@ class BestOfNGenerator(Generator):
 
             # 1. Fill empty slots from pending queue
             filled_count = 0
-            for i in range(self.batch_size):
+            for i in range(gen_batch_size):
                 if slots[i] is None and pending:
                     prompt_idx, prompt, formatted = pending.popleft()
                     tokenizer.padding_side = "left"

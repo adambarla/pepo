@@ -20,6 +20,3 @@ force_annotation: false
 
 trainer:
   training_epochs: 8
-
-generator:
-  batch_size: ${backbone.generator_batch_size}

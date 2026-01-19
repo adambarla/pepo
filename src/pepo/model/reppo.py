@@ -109,6 +109,9 @@ class REPPORewardModel(EnsembleModel):
             hub_manager=hub_manager,
             checkpoint_manager=checkpoint_manager,
             tokenizer=tokenizer,
+            train_batch_size=backbone.train_batch_size,
+            eval_batch_size=backbone.eval_batch_size,
+            generation_batch_size=backbone.generator_batch_size,
             trainer=trainer,
         )
 
@@ -340,6 +343,7 @@ class REPPORewardModel(EnsembleModel):
         device: torch.device,
         past_key_values: Optional[Any] = None,
         use_cache: bool = True,
+        model_indices: Optional[list[int]] = None,
     ) -> tuple[torch.Tensor, list[Any]]:
         """Prediction is not supported for Reward Models."""
         raise NotImplementedError("Predict not implemented for Reward Model")
@@ -354,6 +358,7 @@ class REPPORewardModel(EnsembleModel):
         top_p: float = 0.9,
         token_callback: Optional[Callable[[str], None]] = None,
         use_cache: bool = True,
+        model_indices: Optional[list[int]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Generation is not supported for Reward Models."""
         raise NotImplementedError("Generate not implemented for Reward Model")
@@ -403,6 +408,9 @@ class REPPOModel(SingleModel):
             hub_manager=hub_manager,
             checkpoint_manager=checkpoint_manager,
             tokenizer=tokenizer,
+            train_batch_size=backbone.train_batch_size,
+            eval_batch_size=backbone.eval_batch_size,
+            generation_batch_size=backbone.generator_batch_size,
             trainer=trainer,
             generator=generator,
         )

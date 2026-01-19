@@ -32,6 +32,9 @@ class BaseModel(ABC):
         hub_manager: "HubManager",
         checkpoint_manager: "CheckpointManager",
         tokenizer: PreTrainedTokenizerBase,
+        train_batch_size: int,
+        eval_batch_size: int,
+        generation_batch_size: int,
         trainer: Optional["BaseTrainer"] = None,
         generator: Optional["Generator"] = None,
     ) -> None:
@@ -43,6 +46,9 @@ class BaseModel(ABC):
             hub_manager: Hub manager for model storage.
             checkpoint_manager: Checkpoint manager for saving/loading.
             tokenizer: Tokenizer for the model.
+            train_batch_size: Batch size for training.
+            eval_batch_size: Batch size for evaluation/scoring.
+            generation_batch_size: Batch size for generation.
             trainer: Optional trainer instance.
             generator: Optional generator instance.
         """
@@ -51,8 +57,26 @@ class BaseModel(ABC):
         self._hub_manager = hub_manager
         self._checkpoint_manager = checkpoint_manager
         self._tokenizer = tokenizer
+        self._train_batch_size = train_batch_size
+        self._eval_batch_size = eval_batch_size
+        self._generation_batch_size = generation_batch_size
         self._trainer = trainer
         self.generator = generator
+
+    @property
+    def train_batch_size(self) -> int:
+        """Batch size for training."""
+        return self._train_batch_size
+
+    @property
+    def eval_batch_size(self) -> int:
+        """Batch size for evaluation/scoring."""
+        return self._eval_batch_size
+
+    @property
+    def generation_batch_size(self) -> int:
+        """Batch size for generation."""
+        return self._generation_batch_size
 
     @property
     def tokenizer(self) -> PreTrainedTokenizerBase:

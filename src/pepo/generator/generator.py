@@ -22,7 +22,6 @@ class Generator(BaseGenerator):
         self,
         max_prompt_length: int = 512,
         max_new_tokens: int = 1024,
-        batch_size: int = 10,
         greedy_sampling: bool = True,
         temperature: float = 1.0,
         top_p: float = 0.9,
@@ -33,7 +32,6 @@ class Generator(BaseGenerator):
         Args:
             max_prompt_length: Maximum length for input prompts (truncation).
             max_new_tokens: Maximum number of new tokens to generate.
-            batch_size: Batch size for generation.
             greedy_sampling: If True, use greedy (argmax). If False, use top-p.
             temperature: Sampling temperature (only used if greedy_sampling=False).
             top_p: Top-p nucleus sampling threshold
@@ -41,7 +39,6 @@ class Generator(BaseGenerator):
         """
         self.max_prompt_length = max_prompt_length
         self.max_new_tokens = max_new_tokens
-        self.batch_size = batch_size
         self.greedy_sampling = greedy_sampling
         self.temperature = temperature
         self.top_p = top_p
@@ -183,19 +180,20 @@ class Generator(BaseGenerator):
         logger.debug("Generation parameters:")
         logger.debug(f"  max_prompt_length: {self.max_prompt_length}")
         logger.debug(f"  max_new_tokens: {self.max_new_tokens}")
-        logger.debug(f"  batch_size: {self.batch_size}")
+        batch_size = model.generation_batch_size
+        logger.debug(f"  batch_size: {batch_size}")
         logger.debug(f"  greedy_sampling: {self.greedy_sampling}")
         if not self.greedy_sampling:
             logger.debug(f"  temperature: {self.temperature}")
             logger.debug(f"  top_p: {self.top_p}")
 
-        for i in range(0, len(prompts), self.batch_size):
-            batch_num = i // self.batch_size + 1
-            total_batches = (len(prompts) + self.batch_size - 1) // self.batch_size
+        for i in range(0, len(prompts), batch_size):
+            batch_num = i // batch_size + 1
+            total_batches = (len(prompts) + batch_size - 1) // batch_size
             logger.info(f"Generating batch {batch_num}/{total_batches}")
 
-            batch_prompts = prompts[i : i + self.batch_size]
-            batch_formatted = formatted_prompts[i : i + self.batch_size]
+            batch_prompts = prompts[i : i + batch_size]
+            batch_formatted = formatted_prompts[i : i + batch_size]
 
             tokenizer.padding_side = "left"
             tokenized = tokenizer(

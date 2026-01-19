@@ -54,7 +54,7 @@ class EnsembleTrainer(BaseTrainer):
             train_loader = data_manager.get_dataloader(
                 model_idx=model_idx,
                 partition="train",
-                batch_size=self.batch_size,
+                batch_size=self.model.train_batch_size,
             )
             num_training_steps = (
                 len(train_loader) // self.gradient_accumulation_steps
@@ -158,12 +158,12 @@ class EnsembleTrainer(BaseTrainer):
             train_loader = self.data_manager.get_dataloader(
                 model_idx=model_idx,
                 partition="train",
-                batch_size=self.batch_size,
+                batch_size=self.model.train_batch_size,
             )
             eval_loader = self.data_manager.get_dataloader(
                 model_idx=model_idx,
                 partition="eval",
-                batch_size=self.eval_batch_size,
+                batch_size=self.model.eval_batch_size,
             )
 
             wandb_run = None

@@ -3,7 +3,6 @@ _target_: pepo.generator.BestOfNGenerator
 
 max_prompt_length: 512
 max_new_tokens: 1024
-batch_size: 1  # Will be overridden by backbone.generator_batch_size in model config
 greedy_sampling: false
 temperature: 1.0
 top_p: 0.9
