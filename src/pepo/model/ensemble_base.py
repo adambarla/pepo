@@ -179,7 +179,10 @@ class EnsembleModel(BaseModel):
         use_cache: bool = True,
         model_indices: Optional[list[int]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Generate tokens using ensemble prediction.
+        """Generate tokens using ensemble prediction. Assumes model is on device.
+
+        Caller is responsible for moving the model to GPU before calling
+        and moving it back to CPU after.
 
         Args:
             input_ids: Input token IDs (B, T) on CPU.
@@ -203,44 +206,37 @@ class EnsembleModel(BaseModel):
         past_key_values_list: list[Any] = [None] * self._num_models
 
         if self.shared_backbone:
-            # Shared backbone: hold GPU for entire generation
-            with self._device_manager.request_gpu() as device:
-                try:
-                    self.models[0].to(device)
+            # Get device from where the model currently lives
+            device = next(self.models[0].parameters()).device
 
-                    pbar = tqdm(
-                        range(max_new_tokens), disable=disable_tqdm, leave=False
-                    )
-                    for i in pbar:
-                        if i > 0 and i % 100 == 0:
-                            self._device_manager.clear_cache()
-
-                        log_probs, past_key_values_list = self.predict(
-                            input_ids,
-                            attention_mask,
-                            device,
-                            past_key_values_list,
-                            use_cache=use_cache,
-                            model_indices=model_indices,
-                        )
-                        input_ids, attention_mask, stop_signal = self._generation_step(
-                            log_probs,
-                            input_ids,
-                            attention_mask,
-                            stop_signal,
-                            greedy_sampling,
-                            temperature,
-                            top_p,
-                            token_callback,
-                        )
-                        pbar.set_postfix(
-                            {"stopped": f"{stop_signal.sum().item()}/{batch_size}"}
-                        )
-                        if torch.all(stop_signal):
-                            break
-                finally:
-                    self.models[0].cpu()
+            pbar = tqdm(range(max_new_tokens), disable=disable_tqdm, leave=False)
+            for i in pbar:
+                if i > 0 and i % 100 == 0:
                     self._device_manager.clear_cache()
+
+                log_probs, past_key_values_list = self.predict(
+                    input_ids,
+                    attention_mask,
+                    device,
+                    past_key_values_list,
+                    use_cache=use_cache,
+                    model_indices=model_indices,
+                )
+                input_ids, attention_mask, stop_signal = self._generation_step(
+                    log_probs,
+                    input_ids,
+                    attention_mask,
+                    stop_signal,
+                    greedy_sampling,
+                    temperature,
+                    top_p,
+                    token_callback,
+                )
+                pbar.set_postfix(
+                    {"stopped": f"{stop_signal.sum().item()}/{batch_size}"}
+                )
+                if torch.all(stop_signal):
+                    break
         else:
             raise NotImplementedError(
                 "Ensemble execution without shared backbone is not supported."

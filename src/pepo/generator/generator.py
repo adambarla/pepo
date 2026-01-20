@@ -16,6 +16,28 @@ logger = logging.getLogger(__name__)
 class Generator(BaseGenerator):
     """Simple generator class for producing model responses from instructions."""
 
+    def _move_model_to_device(self, model: "BaseModel", device: torch.device) -> None:
+        """Move the model to specified device."""
+        from ..model import EnsembleModel, SingleModel
+
+        if isinstance(model, EnsembleModel):
+            model.models[0].to(device)
+        elif isinstance(model, SingleModel):
+            model.model.to(device)
+        else:
+            raise TypeError(f"Unknown model type: {type(model)}")
+
+    def _move_model_to_cpu(self, model: "BaseModel") -> None:
+        """Move the model to CPU."""
+        from ..model import EnsembleModel, SingleModel
+
+        if isinstance(model, EnsembleModel):
+            model.models[0].cpu()
+        elif isinstance(model, SingleModel):
+            model.model.cpu()
+        else:
+            raise TypeError(f"Unknown model type: {type(model)}")
+
     def generate(
         self,
         model: "BaseModel",
@@ -25,6 +47,8 @@ class Generator(BaseGenerator):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Generate tokens from input_ids using the model.
+
+        Assumes model is already on the target device.
 
         Args:
             model: BaseModel instance.
@@ -48,9 +72,6 @@ class Generator(BaseGenerator):
             top_p=self.top_p,
             token_callback=token_callback,
         )
-
-        # decoded = model.tokenizer.decode(output_ids[0], skip_special_tokens=True)
-        # logger.debug(f"Generated sequence idx=0:\n{decoded}")
 
         return output_ids, output_mask
 
@@ -89,40 +110,49 @@ class Generator(BaseGenerator):
             logger.debug(f"  temperature: {self.temperature}")
             logger.debug(f"  top_p: {self.top_p}")
 
-        for i in range(0, len(prompts), batch_size):
-            batch_num = i // batch_size + 1
-            total_batches = (len(prompts) + batch_size - 1) // batch_size
-            logger.info(f"Generating batch {batch_num}/{total_batches}")
+        # Hold GPU for entire generation to avoid repeated model transfers
+        with model.device_manager.request_gpu() as device:
+            self._move_model_to_device(model, device)
+            try:
+                for i in range(0, len(prompts), batch_size):
+                    batch_num = i // batch_size + 1
+                    total_batches = (len(prompts) + batch_size - 1) // batch_size
+                    logger.info(f"Generating batch {batch_num}/{total_batches}")
 
-            batch_prompts = prompts[i : i + batch_size]
-            batch_formatted = formatted_prompts[i : i + batch_size]
+                    batch_prompts = prompts[i : i + batch_size]
+                    batch_formatted = formatted_prompts[i : i + batch_size]
 
-            tokenizer.padding_side = "left"
-            tokenized = tokenizer(
-                batch_formatted,
-                return_tensors="pt",
-                padding=True,
-                truncation=False,  # already filtered out the long prompts
-            )
-            input_ids = tokenized["input_ids"]
-            attention_mask = tokenized["attention_mask"]
+                    tokenizer.padding_side = "left"
+                    tokenized = tokenizer(
+                        batch_formatted,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=False,  # already filtered out the long prompts
+                    )
+                    input_ids = tokenized["input_ids"]
+                    attention_mask = tokenized["attention_mask"]
 
-            output_ids, output_mask = self.generate(
-                model=model,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                token_callback=token_callback if i == 0 else None,
-            )
+                    output_ids, output_mask = self.generate(
+                        model=model,
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        token_callback=token_callback if i == 0 else None,
+                    )
 
-            starting_idx = input_ids.shape[1]
-            output_mask[:, :starting_idx] = False
-            output_ids = output_ids.where(output_mask.bool(), tokenizer.pad_token_id)
+                    starting_idx = input_ids.shape[1]
+                    output_mask[:, :starting_idx] = False
+                    output_ids = output_ids.where(
+                        output_mask.bool(), tokenizer.pad_token_id
+                    )
 
-            for j, prompt in enumerate(batch_prompts):
-                response = tokenizer.decode(
-                    output_ids[j, starting_idx:], skip_special_tokens=True
-                )
-                outputs.append({"prompt": prompt, "output": response})
+                    for j, prompt in enumerate(batch_prompts):
+                        response = tokenizer.decode(
+                            output_ids[j, starting_idx:], skip_special_tokens=True
+                        )
+                        outputs.append({"prompt": prompt, "output": response})
+            finally:
+                self._move_model_to_cpu(model)
+                model.device_manager.clear_cache()
 
         logger.info(f"Successfully generated {len(outputs)} responses")
         return outputs, {}

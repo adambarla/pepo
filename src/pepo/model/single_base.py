@@ -100,7 +100,10 @@ class SingleModel(BaseModel):
         token_callback: Optional[Callable[[str], None]] = None,
         use_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Generate tokens with GPU held for entire sequence.
+        """Generate tokens. Assumes model is already on the target device.
+
+        Caller is responsible for moving the model to GPU before calling
+        and moving it back to CPU after.
 
         Args:
             input_ids: Input token IDs (B, T) on CPU.
@@ -119,69 +122,56 @@ class SingleModel(BaseModel):
         stop_signal = torch.zeros(batch_size, dtype=torch.bool)
         past_key_values = None
 
-        with self._device_manager.request_gpu() as device:
-            try:
-                self.model.to(device)
+        # Get device from where the model currently lives
+        device = next(self.model.parameters()).device
 
-                disable_tqdm = os.environ.get("TQDM_DISABLE", "0") == "1"
-                pbar = tqdm(range(max_new_tokens), disable=disable_tqdm, leave=False)
-                for i in pbar:
-                    if i > 0 and i % 100 == 0:
-                        self._device_manager.clear_cache()
-
-                    log_probs, past_key_values = self.predict(
-                        input_ids,
-                        attention_mask,
-                        device,
-                        past_key_values=past_key_values,
-                        use_cache=use_cache,
-                    )
-
-                    if greedy_sampling:
-                        sampled_token_ids = torch.argmax(log_probs, dim=-1)
-                    else:
-                        sampled_token_ids = top_p_sample(log_probs, temperature, top_p)
-
-                    # Replace tokens with pad_token_id for stopped sequences
-                    sampled_token_ids = torch.where(
-                        stop_signal,
-                        torch.full_like(
-                            sampled_token_ids, self._tokenizer.pad_token_id
-                        ),
-                        sampled_token_ids,
-                    )
-
-                    stop_signal = stop_signal | (
-                        sampled_token_ids == self._tokenizer.eos_token_id
-                    )
-
-                    input_ids = torch.cat(
-                        [input_ids, sampled_token_ids.unsqueeze(-1)], dim=1
-                    )
-                    attention_mask = torch.cat(
-                        [attention_mask, (~stop_signal).unsqueeze(-1).float()], dim=1
-                    )
-
-                    pbar.set_postfix(
-                        {"stopped": f"{stop_signal.sum().item()}/{batch_size}"}
-                    )
-
-                    if token_callback is not None:
-                        new_token_id = int(sampled_token_ids[0].item())
-                        if new_token_id not in [
-                            self._tokenizer.eos_token_id,
-                            self._tokenizer.pad_token_id,
-                        ]:
-                            token_text = self._tokenizer.decode([new_token_id])
-                            token_callback(token_text)
-
-                    if torch.all(stop_signal):
-                        break
-            finally:
-                # Ensure model is moved off GPU to prevent memory accumulation
-                # if it wasn't already on GPU (request_gpu implies temp slot)
-                # But to be safe and fix the user issue, we move to cpu.
-                self.model.cpu()
+        disable_tqdm = os.environ.get("TQDM_DISABLE", "0") == "1"
+        pbar = tqdm(range(max_new_tokens), disable=disable_tqdm, leave=False)
+        for i in pbar:
+            if i > 0 and i % 100 == 0:
                 self._device_manager.clear_cache()
+
+            log_probs, past_key_values = self.predict(
+                input_ids,
+                attention_mask,
+                device,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+            )
+
+            if greedy_sampling:
+                sampled_token_ids = torch.argmax(log_probs, dim=-1)
+            else:
+                sampled_token_ids = top_p_sample(log_probs, temperature, top_p)
+
+            # Replace tokens with pad_token_id for stopped sequences
+            sampled_token_ids = torch.where(
+                stop_signal,
+                torch.full_like(sampled_token_ids, self._tokenizer.pad_token_id),
+                sampled_token_ids,
+            )
+
+            stop_signal = stop_signal | (
+                sampled_token_ids == self._tokenizer.eos_token_id
+            )
+
+            input_ids = torch.cat([input_ids, sampled_token_ids.unsqueeze(-1)], dim=1)
+            attention_mask = torch.cat(
+                [attention_mask, (~stop_signal).unsqueeze(-1).float()], dim=1
+            )
+
+            pbar.set_postfix({"stopped": f"{stop_signal.sum().item()}/{batch_size}"})
+
+            if token_callback is not None:
+                new_token_id = int(sampled_token_ids[0].item())
+                if new_token_id not in [
+                    self._tokenizer.eos_token_id,
+                    self._tokenizer.pad_token_id,
+                ]:
+                    token_text = self._tokenizer.decode([new_token_id])
+                    token_callback(token_text)
+
+            if torch.all(stop_signal):
+                break
 
         return input_ids, attention_mask

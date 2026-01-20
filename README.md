@@ -128,10 +128,10 @@ This project uses pre-commit hooks to ensure code quality and consistency. **All
 uv sync --group dev
 
 # Install pre-commit hooks
-pre-commit install
+uv run pre-commit install
 
 # Optional: Install commit-msg hook for conventional commits
-pre-commit install --hook-type commit-msg
+uv run pre-commit install --hook-type commit-msg
 ```
 
 The hooks will automatically:
