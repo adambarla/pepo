@@ -208,7 +208,9 @@ class EnsembleModel(BaseModel):
                 try:
                     self.models[0].to(device)
 
-                    pbar = tqdm(range(max_new_tokens), disable=disable_tqdm)
+                    pbar = tqdm(
+                        range(max_new_tokens), disable=disable_tqdm, leave=False
+                    )
                     for i in pbar:
                         if i > 0 and i % 100 == 0:
                             self._device_manager.clear_cache()

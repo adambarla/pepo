@@ -197,7 +197,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         if self.wandb_run is not None and self.wandb_run.enabled:
             generator_config = "unknown"
             if hasattr(model, "generator") and model.generator:
-                generator_config = model.generator.get_name()
+                generator_config = model.generator.get_short_name()
 
             metric_prefix = f"eval/{self.dataset_id}/{generator_config}"
             if ref_model is not None:
@@ -280,7 +280,12 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         model.unload()
 
         if metrics and self.wandb_run is not None:
-            self.wandb_run.log({f"eval/bon/{k}": v for k, v in metrics.items()})
+            generator_config = model.generator.get_short_name()
+            metric_prefix = f"eval/{self.dataset_id}/{generator_config}"
+            log_dict = {f"{metric_prefix}/{k}": v for k, v in metrics.items()}
+            if epoch is not None:
+                log_dict["eval/epoch"] = epoch
+            self.wandb_run.log(log_dict)
 
         model_name = model.get_name(epoch=epoch)
         formatted_outputs = []

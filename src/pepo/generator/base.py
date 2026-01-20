@@ -133,3 +133,7 @@ class BaseGenerator(ABC):
             parts.append(f"t{self.temperature}")
             parts.append(f"p{self.top_p}")
         return "-".join(parts)
+
+    def get_short_name(self) -> str:
+        parts = [f"mt{self.max_new_tokens}"]
+        return "-".join(parts)
