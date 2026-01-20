@@ -43,6 +43,7 @@ model:
 
 evaluator:
   num_samples: ${ns}
+  stop_after_generation: ${stop_after_generation}
 
 ref_model:
   num_networks: ${ref_L}
@@ -64,6 +65,7 @@ mt: 1024
 ns: null
 
 overwrite: false
+stop_after_generation: false
 seed: 42
 debug: false
 log_level: "info"

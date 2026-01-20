@@ -265,6 +265,13 @@ class EnsembleModel(BaseModel):
 
         sampled_token_ids = sampled_token_ids.cpu()
 
+        # Replace sampled tokens with pad_token_id for already-stopped sequences
+        sampled_token_ids = torch.where(
+            stop_signal,
+            torch.full_like(sampled_token_ids, self._tokenizer.pad_token_id),
+            sampled_token_ids,
+        )
+
         stop_signal = stop_signal | (sampled_token_ids == self._tokenizer.eos_token_id)
 
         input_ids = torch.cat([input_ids, sampled_token_ids.unsqueeze(-1)], dim=1)

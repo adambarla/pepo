@@ -27,6 +27,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         output_dir: str,
         annotators_config: Union[str, Dict[str, Any], DictConfig] = "alpaca_eval_gpt4",
         num_samples: Optional[int] = None,
+        stop_after_generation: bool = False,
         wandb_run: Optional[WandbRun] = None,
     ) -> None:
         """
@@ -45,6 +46,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
             dataset_split=dataset_split,
             output_dir=output_dir + "/alpaca_eval/",
             num_samples=num_samples,
+            stop_after_generation=stop_after_generation,
         )
         self.num_samples = num_samples
         self.annotators_config = annotators_config
@@ -84,6 +86,10 @@ class AlpacaEvalEvaluator(BaseEvaluator):
             )
 
             logger.info(f"Reference responses file: {ref_responses_file}")
+
+        if self.stop_after_generation:
+            logger.info("Stopping evaluation after response generation as requested.")
+            return model_responses_file
 
         folder = self._get_folder(ref_model, ref_epoch)
         annotations_folder = folder / "annotations"
@@ -270,8 +276,11 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         save_path.parent.mkdir(exist_ok=True, parents=True)
 
         model.load(epoch=epoch)
-        outputs = model.generate_responses(prompts=instructions)
+        outputs, metrics = model.generate_responses(prompts=instructions)
         model.unload()
+
+        if metrics and self.wandb_run is not None:
+            self.wandb_run.log({f"eval/bon/{k}": v for k, v in metrics.items()})
 
         model_name = model.get_name(epoch=epoch)
         formatted_outputs = []

@@ -281,7 +281,7 @@ class BaseModel(ABC):
         prompts: list[Any],
         apply_chat_template: bool = True,
         token_callback: Optional[Callable[[str], None]] = None,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Generate responses for a list of prompts.
 
         Args:
@@ -290,7 +290,7 @@ class BaseModel(ABC):
             token_callback: Optional callback for streaming tokens.
 
         Returns:
-            List of dicts with 'prompt' and 'output' keys.
+            Tuple of (List of dicts with 'prompt' and 'output' keys, metrics dict).
         """
         if self.generator is None:
             raise ValueError(

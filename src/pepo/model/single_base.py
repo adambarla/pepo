@@ -142,6 +142,15 @@ class SingleModel(BaseModel):
                     else:
                         sampled_token_ids = top_p_sample(log_probs, temperature, top_p)
 
+                    # Replace tokens with pad_token_id for stopped sequences
+                    sampled_token_ids = torch.where(
+                        stop_signal,
+                        torch.full_like(
+                            sampled_token_ids, self._tokenizer.pad_token_id
+                        ),
+                        sampled_token_ids,
+                    )
+
                     stop_signal = stop_signal | (
                         sampled_token_ids == self._tokenizer.eos_token_id
                     )
