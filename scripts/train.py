@@ -83,6 +83,8 @@ def main(cfg: DictConfig) -> None:
         tokenizer=model.get_tokenizer(),
         device_manager=device_manager,
     )
+    # Sync number of splits with model (ensures single models use 1 split)
+    data_manager.set_num_splits(model.num_models)
 
     # Setup WandB
     wandb_config = cfg.get("wandb", OmegaConf.create({"enabled": False}))

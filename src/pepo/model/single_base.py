@@ -48,6 +48,11 @@ class SingleModel(BaseModel):
         """Check if model is loaded."""
         return self._model is not None
 
+    @property
+    def num_models(self) -> int:
+        """Single model always has 1 model."""
+        return 1
+
     def set_epoch(self, epoch: int, model_idx: Optional[int] = None) -> None:
         """Set trained epoch (model_idx ignored for single model)."""
         self._epoch = epoch

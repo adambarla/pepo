@@ -98,6 +98,11 @@ class BaseModel(ABC):
         """Checkpoint manager for saving/loading models."""
         return self._checkpoint_manager
 
+    @property
+    @abstractmethod
+    def num_models(self) -> int:
+        """Number of models (1 for single, >1 for ensemble)."""
+
     @abstractmethod
     def is_loaded(self) -> bool:
         """Check if models are loaded."""

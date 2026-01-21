@@ -20,11 +20,9 @@ gpu_ids: null  # list of GPU IDs (null = auto-detect)
 dtype: bfloat16
 
 dataset:
-  n_splits: ${L}
   seed: ${seed}
 
 model:
-  num_networks: ${L}
   alpha: ${a}
   beta: ${b}
   generator:
