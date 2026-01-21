@@ -40,7 +40,6 @@ class DataManager:
         dataloader_pin_memory: bool = False,
         shuffle_train: bool = True,
         annotators: Optional[list[BaseAnnotator]] = None,
-        inference_batch_size: int = 8,
         device_manager: Optional["DeviceManager"] = None,
         force_recompute: bool = False,
     ):
@@ -58,7 +57,6 @@ class DataManager:
         self.dataloader_pin_memory = dataloader_pin_memory
         self.shuffle_train = shuffle_train
         self.annotators = annotators or []
-        self.inference_batch_size = inference_batch_size
         self.device_manager = device_manager or get_device_manager()
         self.force_recompute = force_recompute
         self._hub_manager = get_hub_manager()

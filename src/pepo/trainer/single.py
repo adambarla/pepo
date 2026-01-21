@@ -99,8 +99,31 @@ class SingleModelTrainer(BaseTrainer):
             )
 
         if not self.model.is_loaded():
-            load_kwargs = kwargs.get("load_kwargs", {})
-            self.model.load(init_new=not continue_training, **load_kwargs)
+            if continue_training:
+                latest_epoch = self.model.find_latest_epoch(max_epoch=max_epochs)
+                if latest_epoch is None:
+                    logger.warning(
+                        "Continue training enabled but no checkpoint found. "
+                        "Starting training from scratch with new model."
+                    )
+                    self.model.load(init_new=True)
+                elif self.model.can_load_from_epoch(latest_epoch):
+                    logger.info(
+                        f"Continuing training from checkpoint: epoch {latest_epoch}"
+                    )
+                    self.model.load(epoch=latest_epoch)
+                else:
+                    logger.warning(
+                        f"Continue training enabled but cannot load from "
+                        f"epoch {latest_epoch}. "
+                        "Starting training from scratch with new model."
+                    )
+                    self.model.load(init_new=True)
+            else:
+                logger.info("Initializing new model for training...")
+                self.model.load(init_new=True)
+        else:
+            logger.info("Model already loaded. Using existing model for training.")
 
         self._setup_training(model, data_manager, max_epochs, wandb_manager)
 
@@ -123,6 +146,21 @@ class SingleModelTrainer(BaseTrainer):
             if wandb_run is not None and wandb_run.enabled:
                 wandb_run.init_run()
 
+        # Calculate start epoch and global step for resuming
+        train_loader = data_manager.get_dataloader(0, "train", model.train_batch_size)
+        n_batches = len(train_loader)
+        start_epoch = model.get_epoch()
+        global_step = (
+            0
+            if start_epoch == 0
+            else start_epoch * n_batches // self.gradient_accumulation_steps
+        )
+
+        # Fast-forward scheduler if resuming from checkpoint
+        if global_step > 0 and self.scheduler is not None:
+            for _ in range(global_step):
+                self.scheduler.step()
+
         # Initial eval
         best_eval_loss = float("inf")
         if not self.skip_eval:
@@ -132,13 +170,13 @@ class SingleModelTrainer(BaseTrainer):
                     0, "eval", model.eval_batch_size
                 ),
                 device=device,
-                epoch=0,
-                global_step=0,
+                epoch=start_epoch,
+                global_step=global_step,
                 wandb_run=wandb_run,
             )
 
         # Push epoch 0 checkpoint (baseline before training)
-        if model.checkpoint_manager:
+        if start_epoch == 0 and model.checkpoint_manager:
             model.checkpoint_manager.push_model(
                 model=model.model,
                 model_name=model.get_name(),
@@ -151,7 +189,7 @@ class SingleModelTrainer(BaseTrainer):
         patience_counter = 0
         es_min_delta = self.early_stopping_min_delta
 
-        for epoch in range(1, max_epochs + 1):
+        for epoch in range(start_epoch + 1, max_epochs + 1):
             if self.scheduler is None:
                 raise ValueError("Scheduler not initialized")
             if self.optimizer is None:

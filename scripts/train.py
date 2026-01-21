@@ -81,7 +81,6 @@ def main(cfg: DictConfig) -> None:
     data_manager: DataManager = instantiate(
         cfg.dataset,
         tokenizer=model.get_tokenizer(),
-        inference_batch_size=cfg.model.trainer.eval_batch_size,
         device_manager=device_manager,
     )
 
