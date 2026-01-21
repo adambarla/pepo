@@ -1,4 +1,4 @@
-"""SFDEPPO (Simplified DPO) Model."""
+"""SFTDPO (Simplified DPO) Model."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from ..generator import Generator
 from ..loader import CheckpointManager
 from ..trainer import SingleModelTrainer
 from ..utils import get_device_manager, get_hub_manager
-from ..utils.model_utils import get_log_probs, get_next_token_log_probs
-from .base import SingleModel
+from ..utils.model_utils import get_log_probs
+from .single_base import SingleModel
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 _warned_missing_ref_logprobs = False
 
 
-class SFDEPPOModel(SingleModel):
+class SFTDPOModel(SingleModel):
     """Simplified DPO Model."""
 
     def __init__(
@@ -38,7 +38,7 @@ class SFDEPPOModel(SingleModel):
         debug: bool = False,
         **kwargs: Any,
     ):
-        """Initialize SFDEPPO Model."""
+        """Initialize SFTDPO Model."""
         self.beta = beta
         self.sft_weight = sft_weight
         self.debug = debug
@@ -64,6 +64,9 @@ class SFDEPPOModel(SingleModel):
             hub_manager=hub_manager,
             checkpoint_manager=checkpoint_manager,
             tokenizer=tokenizer,
+            train_batch_size=backbone.train_batch_size,
+            eval_batch_size=backbone.eval_batch_size,
+            generation_batch_size=backbone.generator_batch_size,
             trainer=trainer,
             generator=generator,
         )
@@ -81,7 +84,7 @@ class SFDEPPOModel(SingleModel):
             target_modules=backbone.lora_target_modules,
         )
 
-        logger.info(f"SFDEPPOModel initialized with beta={self.beta}")
+        logger.info(f"SFTDPOModel initialized with beta={self.beta}")
 
     def train(
         self,
@@ -139,7 +142,7 @@ class SFDEPPOModel(SingleModel):
         if epoch is not None:
             self._epoch = epoch
 
-        logger.info("Loaded SFDEPPO model")
+        logger.info("Loaded SFTDPO model")
 
     def unload(self) -> None:
         """Unload model from GPU memory to free up resources."""
@@ -147,12 +150,12 @@ class SFDEPPOModel(SingleModel):
             logger.info("Model is already unloaded")
             return
 
-        logger.info("Unloading SFDEPPO model from GPU memory...")
+        logger.info("Unloading SFTDPO model from GPU memory...")
         del self._model
         self._model = None
         self._device_manager.clear_cache()
         self._epoch = 0
-        logger.info("SFDEPPO model unloaded from GPU memory")
+        logger.info("SFTDPO model unloaded from GPU memory")
 
     def save(self) -> None:
         """Save model to Hub."""
@@ -186,7 +189,7 @@ class SFDEPPOModel(SingleModel):
         **kwargs: Any,
     ) -> str:
         model_name = self.model_id.rsplit("/", 1)[-1]
-        repo_name = f"{model_name}-b{self.beta}-sfdeppo"
+        repo_name = f"{model_name}-b{self.beta}-sftdpo"
         if epoch is not None:
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
@@ -269,39 +272,3 @@ class SFDEPPOModel(SingleModel):
             }
 
         return loss, metrics
-
-    def predict(
-        self,
-        device_input_ids: list[torch.Tensor],
-        device_attention_masks: list[torch.Tensor],
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        """Inference prediction using the single model.
-
-        Args:
-            device_input_ids: Input IDs (list of length 1).
-            device_attention_masks: Attention masks (list of length 1).
-
-        Returns:
-            Log probs for the next token (B, V).
-        """
-        if self._model is None:
-            raise RuntimeError(
-                "Model not loaded. Call model.load() before using the model."
-            )
-
-        if len(device_input_ids) != 1 or len(device_attention_masks) != 1:
-            raise ValueError(
-                f"SFDEPPOModel.predict expects input lists of length 1, "
-                f"got {len(device_input_ids)} and {len(device_attention_masks)}"
-            )
-
-        with torch.no_grad():
-            self._model.eval()
-            log_probs = get_next_token_log_probs(
-                self._model,
-                device_input_ids[0],
-                device_attention_masks[0],
-            )
-
-        return log_probs

@@ -3,12 +3,12 @@ defaults:
   - /generator@generator: greedy
   - _self_
 
-_target_: pepo.model.sfdeppo.SFDEPPOModel
+_target_: pepo.model.sftdpo.SFTDPOModel
 backbone: ${backbone}
 num_networks: 1
 
 wandb:
-  tags: ["sfdeppo"]
+  tags: ["sftdpo"]
 
 debug: ${debug}
 beta: 0.1
@@ -18,4 +18,3 @@ trainer:
   training_epochs: 1
 
 generator:
-  batch_size: ${backbone.generator_batch_size}

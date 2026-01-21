@@ -5,6 +5,7 @@ from .chippo import CHIPPOModel
 from .deppo import DEPPOModel
 from .ensemble_base import EnsembleModel
 from .reppo import REPPOModel, REPPORewardModel, RewardHead
+from .sftdpo import SFTDPOModel
 from .single_base import SingleModel
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "REPPOModel",
     "REPPORewardModel",
     "RewardHead",
+    "SFTDPOModel",
 ]
