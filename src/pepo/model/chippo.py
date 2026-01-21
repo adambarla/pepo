@@ -35,6 +35,7 @@ class CHIPPOModel(SingleModel):
         beta_chi: float = 0.1,  # Default for safety
         gamma_chi: float = 1.0,
         r_max_chi: float = 10.0,
+        use_internal_clipping: bool = True,
         trainer: Optional[SingleModelTrainer] = None,
         generator: Optional[Generator] = None,
         debug: bool = False,
@@ -45,6 +46,7 @@ class CHIPPOModel(SingleModel):
         self.beta_chi = beta_chi
         self.gamma_chi = gamma_chi
         self.r_max_chi = r_max_chi
+        self.use_internal_clipping = use_internal_clipping
         self.debug = debug
 
         device_manager = get_device_manager()
@@ -90,7 +92,8 @@ class CHIPPOModel(SingleModel):
 
         logger.info(
             f"CHIPPOModel initialized with alpha={self.alpha_chi}, "
-            f"beta={self.beta_chi}, gamma={self.gamma_chi}, r_max={self.r_max_chi}"
+            f"beta={self.beta_chi}, gamma={self.gamma_chi}, r_max={self.r_max_chi}, "
+            f"use_internal_clipping={self.use_internal_clipping}"
         )
 
     def train(
@@ -178,9 +181,10 @@ class CHIPPOModel(SingleModel):
         **kwargs: Any,
     ) -> str:
         model_name = self.model_id.rsplit("/", 1)[-1]
+        clip_str = "clip" if self.use_internal_clipping else "noclip"
         repo_name = (
             f"{model_name}-a{self.alpha_chi}-b{self.beta_chi}"
-            f"-g{self.gamma_chi}-r{self.r_max_chi}-chippo"
+            f"-g{self.gamma_chi}-r{self.r_max_chi}-{clip_str}-chippo"
         )
         if epoch is not None:
             repo_name = f"{repo_name}-e{epoch}"
@@ -245,42 +249,63 @@ class CHIPPOModel(SingleModel):
         log_ratio_chosen = lprobs_chosen - lprobs_chosen_ref
         log_ratio_rejected = lprobs_reject - lprobs_reject_ref
 
-        # Retrieve XPO hyperparameters
-        # Defaulting to 1.0 if not present, but Table 2 suggests values
-        # like 1.25, 0.1, etc.
-        alpha_chi = getattr(self, "alpha_chi", 1.0)
-        gamma_chi = getattr(self, "gamma_chi", 1.0)
+        # Check if we should use internal clipping (CHIPPO) or original chi2 DPO
+        if self.use_internal_clipping:
+            # Retrieve XPO hyperparameters
+            # Defaulting to 1.0 if not present, but Table 2 suggests values
+            # like 1.25, 0.1, etc.
+            alpha_chi = getattr(self, "alpha_chi", 1.0)
+            gamma_chi = getattr(self, "gamma_chi", 1.0)
 
-        # 2. Define the generalized link function phi_tilde(z)
-        # Formula: phi_tilde(z) = exp(clip(alpha * log_z, -88, 20)) + gamma * log_z
-        def compute_phi_tilde(log_z: torch.Tensor, alpha: float, gamma: float):
-            # Inner clipping for numerical stability of exp()
-            # The text explicitly states clipping the upper range to 20
-            # helps reduce instability and uses range [-88, 20].
-            scaled_log_z = alpha * log_z
-            clipped_scaled_log_z = torch.clamp(scaled_log_z, min=-88, max=20)
+            # 2. Define the generalized link function phi_tilde(z)
+            # Formula: phi_tilde(z) = exp(clip(alpha * log_z, -88, 20)) + gamma * log_z
+            def compute_phi_tilde(log_z: torch.Tensor, alpha: float, gamma: float):
+                # Inner clipping for numerical stability of exp()
+                # The text explicitly states clipping the upper range to 20
+                # helps reduce instability and uses range [-88, 20].
+                scaled_log_z = alpha * log_z
+                clipped_scaled_log_z = torch.clamp(scaled_log_z, min=-88, max=20)
 
-            term1 = torch.exp(clipped_scaled_log_z)
-            term2 = gamma * log_z
+                term1 = torch.exp(clipped_scaled_log_z)
+                term2 = gamma * log_z
 
-            return term1 + term2
+                return term1 + term2
 
-        phi_chosen = compute_phi_tilde(log_ratio_chosen, alpha_chi, gamma_chi)
-        phi_rejected = compute_phi_tilde(log_ratio_rejected, alpha_chi, gamma_chi)
+            phi_chosen = compute_phi_tilde(log_ratio_chosen, alpha_chi, gamma_chi)
+            phi_rejected = compute_phi_tilde(log_ratio_rejected, alpha_chi, gamma_chi)
 
-        # 3. Calculate preference difference
-        logits = self.beta_chi * (phi_chosen - phi_rejected)
+            # 3. Calculate preference difference
+            logits = self.beta_chi * (phi_chosen - phi_rejected)
 
-        # 4. Outer Clipping (from Algorithm 1 context)
-        # While the new text focuses on inner clipping, it says
-        # "utilizing the link function... in Algorithm 1".
-        # Algorithm 1 includes an outer clip of 2 * R_max.
-        clip_limit = 2 * getattr(self, "r_max_chi", 10.0)
-        clipped_logits = torch.clamp(logits, min=-clip_limit, max=clip_limit)
+            # 4. Outer Clipping (from Algorithm 1 context)
+            # While the new text focuses on inner clipping, it says
+            # "utilizing the link function... in Algorithm 1".
+            # Algorithm 1 includes an outer clip of 2 * R_max.
+            clip_limit = 2 * getattr(self, "r_max_chi", 10.0)
+            clipped_logits = torch.clamp(logits, min=-clip_limit, max=clip_limit)
 
-        # 5. Loss Calculation
-        # Minimize negative log sigmoid of the preference difference
-        losses = -F.logsigmoid(clipped_logits)
+            # 5. Loss Calculation
+            # Minimize negative log sigmoid of the preference difference
+            losses = -F.logsigmoid(clipped_logits)
+        else:
+            # Original chi2 DPO loss: φ(z) = z + log(z) where z = π/π_ref
+            # z = exp(log_ratio), so φ(z) = exp(log_ratio) + log_ratio
+            def compute_phi_chi2(log_z: torch.Tensor) -> torch.Tensor:
+                z = torch.exp(log_z)
+                return z + log_z
+
+            phi_chosen = compute_phi_chi2(log_ratio_chosen)
+            phi_rejected = compute_phi_chi2(log_ratio_rejected)
+
+            # Calculate preference difference
+            logits = self.beta_chi * (phi_chosen - phi_rejected)
+
+            # Outer clipping with 2*R_max as in the algorithm
+            clip_limit = 2 * self.r_max_chi
+            clipped_logits = torch.clamp(logits, min=-clip_limit, max=clip_limit)
+
+            # Loss: maximize log σ(clipped_logits), so minimize -log σ(...)
+            losses = -F.logsigmoid(clipped_logits)
         loss = losses.mean()
 
         # Calculate metrics
