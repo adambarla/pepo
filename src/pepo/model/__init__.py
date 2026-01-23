@@ -1,7 +1,7 @@
-"""Model module - provides BaseModel, DEPPOModel, REPPO, and CHIPPO models."""
+"""Model module - provides BaseModel, DEPPOModel, REPPO, and CHI2PO models."""
 
 from .base import BaseModel
-from .chippo import CHIPPOModel
+from .chi2po import CHI2POModel
 from .deppo import DEPPOModel
 from .ensemble_base import EnsembleModel
 from .reppo import REPPOModel, REPPORewardModel, RewardHead
@@ -12,7 +12,7 @@ __all__ = [
     "BaseModel",
     "SingleModel",
     "EnsembleModel",
-    "CHIPPOModel",
+    "CHI2POModel",
     "DEPPOModel",
     "REPPOModel",
     "REPPORewardModel",

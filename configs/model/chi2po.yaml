@@ -3,18 +3,18 @@ defaults:
   - /generator@generator: greedy
   - _self_
 
-_target_: pepo.model.chippo.CHIPPOModel
+_target_: pepo.model.chi2po.CHI2POModel
 backbone: ${backbone}
 
-wandb:
-  tags: ["chippo"]
-
-debug: ${debug}
-beta_chi: 0.1
-alpha_chi: 1.0
-gamma_chi: 1.0
-r_max_chi: 10.0
+alpha: 1.0
+beta: 0.1
+gamma: 1.0
+r_max: 10.0
 use_internal_clipping: true
+debug: false
+
+wandb:
+  tags: ["chi2po"]
 
 trainer:
   training_epochs: 1
