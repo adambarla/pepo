@@ -189,7 +189,7 @@ class SFTDPOModel(SingleModel):
         **kwargs: Any,
     ) -> str:
         model_name = self.model_id.rsplit("/", 1)[-1]
-        repo_name = f"{model_name}-b{self.beta}-sftdpo"
+        repo_name = f"{model_name}-b{self.beta}-sft_weight{self.sft_weight}-sftdpo"
         if epoch is not None:
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
@@ -252,7 +252,7 @@ class SFTDPOModel(SingleModel):
         # Calculate logits: chosen - ref_chosen - rejected + ref_rejected
         logits = lprobs_chosen - lprobs_chosen_ref - lprobs_reject + lprobs_reject_ref
 
-        sft_loss = -lprobs_chosen
+        sft_loss = -lprobs_chosen - lprobs_reject
         losses = -F.logsigmoid(self.beta * logits) + (self.sft_weight * sft_loss)
         loss = losses.mean()
 

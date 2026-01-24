@@ -11,9 +11,7 @@ wandb:
 
 debug: ${debug}
 beta: 0.1
-sft_weight: 1.0
+sft_weight: 0.005
 
 trainer:
   training_epochs: 1
-
-generator:
