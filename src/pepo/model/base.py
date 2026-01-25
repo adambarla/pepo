@@ -221,6 +221,18 @@ class BaseModel(ABC):
     def unload(self) -> None:
         """Unload models from memory."""
 
+    @abstractmethod
+    def to(self, device: torch.device) -> None:
+        """Move model to device."""
+
+    @abstractmethod
+    def cpu(self) -> None:
+        """Move model to CPU."""
+
+    @abstractmethod
+    def clone(self) -> "BaseModel":
+        """Create a deep copy of the model."""
+
     def get_tokenizer(self) -> PreTrainedTokenizerBase:
         """Get the tokenizer."""
         return self.tokenizer

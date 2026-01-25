@@ -65,6 +65,24 @@ class SingleModel(BaseModel):
         """Check if model has checkpoint at the specified epoch."""
         return self.hub_manager.model_exists(self.get_name(), epoch)
 
+    def to(self, device: torch.device) -> None:
+        """Move model to device."""
+        self.model.to(device)
+
+    def cpu(self) -> None:
+        """Move model to CPU."""
+        if self.is_loaded():
+            self.model.cpu()
+
+    def clone(self) -> "SingleModel":
+        """Create a deep copy of the model."""
+        import copy
+
+        new_model = copy.copy(self)
+        if self.is_loaded():
+            new_model.model = copy.deepcopy(self.model)
+        return new_model
+
     def predict(
         self,
         input_ids: torch.Tensor,

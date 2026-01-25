@@ -89,6 +89,38 @@ class EnsembleModel(BaseModel):
                 tokenizer=self.tokenizer,
             )
 
+    def to(self, device: torch.device) -> None:
+        """Move all models to device (only iff shared backbone)."""
+        if not self.shared_backbone:
+            # If not shared, we'd need to move N huge models. Dangerous default.
+            # User should manage manually if they really want that.
+            raise NotImplementedError(
+                "EnsembleModel.to() is only supported for shared backbone models. "
+                "For independent models, manage devices manually."
+            )
+
+        # Move shared backbone (model 0 holds it)
+        self.models[0].to(device)
+
+    def cpu(self) -> None:
+        """Move all models to CPU."""
+        if self.is_loaded():
+            for m in self.models:
+                m.cpu()
+
+    def clone(self) -> "EnsembleModel":
+        """Create a deep copy of the ensemble model."""
+        import copy
+
+        # Shallow copy self to preserve managers
+        new_model = copy.copy(self)
+
+        # Deep copy the list of models (PeftModels)
+        if self.is_loaded():
+            new_model.models = [copy.deepcopy(m) for m in self.models]
+
+        return new_model
+
     @property
     def shared_backbone(self) -> bool:
         """Whether ensemble uses shared backbone. Override in subclass."""
