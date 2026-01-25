@@ -7,3 +7,9 @@ greedy_sampling: false
 temperature: 1.0
 top_p: 0.9
 max_trials: 16  # Max attempts per prompt before accepting best candidate
+
+# Sampling mode (both apply exp(-α/β) penalty from model params):
+# - min: f_out = min_π * exp(-α/β)
+# - mean_std: f_out = (mean_π - η*std_π) * exp(-α/β)
+sampling_mode: "min"
+eta: 1.0  # Std coefficient for mean_std mode
