@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
 import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
 
 import torch
 from tqdm import tqdm
@@ -44,15 +42,27 @@ class BestOfNGenerator(BaseGenerator):
     Assumes shared_backbone=True (all adapters on single model).
     """
 
-    def __init__(self, max_trials: int = 16, **kwargs: Any):
+    def __init__(
+        self,
+        max_trials: int = 16,
+        sampling_mode: Literal["min", "mean_std"] = "min",
+        eta: float = 1.0,
+        **kwargs: Any,
+    ):
         """Initialize Best of N Generator.
 
         Args:
             max_trials: Maximum attempts per prompt before accepting best candidate.
+            sampling_mode: How to compute f_out (both apply exp(-α/β) penalty):
+                - "min": f_out = min_π * exp(-α/β)
+                - "mean_std": f_out = (mean_π - η*std_π) * exp(-α/β)
+            eta: Standard deviation coefficient for mean_std mode.
             **kwargs: Arguments passed to parent Generator.
         """
         super().__init__(**kwargs)
         self.max_trials = max_trials
+        self.sampling_mode = sampling_mode
+        self.eta = eta
         self.greedy_sampling = False  # Force non-greedy for candidate generation
 
     def _extract_response(
@@ -75,7 +85,7 @@ class BestOfNGenerator(BaseGenerator):
         attention_mask: torch.Tensor,
         prompt_lengths: list[int],
         device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute log probs for sequences across all ensemble members.
 
         Args:
@@ -86,7 +96,7 @@ class BestOfNGenerator(BaseGenerator):
             device: Device the model is on.
 
         Returns:
-            Tuple of (proposal_log_probs, min_log_probs, all_log_probs).
+            Tuple of (proposal_log_probs, min_log_probs, mean_log_probs, std_log_probs).
         """
         from ..utils.model_utils import get_log_probs
 
@@ -119,9 +129,11 @@ class BestOfNGenerator(BaseGenerator):
                     batch_log_probs.append(lp.cpu())
                 log_probs_per_model.append(torch.cat(batch_log_probs, dim=0))
 
-        log_probs_tensor = torch.stack(log_probs_per_model, dim=0)
+        log_probs_tensor = torch.stack(log_probs_per_model, dim=0)  # (L, B)
         min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
-        return log_probs_per_model[0], min_log_probs, log_probs_tensor
+        mean_log_probs = log_probs_tensor.mean(dim=0)
+        std_log_probs = log_probs_tensor.std(dim=0)
+        return log_probs_per_model[0], min_log_probs, mean_log_probs, std_log_probs
 
     def _fill_slots(
         self,
@@ -196,8 +208,12 @@ class BestOfNGenerator(BaseGenerator):
         active_slots: list[Slot],
         prompt_end_idx: int,
         device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Score generated candidates with all ensemble members."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Score generated candidates with all ensemble members.
+
+        Returns:
+            Tuple of (proposal_lps, min_lps, mean_lps, std_lps).
+        """
         prompt_lengths = []
         for i, slot in enumerate(active_slots):
             slot.output_ids = output_ids[i : i + 1]
@@ -263,12 +279,6 @@ class BestOfNGenerator(BaseGenerator):
 
         return accepted_this_iter, total_accepted_delta, accepted_trials_sum_delta
 
-    def _duplicate_model(self, model: "EnsembleModel") -> "EnsembleModel":
-        """Create a deep copy of the model for a worker thread."""
-        new_model = copy.copy(model)  # Shallow copy to preserve managers
-        new_model.models = [copy.deepcopy(m) for m in model.models]
-        return new_model
-
     def _init_prompt_states(self, n_prompts: int) -> dict[int, dict[str, Any]]:
         """Initialize per-prompt tracking state."""
         return {
@@ -309,7 +319,7 @@ class BestOfNGenerator(BaseGenerator):
         total_samples_scored = 0
 
         with model.device_manager.request_gpu() as device:
-            model.models[0].to(device)
+            model.to(device)
             try:
                 while True:
                     if pending_queue.empty() and all(s is None for s in slots):
@@ -336,19 +346,39 @@ class BestOfNGenerator(BaseGenerator):
                         output_ids, output_mask, prompt_end_idx = (
                             self._generate_candidates(model, active_slots, tokenizer)
                         )
-                        proposal_lps, min_lps, _ = self._score_candidates(
-                            model,
-                            output_ids,
-                            output_mask,
-                            active_slots,
-                            prompt_end_idx,
-                            device,
+                        proposal_lps, min_lps, mean_lps, std_lps = (
+                            self._score_candidates(
+                                model,
+                                output_ids,
+                                output_mask,
+                                active_slots,
+                                prompt_end_idx,
+                                device,
+                            )
                         )
                     except Exception as e:
                         logger.error(f"Worker {worker_id} error: {e}")
                         raise
 
-                    alphas = torch.exp(min_lps - proposal_lps).clamp(0.0, 1.0)
+                    # Calculate penalty term: exp(-α/β) from model params
+                    model_alpha = getattr(model, "alpha", 0.0)
+                    model_beta = getattr(model, "beta", 0.1)
+                    log_penalty = -model_alpha / model_beta
+
+                    # Compute f_out based on sampling mode
+                    if self.sampling_mode == "min":
+                        # f_out = min_π * exp(-α/β)
+                        f_out_log = min_lps + log_penalty
+                    else:  # mean_std
+                        # f_out = (mean_π - η*std_π) * exp(-α/β) in log space
+                        # We have log probs, so: mean_p = exp(mean_lp), std_p approx
+                        # For numerical stability, work in probability space briefly
+                        mean_p = torch.exp(mean_lps)
+                        std_p = torch.exp(mean_lps) * std_lps.clamp(min=1e-8)
+                        f_out_p = (mean_p - self.eta * std_p).clamp(min=1e-10)
+                        f_out_log = torch.log(f_out_p) + log_penalty
+
+                    alphas = torch.exp(f_out_log - proposal_lps).clamp(0.0, 1.0)
                     _, accepted_delta, trials_delta = self._process_acceptance(
                         active_indices,
                         active_slots,
@@ -385,7 +415,7 @@ class BestOfNGenerator(BaseGenerator):
                                 }
                             )
             finally:
-                model.models[0].cpu()
+                model.cpu()
                 model.device_manager.clear_cache()
 
         logger.info(f"Worker {worker_id} finished. Processed {total_accepted} samples.")
@@ -443,30 +473,29 @@ class BestOfNGenerator(BaseGenerator):
 
         if num_gpus > 1:
             logger.info("Initializing multi-threaded generation...")
-            worker_models = [model] + [
-                self._duplicate_model(model) for _ in range(1, num_gpus)
-            ]
-            with ThreadPoolExecutor(max_workers=num_gpus) as executor:
-                futures = [
-                    executor.submit(
-                        self._worker_loop,
-                        i,
-                        worker_models[i],
-                        pending_queue,
-                        results,
-                        pbar,
-                        pbar_lock,
-                        prompt_states,
-                        state_lock,
-                    )
-                    for i in range(num_gpus)
-                ]
-                for future in futures:
-                    m = future.result()
-                    total_accepted += m["total_accepted"]
-                    accepted_trials_sum += m["accepted_trials_sum"]
-                    total_alpha_sum += m["total_alpha_sum"]
-                    total_samples_scored += m["total_samples_scored"]
+            # Use BaseGenerator's shared parallelism
+            # worker_fn signature mismatch? Base expects (worker_id, model, **kwargs)
+            # here we have many args: pending_queue, results, pbar, etc.
+            # We pass them as kwargs.
+            worker_stats = self._run_parallel_workers(
+                model=model,
+                prompts=prompts,
+                formatted_prompts=formatted_prompts,
+                worker_fn=self._worker_loop,
+                pending_queue=pending_queue,
+                results=results,
+                pbar=pbar,
+                pbar_lock=pbar_lock,
+                prompt_states=prompt_states,
+                state_lock=state_lock,
+            )
+
+            # Aggregate stats
+            for m in worker_stats:
+                total_accepted += m["total_accepted"]
+                accepted_trials_sum += m["accepted_trials_sum"]
+                total_alpha_sum += m["total_alpha_sum"]
+                total_samples_scored += m["total_samples_scored"]
         else:
             m = self._worker_loop(
                 0,
@@ -500,4 +529,4 @@ class BestOfNGenerator(BaseGenerator):
 
     def get_name(self) -> str:
         """Get generator name for file naming."""
-        return f"bon-n{self.max_trials}-{super().get_name()}"
+        return f"bon-{self.sampling_mode}-n{self.max_trials}-{super().get_name()}"

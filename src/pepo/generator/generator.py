@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 import logging
+import queue
+import threading
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
@@ -16,27 +16,85 @@ logger = logging.getLogger(__name__)
 class Generator(BaseGenerator):
     """Simple generator class for producing model responses from instructions."""
 
-    def _move_model_to_device(self, model: "BaseModel", device: torch.device) -> None:
-        """Move the model to specified device."""
-        from ..model import EnsembleModel, SingleModel
+    def _worker_loop(
+        self,
+        worker_id: int,
+        model: "BaseModel",
+        batch_queue: queue.Queue,
+        results: list[dict[str, Any]],
+        results_lock: threading.Lock,
+        token_callback: Optional[Callable[[str], None]] = None,
+    ) -> int:
+        """Worker loop for processing batches of prompts."""
+        total_processed = 0
+        tokenizer = model.get_tokenizer()
 
-        if isinstance(model, EnsembleModel):
-            model.models[0].to(device)
-        elif isinstance(model, SingleModel):
-            model.model.to(device)
-        else:
-            raise TypeError(f"Unknown model type: {type(model)}")
+        # Move model to device (using new model API)
+        # Note: BaseGenerator doesn't enforce expected device handling
+        with model.device_manager.request_gpu() as device:
+            model.to(device)
+            try:
+                while True:
+                    try:
+                        item = batch_queue.get_nowait()
+                    except queue.Empty:
+                        break
 
-    def _move_model_to_cpu(self, model: "BaseModel") -> None:
-        """Move the model to CPU."""
-        from ..model import EnsembleModel, SingleModel
+                    start_idx, batch_prompts, batch_formatted = item
+                    logger.info(
+                        f"Worker {worker_id} processing batch starting at {start_idx}"
+                    )
 
-        if isinstance(model, EnsembleModel):
-            model.models[0].cpu()
-        elif isinstance(model, SingleModel):
-            model.model.cpu()
-        else:
-            raise TypeError(f"Unknown model type: {type(model)}")
+                    tokenizer.padding_side = "left"
+                    tokenized = tokenizer(
+                        batch_formatted,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=False,
+                    )
+                    input_ids = tokenized["input_ids"]
+                    attention_mask = tokenized["attention_mask"]
+
+                    # Generate
+                    output_ids, output_mask = self.generate(
+                        model=model,
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        token_callback=token_callback
+                        if worker_id == 0 and start_idx == 0
+                        else None,
+                    )
+
+                    starting_idx = input_ids.shape[1]
+                    output_mask[:, :starting_idx] = False
+                    output_ids = output_ids.where(
+                        output_mask.bool(), tokenizer.pad_token_id
+                    )
+
+                    batch_outputs = []
+                    for j, prompt in enumerate(batch_prompts):
+                        response = tokenizer.decode(
+                            output_ids[j, starting_idx:], skip_special_tokens=True
+                        )
+                        batch_outputs.append(
+                            {
+                                "index": start_idx + j,
+                                "prompt": prompt,
+                                "output": response,
+                            }
+                        )
+
+                    with results_lock:
+                        results.extend(batch_outputs)
+
+                    total_processed += len(batch_prompts)
+                    batch_queue.task_done()
+
+            finally:
+                model.cpu()
+                model.device_manager.clear_cache()
+
+        return total_processed
 
     def generate(
         self,
@@ -97,62 +155,42 @@ class Generator(BaseGenerator):
         prompts, formatted_prompts = self._process_prompts(
             prompts, tokenizer, apply_chat_template
         )
-        outputs = []
+        num_gpus = model.device_manager.num_available_gpus
+        logger.info(
+            f"Generating responses for {len(prompts)} prompts using {num_gpus} GPUs"
+        )
 
-        logger.info(f"Generating responses for {len(prompts)} prompts")
-        logger.debug("Generation parameters:")
-        logger.debug(f"  max_prompt_length: {self.max_prompt_length}")
-        logger.debug(f"  max_new_tokens: {self.max_new_tokens}")
         batch_size = model.generation_batch_size
-        logger.debug(f"  batch_size: {batch_size}")
-        logger.debug(f"  greedy_sampling: {self.greedy_sampling}")
-        if not self.greedy_sampling:
-            logger.debug(f"  temperature: {self.temperature}")
-            logger.debug(f"  top_p: {self.top_p}")
+        batch_queue = queue.Queue()
 
-        # Hold GPU for entire generation to avoid repeated model transfers
-        with model.device_manager.request_gpu() as device:
-            self._move_model_to_device(model, device)
-            try:
-                for i in range(0, len(prompts), batch_size):
-                    batch_num = i // batch_size + 1
-                    total_batches = (len(prompts) + batch_size - 1) // batch_size
-                    logger.info(f"Generating batch {batch_num}/{total_batches}")
+        # Fill queue
+        for i in range(0, len(prompts), batch_size):
+            batch_prompts = prompts[i : i + batch_size]
+            batch_formatted = formatted_prompts[i : i + batch_size]
+            batch_queue.put((i, batch_prompts, batch_formatted))
 
-                    batch_prompts = prompts[i : i + batch_size]
-                    batch_formatted = formatted_prompts[i : i + batch_size]
+        results = []
+        results_lock = threading.Lock()
 
-                    tokenizer.padding_side = "left"
-                    tokenized = tokenizer(
-                        batch_formatted,
-                        return_tensors="pt",
-                        padding=True,
-                        truncation=False,  # already filtered out the long prompts
-                    )
-                    input_ids = tokenized["input_ids"]
-                    attention_mask = tokenized["attention_mask"]
+        # Use shared parallel worker runner from BaseGenerator
+        # We pass queue and shared results list as kwargs to the worker function
+        # worker_fn signature: (worker_id, model, **kwargs)
+        self._run_parallel_workers(
+            model=model,
+            prompts=prompts,  # Passed mainly for logging
+            formatted_prompts=formatted_prompts,  # Same
+            worker_fn=self._worker_loop,
+            batch_queue=batch_queue,
+            results=results,
+            results_lock=results_lock,
+            token_callback=token_callback,
+        )
 
-                    output_ids, output_mask = self.generate(
-                        model=model,
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        token_callback=token_callback if i == 0 else None,
-                    )
+        # Re-sort results by index to match original prompt order
+        results.sort(key=lambda x: x["index"])
+        final_outputs = [
+            {"prompt": r["prompt"], "output": r["output"]} for r in results
+        ]
 
-                    starting_idx = input_ids.shape[1]
-                    output_mask[:, :starting_idx] = False
-                    output_ids = output_ids.where(
-                        output_mask.bool(), tokenizer.pad_token_id
-                    )
-
-                    for j, prompt in enumerate(batch_prompts):
-                        response = tokenizer.decode(
-                            output_ids[j, starting_idx:], skip_special_tokens=True
-                        )
-                        outputs.append({"prompt": prompt, "output": response})
-            finally:
-                self._move_model_to_cpu(model)
-                model.device_manager.clear_cache()
-
-        logger.info(f"Successfully generated {len(outputs)} responses")
-        return outputs, {}
+        logger.info(f"Successfully generated {len(final_outputs)} responses")
+        return final_outputs, {}

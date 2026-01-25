@@ -11,6 +11,8 @@ if TYPE_CHECKING:
 
     from ..model import BaseModel
 
+from concurrent.futures import ThreadPoolExecutor
+
 logger = logging.getLogger(__name__)
 
 
@@ -137,3 +139,59 @@ class BaseGenerator(ABC):
     def get_short_name(self) -> str:
         parts = [f"mt{self.max_new_tokens}"]
         return "-".join(parts)
+
+    def _run_parallel_workers(
+        self,
+        model: "BaseModel",
+        prompts: list[Any],
+        formatted_prompts: list[str],
+        worker_fn: Callable[..., Any],
+        **worker_kwargs: Any,
+    ) -> list[Any]:
+        """
+        Run generic worker function in parallel across available GPUs.
+
+        Args:
+            model: The model to use.
+            prompts: List of original prompts.
+            formatted_prompts: List of formatted prompts.
+            worker_fn: Function to run in each worker thread.
+                       Signature: (worker_id, model, queue, results, lock, **kwargs)
+            **worker_kwargs: Additional kwargs to pass to worker_fn.
+
+        Returns:
+            List of aggregated results from all workers.
+        """
+        num_gpus = model.device_manager.num_available_gpus
+        logger.info(
+            f"Parallel execution using {num_gpus} GPUs for {len(prompts)} items"
+        )
+
+        # Setup standard batch queue
+        # For simple generation, batches are chunks of prompts.
+        # For BestOfN, queue is initialized differently (individual slots).
+        # To make this truly generic, we might need the caller to provide the queue.
+        # Let's standardize on the caller providing the queue or queue init logic?
+        # Actually, let's keep it simple: this method spins up threads.
+        # The worker_fn and queue management is caller specific mostly,
+        # BUT the model cloning and thread pool is what we want to share.
+
+        if num_gpus > 1:
+            worker_models = [model] + [model.clone() for _ in range(1, num_gpus)]
+
+            with ThreadPoolExecutor(max_workers=num_gpus) as executor:
+                futures = [
+                    executor.submit(worker_fn, i, worker_models[i], **worker_kwargs)
+                    for i in range(num_gpus)
+                ]
+                # We can return results if workers return something
+                # Or caller manages results via a shared list/lock passed in kwargs
+                results = []
+                for f in futures:
+                    res = f.result()
+                    if res:
+                        results.append(res)
+                return results
+        else:
+            # Single GPU
+            return [worker_fn(0, model, **worker_kwargs)]
