@@ -371,14 +371,14 @@ class SingleModelTrainer(BaseTrainer):
                 avg_loss = avg_interval_metrics.get("loss", 0.0)
                 pbar.set_postfix({"loss": f"{avg_loss:.4f}"})
 
-            self._log_metrics(
-                wandb_run=wandb_run,
-                metrics=avg_interval_metrics,
-                step=global_step,
-                prefix="train",
-                add_avg_prefix=False,
-                additional_log_items={"train/lr": scheduler.get_last_lr()[0]},
-            )
+                self._log_metrics(
+                    wandb_run=wandb_run,
+                    metrics=avg_interval_metrics,
+                    step=global_step,
+                    prefix="train",
+                    add_avg_prefix=False,
+                    additional_log_items={"train/lr": scheduler.get_last_lr()[0]},
+                )
 
         pbar.close()
 
