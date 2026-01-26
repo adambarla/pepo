@@ -109,15 +109,38 @@ class EnsembleModel(BaseModel):
                 m.cpu()
 
     def clone(self) -> "EnsembleModel":
-        """Create a deep copy of the ensemble model."""
+        """Create a deep copy of the ensemble model.
+
+        Crucial: The DeviceManager must be shared between clones to ensure
+        proper resource locking and GPU assignment across threads.
+        """
         import copy
 
-        # Shallow copy self to preserve managers
-        new_model = copy.copy(self)
+        # Temporarily detach device_manager to prevent deepcopying it
+        # (Deepcopying creates a new semaphore/queue state, breaking isolation)
+        dm = getattr(self, "_device_manager", None)
+        if dm is not None:
+            self._device_manager = None  # type: ignore
 
-        # Deep copy the list of models (PeftModels)
-        if self.is_loaded():
-            new_model.models = [copy.deepcopy(m) for m in self.models]
+        try:
+            # Shallow copy self to preserve structure (minus DM)
+            new_model = copy.copy(self)
+
+            # Deep copy the list of models (PeftModels) to get independent
+            # weights/buffers
+            if self.is_loaded():
+                new_model.models = [copy.deepcopy(m) for m in self.models]
+
+            # Restore/Attach shared DeviceManager attribute
+            if dm is not None:
+                new_model._device_manager = dm
+                self._device_manager = dm
+
+        except Exception:
+            # Restore if crash
+            if dm is not None:
+                self._device_manager = dm
+            raise
 
         return new_model
 
@@ -243,8 +266,8 @@ class EnsembleModel(BaseModel):
 
             pbar = tqdm(range(max_new_tokens), disable=disable_tqdm, leave=False)
             for i in pbar:
-                if i > 0 and i % 100 == 0:
-                    self._device_manager.clear_cache()
+                # Removed empty_cache to prevent illegal memory access on A100s
+                pass
 
                 log_probs, past_key_values_list = self.predict(
                     input_ids,
