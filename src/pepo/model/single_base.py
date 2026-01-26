@@ -151,8 +151,8 @@ class SingleModel(BaseModel):
         disable_tqdm = os.environ.get("TQDM_DISABLE", "0") == "1"
         pbar = tqdm(range(max_new_tokens), disable=disable_tqdm, leave=False)
         for i in pbar:
-            if i > 0 and i % 100 == 0:
-                self._device_manager.clear_cache()
+            # Removed empty_cache to prevent illegal memory access
+            pass
 
             log_probs, past_key_values = self.predict(
                 input_ids,

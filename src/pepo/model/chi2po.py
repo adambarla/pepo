@@ -160,7 +160,7 @@ class CHI2POModel(SingleModel):
         logger.info("Unloading CHI2PO model from GPU memory...")
         del self._model
         self._model = None
-        self._device_manager.clear_cache()
+        pass
         self._epoch = 0
         logger.info("CHI2PO model unloaded from GPU memory")
 

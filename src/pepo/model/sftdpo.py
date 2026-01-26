@@ -153,7 +153,7 @@ class SFTDPOModel(SingleModel):
         logger.info("Unloading SFTDPO model from GPU memory...")
         del self._model
         self._model = None
-        self._device_manager.clear_cache()
+        # Removed clear_cache to prevent race conditions
         self._epoch = 0
         logger.info("SFTDPO model unloaded from GPU memory")
 

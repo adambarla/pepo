@@ -92,7 +92,6 @@ class Generator(BaseGenerator):
 
             finally:
                 model.cpu()
-                model.device_manager.clear_cache()
 
         return total_processed
 

@@ -1,6 +1,7 @@
 import os
 
 # Prevent CUDA memory fragmentation (must be set before any CUDA operations)
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 

@@ -195,11 +195,7 @@ class REPPORewardModel(EnsembleModel):
             logger.info("Models already unloaded")
             return
 
-        for model in self._models:
-            del model
-
         self._models = None
-        self._device_manager.clear_cache()
         self.epochs_per_model = [0] * self._num_models
         logger.info("All submodels unloaded from GPU memory")
 

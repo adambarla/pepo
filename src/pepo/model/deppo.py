@@ -206,11 +206,10 @@ class DEPPOModel(EnsembleModel):
 
         logger.info(f"Unloading {len(self.models)} submodels from GPU memory...")
 
-        for model in self.models:
-            del model
+        for i, model in enumerate(self.models):
+            pass
 
         self._models = None
-        self._device_manager.clear_cache()
         self.epochs_per_model = [0] * self._num_models
 
         logger.info("All submodels unloaded from GPU memory")

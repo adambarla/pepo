@@ -202,7 +202,6 @@ class LogprobAnnotator(BaseAnnotator):
 
         for model in models:
             del model
-        device_manager.clear_cache()
 
         # Combine results
         final_chosen: list[float] = []
