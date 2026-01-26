@@ -46,7 +46,7 @@ class BestOfNGenerator(BaseGenerator):
         self,
         max_trials: int = 16,
         sampling_mode: Literal["min", "mean_std"] = "min",
-        eta: float = 1.0,
+        eta: float = 0.1,
         **kwargs: Any,
     ):
         """Initialize Best of N Generator.
@@ -416,7 +416,8 @@ class BestOfNGenerator(BaseGenerator):
                             )
             finally:
                 model.cpu()
-                model.device_manager.clear_cache()
+                # Removed empty_cache to prevent illegal memory access
+                pass
 
         logger.info(f"Worker {worker_id} finished. Processed {total_accepted} samples.")
         return {
@@ -529,4 +530,9 @@ class BestOfNGenerator(BaseGenerator):
 
     def get_name(self) -> str:
         """Get generator name for file naming."""
-        return f"bon-{self.sampling_mode}-n{self.max_trials}-{super().get_name()}"
+        parts = [f"bon-{self.sampling_mode}"]
+        if self.sampling_mode == "mean_std":
+            parts.append(f"eta{self.eta}")
+        parts.append(f"n{self.max_trials}")
+        parts.append(super().get_name())
+        return "-".join(parts)

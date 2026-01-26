@@ -68,7 +68,7 @@ class BaseGenerator(ABC):
         """
         processed: list[tuple[str, str, int]] = []  # (original, formatted, length)
 
-        for prompt in prompts:
+        for i, prompt in enumerate(prompts):
             if apply_chat_template:
                 if isinstance(prompt, list) and self._is_formatted(prompt):
                     messages = prompt
@@ -90,8 +90,25 @@ class BaseGenerator(ABC):
             tokens = tokenizer(formatted, truncation=False, add_special_tokens=False)
             length = len(tokens["input_ids"])
 
-            if length <= self.max_prompt_length:
-                processed.append((prompt, formatted, length))
+            if length > self.max_prompt_length:
+                logger.warning(
+                    "Truncating prompt %d from %d to %d tokens",
+                    i,
+                    length,
+                    self.max_prompt_length,
+                )
+                # Decode -> Truncate -> Encode is safer but slower.
+                # We can just slice input_ids if we re-decode for consistency?
+                # Actually, output generation usually takes input_ids.
+                # But our interface returns strings (prompts).
+                # So we must modify the string 'formatted' to fit.
+                # This is tricky with special tokens.
+                # Let's take the tokenizer.decode strategy.
+                trunc_ids = tokens["input_ids"][: self.max_prompt_length]
+                formatted = tokenizer.decode(trunc_ids, skip_special_tokens=False)
+                length = self.max_prompt_length
+
+            processed.append((prompt, formatted, length))
 
         if len(processed) < len(prompts):
             logger.warning(
