@@ -12,7 +12,7 @@ MODELS = [
 ]
 
 
-def fetch_runs(entity="pepo-team", project="pepo", filters=None):
+def fetch_runs(entity=os.getenv("WANDB_ENTITY"), project="pepo", filters=None):
     """
     Fetches runs from WandB.
 
@@ -32,7 +32,7 @@ def fetch_runs(entity="pepo-team", project="pepo", filters=None):
 
 
 def get_runs_df(
-    entity="pepo-team",
+    entity=os.getenv("WANDB_ENTITY"),
     project="pepo",
     filters=None,
     cache_path=None,
