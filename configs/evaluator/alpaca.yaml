@@ -6,7 +6,7 @@ annotators_config:
   llama3_70b_judge:
     prompt_template: alpaca_eval_llama3_70b_fn
     completions_kwargs:
-      batch_size: 32
+      batch_size: 1
       max_new_tokens: 512
       model_name: meta-llama/Meta-Llama-3-70B-Instruct
       model_kwargs:
@@ -15,5 +15,5 @@ annotators_config:
     fn_completions: "huggingface_local_completions"
     fn_completion_parser: "ranking_parser"
 
-output_dir: "${hydra:runtime.cwd}/eval_outputs"
+output_dir: "${hydra:runtime.cwd}/outputs"
 num_samples: null

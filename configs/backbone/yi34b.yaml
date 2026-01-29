@@ -14,4 +14,4 @@ compile: false
 
 train_batch_size: 4
 eval_batch_size: 32
-generator_batch_size: 32
+generator_batch_size: 16

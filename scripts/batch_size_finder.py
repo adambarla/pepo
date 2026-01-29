@@ -99,7 +99,6 @@ def test_train_batch_size(
         cfg.dataset,
         n_splits=model.num_models,
         tokenizer=tokenizer,
-        inference_batch_size=cfg.model.trainer.eval_batch_size,
         device_manager=model.device_manager,
         shuffle_train=False,
     )
@@ -158,7 +157,6 @@ def test_eval_batch_size(
         cfg.dataset,
         n_splits=model.num_models,
         tokenizer=tokenizer,
-        inference_batch_size=cfg.model.trainer.eval_batch_size,
         device_manager=model.device_manager,
         shuffle_train=False,
     )

@@ -1,9 +1,8 @@
-"""DEPPO (Direct Ensemble Pessimistic Preference Optimization) Model."""
+"""CHIPPO (Chi^2 Preference Optimization) Model."""
 
 from __future__ import annotations
 
 import logging
-import math
 from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, cast
 
 if TYPE_CHECKING:
@@ -15,10 +14,10 @@ from peft import LoraConfig, PeftModel
 
 from ..generator import Generator
 from ..loader import CheckpointManager
-from ..trainer import EnsembleTrainer
+from ..trainer import SingleModelTrainer
 from ..utils import get_device_manager, get_hub_manager
 from ..utils.model_utils import get_log_probs
-from .ensemble_base import EnsembleModel
+from .single_base import SingleModel
 
 logger = logging.getLogger(__name__)
 
@@ -26,22 +25,30 @@ logger = logging.getLogger(__name__)
 _warned_missing_ref_logprobs = False
 
 
-class DEPPOModel(EnsembleModel):
-    """Direct Ensemble Pessimistic Preference Optimization Model."""
+class CHI2POModel(SingleModel):
+    """Chi^2 Preference Optimization Model."""
 
     def __init__(
         self,
         backbone: "BackboneConfig",
-        num_networks: int,  # This will be overridden by L in config usually
         alpha: float,
         beta: float = 0.1,  # Default for safety
-        trainer: Optional[EnsembleTrainer] = None,
+        gamma: float = 1.0,
+        r_max: float = 10.0,
+        use_internal_clipping: bool = True,
+        trainer: Optional[SingleModelTrainer] = None,
         generator: Optional[Generator] = None,
         debug: bool = False,
-        shared_backbone: bool = True,
         **kwargs: Any,
     ):
-        """Initialize DEPPO Model."""
+        """Initialize Chi^2 Model."""
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.r_max = r_max
+        self.use_internal_clipping = use_internal_clipping
+        self.debug = debug
+
         device_manager = get_device_manager()
         hub_manager = get_hub_manager()
 
@@ -58,7 +65,6 @@ class DEPPOModel(EnsembleModel):
         )
 
         super().__init__(
-            num_models=num_networks,
             model_id=backbone.model_id,
             device_manager=device_manager,
             hub_manager=hub_manager,
@@ -71,12 +77,8 @@ class DEPPOModel(EnsembleModel):
             generator=generator,
         )
 
-        self.alpha = alpha
-        self.beta = beta
         self.tokenizer_id = backbone.tokenizer_id
         self.chat_template = backbone.chat_template
-        self.debug = debug
-        self._shared_backbone = shared_backbone
         self.compile_model = backbone.compile
 
         self.lora_config = LoraConfig(
@@ -89,14 +91,10 @@ class DEPPOModel(EnsembleModel):
         )
 
         logger.info(
-            f"DEPPOModel initialized with alpha={self.alpha}, "
-            f"beta={self.beta}, L={self._num_models}"
+            f"CHI2POModel initialized with alpha={self.alpha}, "
+            f"beta={self.beta}, gamma={self.gamma}, r_max={self.r_max}, "
+            f"use_internal_clipping={self.use_internal_clipping}"
         )
-
-    @property
-    def shared_backbone(self) -> bool:
-        """Whether ensemble uses shared backbone."""
-        return self._shared_backbone
 
     def train(
         self,
@@ -105,8 +103,7 @@ class DEPPOModel(EnsembleModel):
         wandb_manager: Optional[Any] = None,
         continue_training: bool = False,
     ) -> None:
-        """
-        Train the model using the configured trainer.
+        """Train the model using the configured trainer.
 
         Args:
             data_manager: Data manager for training data.
@@ -132,99 +129,63 @@ class DEPPOModel(EnsembleModel):
         epoch: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
-        """
-        Load models into memory.
+        """Load model into memory.
 
         Args:
-            init_new: If True, initialize new models instead of loading from hub.
-            epoch: If provided, load models from this epoch checkpoint.
+            init_new: If True, initialize new model instead of loading from hub.
+            epoch: If provided, load model from this epoch checkpoint.
         """
-        if self.is_loaded():
+        if self._model is not None:
             self.unload()
 
-        self._models = self._load_models(init_new=init_new, epoch=epoch)
-        if epoch is not None:
-            self.epochs_per_model = [epoch] * self._num_models
-
-    def _load_models(
-        self, init_new: bool = False, epoch: Optional[int] = None
-    ) -> list[PeftModel]:
-        logger.info(
-            f"Loading {self._num_models} models "
-            f"(shared_backbone={self.shared_backbone})..."
+        self._model = self.checkpoint_manager.load_model(
+            model_id=self.model_id,
+            model_name=self.get_name(),
+            model_idx=0,
+            lora_config=self.lora_config,
+            init_new=init_new,
+            epoch=epoch,
         )
+        if epoch is not None:
+            self._epoch = epoch
 
-        if self.shared_backbone:
-            # Load the first model (base + adapter 0)
-            base_model = self.checkpoint_manager.load_model(
-                model_id=self.model_id,
-                model_name=self.get_name(model_idx=0),
-                model_idx=0,
-                lora_config=self.lora_config,
-                init_new=init_new,
-                epoch=epoch,
-            )
-
-            # Load remaining adapters into the same base model
-            for model_idx in range(1, self._num_models):
-                adapter_name = f"adapter_{model_idx}"
-                if not init_new:
-                    self.checkpoint_manager.load_adapter(
-                        model=base_model,
-                        model_name=self.get_name(model_idx=model_idx),
-                        adapter_name=adapter_name,
-                        epoch=epoch,
-                    )
-                else:
-                    raise NotImplementedError(
-                        "shared_backbone=True only supported "
-                        "for loading trained models."
-                    )
-
-            return [base_model] * self._num_models
-
-        models = []
-        for model_idx in range(self._num_models):
-            models.append(
-                self.checkpoint_manager.load_model(
-                    model_id=self.model_id,
-                    model_name=self.get_name(model_idx=model_idx),
-                    model_idx=model_idx,
-                    lora_config=self.lora_config,
-                    init_new=init_new,
-                    epoch=epoch,
-                )
-            )
-        return models
+        logger.info("Loaded CHI2PO model")
 
     def unload(self) -> None:
-        """
-        Unload all submodels from GPU memory to free up resources.
-        """
-        if not self.is_loaded():
-            raise RuntimeError("Model not loaded. Call load() first.")
+        """Unload model from GPU memory to free up resources."""
+        if self._model is None:
+            logger.info("Model is already unloaded")
+            return
 
-        logger.info(f"Unloading {len(self.models)} submodels from GPU memory...")
+        logger.info("Unloading CHI2PO model from GPU memory...")
+        del self._model
+        self._model = None
+        pass
+        self._epoch = 0
+        logger.info("CHI2PO model unloaded from GPU memory")
 
-        for i, model in enumerate(self.models):
-            pass
-
-        self._models = None
-        self.epochs_per_model = [0] * self._num_models
-
-        logger.info("All submodels unloaded from GPU memory")
+    def save(self) -> None:
+        """Save model to Hub."""
+        self.checkpoint_manager.push_model(
+            model=self.model,
+            model_name=self.get_name(),
+            tokenizer=self.tokenizer,
+            epochs=self._epoch,
+        )
 
     def get_name(
         self,
         *,
         epoch: Optional[int] = None,
-        model_idx: Optional[int] = None,
+        model_idx: Optional[int] = None,  # Ignored - single model
         **kwargs: Any,
     ) -> str:
         model_name = self.model_id.rsplit("/", 1)[-1]
-        repo_name = f"{model_name}-a{self.alpha}-b{self.beta}-L{self._num_models}"
-        if model_idx is not None:
-            repo_name = f"{repo_name}-l{model_idx}"
+        clip_str = "-noclip" if not self.use_internal_clipping else ""
+        repo_name = (
+            f"{model_name}-a{self.alpha}-b{self.beta}"
+            f"-g{self.gamma}-r{self.r_max}{clip_str}-chi2po"
+        )
         if epoch is not None:
             repo_name = f"{repo_name}-e{epoch}"
         return repo_name
@@ -235,16 +196,6 @@ class DEPPOModel(EnsembleModel):
         model: PeftModel,
         device: torch.device,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Compute DPO loss for the ensemble expert.
-
-        Args:
-            batch: Training batch.
-            model: Submodel (expert) to train.
-            device: Device to run computation on.
-
-        Returns:
-            Tuple of (loss, metrics).
-        """
         batch = {k: v.to(device) for k, v in batch.items()}
 
         chosen_ids = batch["chosen_input_ids"]
@@ -294,26 +245,77 @@ class DEPPOModel(EnsembleModel):
                         debug=self.debug,
                     )
 
-        pi_log_ratio = lprobs_chosen - lprobs_reject
-        ref_log_ratio = lprobs_chosen_ref - lprobs_reject_ref
-        alpha_offset = math.log(1.0 + self.alpha)
-        argument = self.beta * (pi_log_ratio - ref_log_ratio - alpha_offset)
-        dpo_loss_components = -F.logsigmoid(argument)
-        loss = dpo_loss_components.mean()
+        # 1. Calculate Log Ratios: log(z) = log(pi) - log(pi_ref)
+        log_ratio_chosen = lprobs_chosen - lprobs_chosen_ref
+        log_ratio_rejected = lprobs_reject - lprobs_reject_ref
+
+        # Check if we should use internal clipping (CHIPPO) or original chi2 DPO
+        if self.use_internal_clipping:
+            # Retrieve XPO hyperparameters
+            alpha = getattr(self, "alpha", 1.0)
+            gamma = getattr(self, "gamma", 1.0)
+
+            # 2. Define the generalized link function phi_tilde(z)
+            # Formula: phi_tilde(z) = exp(clip(alpha * log_z, -88, 20)) + gamma * log_z
+            def compute_phi_tilde(log_z: torch.Tensor, alpha: float, gamma: float):
+                # Inner clipping for numerical stability of exp()
+                # The text explicitly states clipping the upper range to 20
+                # helps reduce instability and uses range [-88, 20].
+                scaled_log_z = alpha * log_z
+                clipped_scaled_log_z = torch.clamp(scaled_log_z, min=-88, max=20)
+
+                term1 = torch.exp(clipped_scaled_log_z)
+                term2 = gamma * log_z
+
+                return term1 + term2
+
+            phi_chosen = compute_phi_tilde(log_ratio_chosen, alpha, gamma)
+            phi_rejected = compute_phi_tilde(log_ratio_rejected, alpha, gamma)
+
+            # 3. Calculate preference difference
+            logits = self.beta * (phi_chosen - phi_rejected)
+
+            # 4. Outer Clipping (from Algorithm 1 context)
+            # While the new text focuses on inner clipping, it says
+            # "utilizing the link function... in Algorithm 1".
+            # Algorithm 1 includes an outer clip of 2 * R_max.
+            clip_limit = 2 * getattr(self, "r_max", 10.0)
+            clipped_logits = torch.clamp(logits, min=-clip_limit, max=clip_limit)
+
+            # 5. Loss Calculation
+            # Minimize negative log sigmoid of the preference difference
+            losses = -F.logsigmoid(clipped_logits)
+        else:
+            # Original chi2 DPO loss: φ(z) = z + log(z) where z = π/π_ref
+            # z = exp(log_ratio), so φ(z) = exp(log_ratio) + log_ratio
+            def compute_phi_chi2(log_z: torch.Tensor) -> torch.Tensor:
+                z = torch.exp(log_z)
+                return z + log_z
+
+            phi_chosen = compute_phi_chi2(log_ratio_chosen)
+            phi_rejected = compute_phi_chi2(log_ratio_rejected)
+
+            # Calculate preference difference
+            logits = self.beta * (phi_chosen - phi_rejected)
+
+            # Outer clipping with 2*R_max as in the algorithm
+            clip_limit = 2 * self.r_max
+            clipped_logits = torch.clamp(logits, min=-clip_limit, max=clip_limit)
+
+            # Loss: maximize log σ(clipped_logits), so minimize -log σ(...)
+            losses = -F.logsigmoid(clipped_logits)
+        loss = losses.mean()
 
         # Calculate metrics
         with torch.no_grad():
-            margins = pi_log_ratio - ref_log_ratio
-            accuracy = (margins > alpha_offset).float().mean()
+            accuracy = (clipped_logits > 0).float().mean()
+            dpo_margins = log_ratio_chosen - log_ratio_rejected
+
             metrics = {
                 "loss": loss.item(),
-                "rewards/chosen": (self.beta * (lprobs_chosen - lprobs_chosen_ref))
-                .mean()
-                .item(),
-                "rewards/rejected": (self.beta * (lprobs_reject - lprobs_reject_ref))
-                .mean()
-                .item(),
-                "rewards/margins": (self.beta * margins).mean().item(),
+                "rewards/chosen": (self.beta * log_ratio_chosen).mean().item(),
+                "rewards/rejected": (self.beta * log_ratio_rejected).mean().item(),
+                "rewards/margins": (self.beta * dpo_margins).mean().item(),
                 "accuracy": accuracy.item(),
             }
 

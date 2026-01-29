@@ -28,8 +28,6 @@ class BaseTrainer(ABC):
         scheduler_name: str,
         scheduler_num_warmup_steps: int,
         wandb_config: DictConfig,
-        train_batch_size: int,
-        eval_batch_size: int,
         gradient_accumulation_steps: int = 1,
         early_stopping_patience: Optional[int] = None,
         early_stopping_min_delta: float = 0.0,
@@ -43,8 +41,6 @@ class BaseTrainer(ABC):
         self.scheduler_name = scheduler_name
         self.scheduler_num_warmup_steps = scheduler_num_warmup_steps
         self.wandb_config = wandb_config
-        self.batch_size = train_batch_size
-        self.eval_batch_size = eval_batch_size
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.early_stopping_patience = early_stopping_patience
         self.early_stopping_min_delta = early_stopping_min_delta

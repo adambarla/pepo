@@ -74,6 +74,44 @@ For running on SLURM clusters, use the scripts in `scripts/slurm/`:
 - **`*.slurm`**: Batch job scripts for training and evaluation (e.g., `train.slurm`, `eval.slurm`).
 - **`connect_to_node.sh`**: Connects to an existing interactive job. Shows a menu of all active jobs with details (job name, node, start time, time remaining) to help you choose which node to connect to. (can connect to batch jobs too)
 
+### GPU Job Queue (Shared Servers)
+
+For shared GPU servers without SLURM, use the GPU job queue scheduler (`scripts/gpu_queue.py`). It automatically runs queued jobs when the required number of GPUs become available.
+
+#### Quick Start
+
+```bash
+# Add jobs to the queue (default: 2 GPUs per job)
+uv run scripts/gpu_queue.py add "uv run scripts/train.py model=deppo L=1 a=0.0"
+uv run scripts/gpu_queue.py add --gpus 4 "uv run scripts/train.py model=deppo L=4 a=0.1"
+
+# Start the daemon (runs in background, polls every 30s)
+uv run scripts/gpu_queue.py start
+
+# Check queue status and GPU availability
+uv run scripts/gpu_queue.py status
+```
+
+#### Commands
+
+| Command | Description |
+|---------|-------------|
+| `add --gpus N "cmd"` | Add a job requiring N GPUs (default: 2) |
+| `start` | Start the background daemon |
+| `stop` | Stop the daemon |
+| `status` | Show queue, running jobs, and GPU state |
+| `cancel <id>` | Remove a pending job |
+| `logs <id>` | View job output logs |
+| `clear` | Clear completed jobs |
+
+#### How It Works
+
+- Jobs run from the project root (`~/pepo`)
+- Queue data stored in `~/.gpu_queue/jobs.json`
+- Job logs saved to `~/.gpu_queue/logs/<job_id>.log`
+- A GPU is considered "free" if using < 5GB memory
+- Jobs execute in FIFO order when enough GPUs are available
+
 ### Configuration Management
 
 This project uses [Hydra](https://hydra.cc/) for configuration management. Configuration files are stored in the `configs` directory, with `configs/train.yaml` as the default (specified in `scripts/train.py`).
@@ -128,10 +166,10 @@ This project uses pre-commit hooks to ensure code quality and consistency. **All
 uv sync --group dev
 
 # Install pre-commit hooks
-pre-commit install
+uv run pre-commit install
 
 # Optional: Install commit-msg hook for conventional commits
-pre-commit install --hook-type commit-msg
+uv run pre-commit install --hook-type commit-msg
 ```
 
 The hooks will automatically:

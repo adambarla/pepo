@@ -1,13 +1,16 @@
+from __future__ import annotations
+
 import dataclasses
 import logging
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import wandb
 from omegaconf import OmegaConf
 from wandb.util import generate_id
 
-from ..generator import Generator
-from ..model import BaseModel
+if TYPE_CHECKING:
+    from ..generator import Generator
+    from ..model import BaseModel
 
 logger = logging.getLogger(__name__)
 
