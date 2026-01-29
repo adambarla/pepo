@@ -16,3 +16,8 @@ arena-hard-auto/data/
 .env
 
 wandb/
+
+# Local cache
+.cache/
+
+gpu-queue/
