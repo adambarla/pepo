@@ -6,7 +6,7 @@ repos:
       # Clean Jupyter notebooks
       - id: nb-clean
         name: nb-clean
-        entry: uv run nb-clean clean
+        entry: uvx --with nb-clean nb-clean clean
         language: system
         files: \.ipynb$
         description: "Clean Jupyter notebooks by removing outputs and metadata"
@@ -14,7 +14,7 @@ repos:
       # Ruff: Linting + Import Sorting
       - id: ruff
         name: ruff check
-        entry: uv run ruff check
+        entry: uvx ruff check
         language: system
         types: [python]
         # --select I enables isort rules
@@ -23,7 +23,7 @@ repos:
       # Ruff: Formatting (Replaces Black)
       - id: ruff-format
         name: ruff format
-        entry: uv run ruff format
+        entry: uvx ruff format
         language: system
         types: [python]
 
