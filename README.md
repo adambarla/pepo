@@ -4,7 +4,7 @@ A project for preference alignment of language models using techniques like DPO 
 
 ## Installation
 
-The installation process is simplified and works across all platforms:
+The installation process is simplified for CUDA-enabled systems (Linux/Windows):
 
 1. **Edit `pyproject.toml`** to set the correct CUDA version for your system:
     Open `pyproject.toml`
@@ -46,15 +46,20 @@ The project uses environment variables for configuration. Create a `.env` file i
 cp .env.example .env
 ```
 
-Then edit `.env` and set your HuggingFace token:
+Then edit `.env` and fill in all the values:
 
-```
+```bash
+# HuggingFace Token (needs WRITE permissions for pushing models)
+# Get from: https://huggingface.co/settings/tokens
 HF_TOKEN=your_huggingface_token_here
+
+# Weights & Biases Configuration (for experiment tracking)
+WANDB_API_KEY=your_wandb_token_here
+WANDB_ENTITY=your_wandb_entity
+
+# HuggingFace Hub Base Directory (custom cache/storage location)
+HF_HUB_BASE_DIR=your_hf_hub_base_dir
 ```
-
-Get your token from: https://huggingface.co/settings/tokens
-
-**Note**: Make sure your token has WRITE permissions if you plan to push models to the HuggingFace Hub.
 
 ## Running the Project
 
@@ -80,43 +85,6 @@ For running on SLURM clusters, use the scripts in `scripts/slurm/`:
 - **`*.slurm`**: Batch job scripts for training and evaluation (e.g., `train.slurm`, `eval.slurm`).
 - **`connect_to_node.sh`**: Connects to an existing interactive job. Shows a menu of all active jobs with details (job name, node, start time, time remaining) to help you choose which node to connect to. (can connect to batch jobs too)
 
-### GPU Job Queue (Shared Servers)
-
-For shared GPU servers without SLURM, use the GPU job queue scheduler (`scripts/gpu_queue.py`). It automatically runs queued jobs when the required number of GPUs become available.
-
-#### Quick Start
-
-```bash
-# Add jobs to the queue (default: 2 GPUs per job)
-uv run scripts/gpu_queue.py add "uv run scripts/train.py model=deppo L=1 a=0.0"
-uv run scripts/gpu_queue.py add --gpus 4 "uv run scripts/train.py model=deppo L=4 a=0.1"
-
-# Start the daemon (runs in background, polls every 30s)
-uv run scripts/gpu_queue.py start
-
-# Check queue status and GPU availability
-uv run scripts/gpu_queue.py status
-```
-
-#### Commands
-
-| Command | Description |
-|---------|-------------|
-| `add --gpus N "cmd"` | Add a job requiring N GPUs (default: 2) |
-| `start` | Start the background daemon |
-| `stop` | Stop the daemon |
-| `status` | Show queue, running jobs, and GPU state |
-| `cancel <id>` | Remove a pending job |
-| `logs <id>` | View job output logs |
-| `clear` | Clear completed jobs |
-
-#### How It Works
-
-- Jobs run from the project root (`~/pepo`)
-- Queue data stored in `~/.gpu_queue/jobs.json`
-- Job logs saved to `~/.gpu_queue/logs/<job_id>.log`
-- A GPU is considered "free" if using < 5GB memory
-- Jobs execute in FIFO order when enough GPUs are available
 
 ### Configuration Management
 
@@ -174,3 +142,6 @@ uv sync --group dev
 # Install pre-commit hooks
 uv run pre-commit install
 ```
+
+**Note for macOS/non-CUDA users**:
+While you cannot run the training scripts locally without a CUDA device, you can still contribute to the codebase. The pre-commit hooks are configured to use `uvx`, so they will run in isolated environments without requiring you to install the project's heavy CUDA dependencies.
