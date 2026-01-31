@@ -63,11 +63,9 @@ exclude = [
 [tool.ruff]
 src = ["src"]
 exclude = [
-    "alpaca_eval",
-    "arena-hard-auto",
-    "LLM",
     "figures",
     "notebooks",
+    "alpaca_eval",
 ]
 
 [tool.ruff.lint.isort]

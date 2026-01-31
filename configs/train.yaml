@@ -10,12 +10,12 @@ wandb:
   project: "pepo"
   tags: []
   notes: null
-  entity: "pepo-team"
+  entity: ${oc.env:WANDB_ENTITY,null}
   mode: "online"
 
 # Global manager settings (flat config, not Hydra instantiated)
 push_to_hub: ${sync}
-hub_base_dir: "PessimisticDPO"
+hub_base_dir: ${oc.env:HF_HUB_BASE_DIR,PEPO_Models}
 gpu_ids: null  # list of GPU IDs (null = auto-detect)
 dtype: bfloat16
 

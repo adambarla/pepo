@@ -7,6 +7,6 @@
 #SBATCH --account=infra01
 #SBATCH --exclusive --mem=450G
 
-cd ~/PEPO
+cd ~/pepo
 
 uv run scripts/benchmark.py "$@"

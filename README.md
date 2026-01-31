@@ -1,4 +1,4 @@
-# PEPO - Preference Optimization Project
+# PEPO
 
 A project for preference alignment of language models using techniques like DPO (Direct Preference Optimization), RLHF (Reinforcement Learning from Human Feedback), and PEPO.
 
@@ -7,20 +7,26 @@ A project for preference alignment of language models using techniques like DPO 
 The installation process is simplified and works across all platforms:
 
 1. **Edit `pyproject.toml`** to set the correct CUDA version for your system:
-   - Open `pyproject.toml`
-   - Update the `url` in the `[tool.uv.index]` section to match your CUDA version:
-     ```toml
-     [[tool.uv.index]]
-     name = "pytorch"
-     url = "https://download.pytorch.org/whl/cu126"  # Change cu126 to your CUDA version (e.g., cu118, cu121)
-     ```
+    Open `pyproject.toml`
+    Update the `url` in the `[tool.uv.index]` section to match your CUDA version:
+    ```toml
+    [[tool.uv.index]]
+    name = "pytorch"
+    url = "https://download.pytorch.org/whl/cu126"  # Change cu126 to your CUDA version (e.g., cu118, cu121)
+    ```
 
 2. **Install dependencies:**
-   ```bash
-   uv sync
-   ```
+    ```bash
+    uv sync
+    ```
 
    This will create a virtual environment and install all required packages, including PyTorch with the specified CUDA version.
+
+3. **The `alpaca_eval` library is included in this package**.
+    If you cloned this repo, run:
+    ```bash
+    git submodule update --init --recursive
+    ```
 
 ### Adding Dependencies
 
@@ -159,7 +165,7 @@ The values in the `train.yaml` config file can be overridden by the command line
 
 ### Pre-commit hooks
 
-This project uses pre-commit hooks to ensure code quality and consistency. **All contributors must set up pre-commit hooks**:
+This project uses pre-commit hooks to ensure code quality and consistency.
 
 ```bash
 # Install development dependencies
@@ -167,16 +173,4 @@ uv sync --group dev
 
 # Install pre-commit hooks
 uv run pre-commit install
-
-# Optional: Install commit-msg hook for conventional commits
-uv run pre-commit install --hook-type commit-msg
 ```
-
-The hooks will automatically:
-- **Clean Jupyter notebooks** by removing output cells
-- **Format code** with Black and isort
-- **Lint code** with Ruff
-- **Type check** with mypy
-- **Check for common issues** like trailing whitespace, large files, etc.
-
-**Important**: Pre-commit hooks are enforced via GitHub Actions. Pull requests will fail if checks don't pass.
