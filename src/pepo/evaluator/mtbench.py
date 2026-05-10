@@ -18,6 +18,11 @@ from ..model import BaseModel
 from ..utils import WandbRun
 from .base import BaseEvaluator
 from .judges import BaseJudge, JudgePrompt
+from .mt_bench_data import (
+    default_judge_prompts_path,
+    default_question_path,
+    default_reference_answer_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +31,7 @@ _SCORE_PATTERNS = (
     re.compile(r"(?:rating|score)\s*[:=]\s*(\d+(?:\.\d+)?)(?:\s*/\s*10)?", re.I),
     re.compile(r"\b(\d+(?:\.\d+)?)\s*/\s*10\b"),
 )
+_PAIRWISE_PATTERN = re.compile(r"\[\[\s*([ABC])\s*\]\]", re.I)
 _REFERENCE_CATEGORIES = {"math", "reasoning", "coding"}
 
 
@@ -48,9 +54,9 @@ class MTBenchEvaluator(BaseEvaluator):
 
     def __init__(
         self,
-        questions_file: str,
         output_dir: str,
         judge: BaseJudge | DictConfig | Mapping[str, Any],
+        questions_file: Optional[str] = None,
         judge_prompts_file: Optional[str] = None,
         reference_answers_file: Optional[str] = None,
         dataset_id: str = "mt_bench",
@@ -66,12 +72,10 @@ class MTBenchEvaluator(BaseEvaluator):
             num_samples=num_samples,
             stop_after_generation=stop_after_generation,
         )
-        self.questions_file = Path(questions_file)
-        self.judge_prompts_file = (
-            Path(judge_prompts_file) if judge_prompts_file is not None else None
-        )
-        self.reference_answers_file = (
-            Path(reference_answers_file) if reference_answers_file is not None else None
+        self.questions_file = self._resolve_questions_file(questions_file)
+        self.judge_prompts_file = self._resolve_judge_prompts_file(judge_prompts_file)
+        self.reference_answers_file = self._resolve_reference_answers_file(
+            reference_answers_file
         )
         self.judge = self._init_judge(judge)
         self.wandb_run = wandb_run
@@ -89,8 +93,12 @@ class MTBenchEvaluator(BaseEvaluator):
         **kwargs: Any,
     ) -> Path:
         if ref_model is not None:
-            raise ValueError(
-                "MTBenchEvaluator currently supports single-model grading."
+            return self._evaluate_pairwise(
+                model=model,
+                epoch=epoch,
+                ref_model=ref_model,
+                ref_epoch=ref_epoch,
+                overwrite=overwrite,
             )
 
         answers_file = self._get_or_generate(model, epoch=epoch, overwrite=overwrite)
@@ -123,6 +131,61 @@ class MTBenchEvaluator(BaseEvaluator):
             judgments=judgments,
             answers=self._load_jsonl(answers_file),
             model_name=self._get_filename(model, epoch),
+        )
+        leaderboard.to_csv(leaderboard_file, index=True)
+        self._log_metrics(leaderboard=leaderboard, model=model, epoch=epoch)
+        return judgments_file
+
+    def _evaluate_pairwise(
+        self,
+        model: BaseModel,
+        epoch: Optional[int],
+        ref_model: BaseModel,
+        ref_epoch: Optional[int],
+        overwrite: bool,
+    ) -> Path:
+        self.check_generator_consistency(model, ref_model)
+        answers_file = self._get_or_generate(model, epoch=epoch, overwrite=overwrite)
+        ref_answers_file = self._get_or_generate(
+            ref_model, epoch=ref_epoch, overwrite=overwrite
+        )
+        logger.info("MT-Bench answers file: %s", answers_file)
+        logger.info("MT-Bench reference answers file: %s", ref_answers_file)
+
+        if self.stop_after_generation:
+            logger.info("Stopping MT-Bench evaluation after response generation.")
+            return answers_file
+
+        folder = self._get_folder(ref_model=ref_model, ref_epoch=ref_epoch)
+        judgments_folder = folder / "judgments"
+        judgments_folder.mkdir(parents=True, exist_ok=True)
+        leaderboards_folder = folder / "leaderboards"
+        leaderboards_folder.mkdir(parents=True, exist_ok=True)
+
+        filename = self._get_filename(model, epoch)
+        judgments_file = judgments_folder / f"{filename}_pairwise_judgments.jsonl"
+        leaderboard_file = leaderboards_folder / f"{filename}_pairwise_leaderboard.csv"
+
+        answers = self._load_jsonl(answers_file)
+        ref_answers = self._load_jsonl(ref_answers_file)
+        model_name = model.get_name(epoch=epoch)
+        ref_model_name = ref_model.get_name(epoch=ref_epoch)
+        if overwrite or not judgments_file.exists():
+            judgments = self._judge_pairwise_answers(
+                answers=answers,
+                ref_answers=ref_answers,
+                model_name=model_name,
+                ref_model_name=ref_model_name,
+            )
+            self._write_jsonl(judgments_file, judgments)
+        else:
+            judgments = self._load_jsonl(judgments_file)
+
+        leaderboard = self._build_pairwise_leaderboard(
+            judgments=judgments,
+            answers=answers,
+            model_name=self._get_filename(model, epoch),
+            ref_model_name=self._get_filename(ref_model, ref_epoch),
         )
         leaderboard.to_csv(leaderboard_file, index=True)
         self._log_metrics(leaderboard=leaderboard, model=model, epoch=epoch)
@@ -269,6 +332,74 @@ class MTBenchEvaluator(BaseEvaluator):
             )
         return judgments
 
+    def _judge_pairwise_answers(
+        self,
+        answers: list[dict[str, Any]],
+        ref_answers: list[dict[str, Any]],
+        model_name: str,
+        ref_model_name: str,
+    ) -> list[dict[str, Any]]:
+        answers_by_question_id = {
+            int(answer["question_id"]): answer for answer in answers
+        }
+        ref_answers_by_question_id = {
+            int(answer["question_id"]): answer for answer in ref_answers
+        }
+        judge_prompt_items: list[tuple[dict[str, Any], JudgePrompt]] = []
+        for question in self.questions:
+            answer_turns = answers_by_question_id[question.question_id]["choices"][0][
+                "turns"
+            ]
+            ref_answer_turns = ref_answers_by_question_id[question.question_id][
+                "choices"
+            ][0]["turns"]
+            for turn_index in (0, 1):
+                template = self._select_pairwise_judge_template(question, turn_index)
+                prompt = self._format_pairwise_judge_prompt(
+                    template=template,
+                    question=question,
+                    answer_a_turns=answer_turns,
+                    answer_b_turns=ref_answer_turns,
+                    turn_index=turn_index,
+                )
+                metadata = {
+                    "question_id": question.question_id,
+                    "category": question.category,
+                    "turn": turn_index + 1,
+                    "model_id": model_name,
+                    "ref_model_id": ref_model_name,
+                    "assistant_a": model_name,
+                    "assistant_b": ref_model_name,
+                    "judge_prompt": template.name,
+                }
+                judge_prompt_items.append((metadata, prompt))
+
+        logger.info(
+            "Pairwise judging %d MT-Bench answer turns", len(judge_prompt_items)
+        )
+        prompts = [item[1] for item in judge_prompt_items]
+        try:
+            completions = self.judge.generate(prompts)
+        finally:
+            self.judge.unload()
+
+        judgments = []
+        for (metadata, prompt), completion in zip(
+            judge_prompt_items, completions, strict=True
+        ):
+            verdict = self.parse_pairwise_verdict(completion)
+            judgments.append(
+                {
+                    **metadata,
+                    "verdict": verdict,
+                    "winner": self._pairwise_winner(verdict, metadata),
+                    "judge_output": completion,
+                    "system_prompt": prompt.system_prompt,
+                    "user_prompt": prompt.user_prompt,
+                }
+            )
+        return judgments
+
     def _format_judge_prompt(
         self,
         template: JudgePromptTemplate,
@@ -291,6 +422,32 @@ class MTBenchEvaluator(BaseEvaluator):
             user_prompt=template.prompt_template.format(**values),
         )
 
+    def _format_pairwise_judge_prompt(
+        self,
+        template: JudgePromptTemplate,
+        question: MTBenchQuestion,
+        answer_a_turns: Sequence[str],
+        answer_b_turns: Sequence[str],
+        turn_index: int,
+    ) -> JudgePrompt:
+        values = {
+            "question": question.turns[turn_index],
+            "answer_a": answer_a_turns[turn_index],
+            "answer_b": answer_b_turns[turn_index],
+            "question_1": question.turns[0],
+            "question_2": question.turns[1],
+            "answer_a_1": answer_a_turns[0],
+            "answer_a_2": answer_a_turns[1],
+            "answer_b_1": answer_b_turns[0],
+            "answer_b_2": answer_b_turns[1],
+            "ref_answer_1": self._get_reference_answer(question.question_id, 0),
+            "ref_answer_2": self._get_reference_answer(question.question_id, 1),
+        }
+        return JudgePrompt(
+            system_prompt=template.system_prompt,
+            user_prompt=template.prompt_template.format(**values),
+        )
+
     def _select_judge_template(
         self,
         question: MTBenchQuestion,
@@ -302,6 +459,19 @@ class MTBenchEvaluator(BaseEvaluator):
             key = "single-math-v1-multi-turn" if turn_index == 1 else "single-math-v1"
         else:
             key = "single-v1-multi-turn" if turn_index == 1 else "single-v1"
+        return self.judge_prompts[key]
+
+    def _select_pairwise_judge_template(
+        self,
+        question: MTBenchQuestion,
+        turn_index: int,
+    ) -> JudgePromptTemplate:
+        has_reference = question.question_id in self.reference_answers
+        use_reference = question.category in _REFERENCE_CATEGORIES and has_reference
+        if use_reference:
+            key = "pair-math-v1-multi-turn" if turn_index == 1 else "pair-math-v1"
+        else:
+            key = "pair-v2-multi-turn" if turn_index == 1 else "pair-v2"
         return self.judge_prompts[key]
 
     def _build_leaderboard(
@@ -334,6 +504,31 @@ class MTBenchEvaluator(BaseEvaluator):
         for category, group in judgments_df.groupby("category"):
             category_scores = pd.to_numeric(group["score"], errors="coerce")
             metrics[f"{category}_score"] = float(category_scores.mean())
+
+        return pd.DataFrame.from_dict({model_name: metrics}, orient="index")
+
+    def _build_pairwise_leaderboard(
+        self,
+        judgments: list[dict[str, Any]],
+        answers: list[dict[str, Any]],
+        model_name: str,
+        ref_model_name: str,
+    ) -> pd.DataFrame:
+        judgments_df = pd.DataFrame(judgments)
+        verdicts = judgments_df["verdict"]
+        metrics: dict[str, float | int | str] = {
+            "ref_model": ref_model_name,
+            "win_rate": float((verdicts == "A").mean()),
+            "loss_rate": float((verdicts == "B").mean()),
+            "tie_rate": float((verdicts == "C").mean()),
+            "parse_error_rate": float(verdicts.isna().mean()),
+            "n_questions": len(answers),
+            "n_judgments": len(judgments),
+            "avg_output_chars": self._avg_output_chars(answers),
+        }
+        for category, group in judgments_df.groupby("category"):
+            group_verdicts = group["verdict"]
+            metrics[f"{category}_win_rate"] = float((group_verdicts == "A").mean())
 
         return pd.DataFrame.from_dict({model_name: metrics}, orient="index")
 
@@ -404,7 +599,7 @@ class MTBenchEvaluator(BaseEvaluator):
 
         prompts = {}
         for record in self._load_jsonl(self.judge_prompts_file):
-            if record.get("type") != "single":
+            if record.get("type") not in {"single", "pairwise"}:
                 continue
             prompts[str(record["name"])] = JudgePromptTemplate(
                 name=str(record["name"]),
@@ -414,6 +609,28 @@ class MTBenchEvaluator(BaseEvaluator):
         defaults = self._default_judge_prompts()
         defaults.update(prompts)
         return defaults
+
+    @staticmethod
+    def _resolve_judge_prompts_file(
+        judge_prompts_file: Optional[str],
+    ) -> Optional[Path]:
+        if judge_prompts_file is not None:
+            return Path(judge_prompts_file)
+        return default_judge_prompts_path()
+
+    @staticmethod
+    def _resolve_questions_file(questions_file: Optional[str]) -> Path:
+        if questions_file is not None:
+            return Path(questions_file)
+        return default_question_path()
+
+    @staticmethod
+    def _resolve_reference_answers_file(
+        reference_answers_file: Optional[str],
+    ) -> Optional[Path]:
+        if reference_answers_file is not None:
+            return Path(reference_answers_file)
+        return default_reference_answer_path()
 
     def _load_reference_answers(self) -> dict[int, list[str]]:
         if self.reference_answers_file is None:
@@ -440,6 +657,25 @@ class MTBenchEvaluator(BaseEvaluator):
             score = float(match.group(1))
             if 0.0 <= score <= 10.0:
                 return score
+        return None
+
+    @staticmethod
+    def parse_pairwise_verdict(completion: str) -> Optional[str]:
+        match = _PAIRWISE_PATTERN.search(completion)
+        if match is None:
+            return None
+        return match.group(1).upper()
+
+    @staticmethod
+    def _pairwise_winner(
+        verdict: Optional[str], metadata: Mapping[str, Any]
+    ) -> Optional[str]:
+        if verdict == "A":
+            return str(metadata["assistant_a"])
+        if verdict == "B":
+            return str(metadata["assistant_b"])
+        if verdict == "C":
+            return "tie"
         return None
 
     @staticmethod

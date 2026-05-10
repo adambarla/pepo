@@ -1,8 +1,8 @@
 _target_: pepo.evaluator.mtbench.MTBenchEvaluator
 
-questions_file: "${hydra:runtime.cwd}/data/mt_bench/question.jsonl"
-judge_prompts_file: "${hydra:runtime.cwd}/data/mt_bench/judge_prompts.jsonl"
-reference_answers_file: "${hydra:runtime.cwd}/data/mt_bench/reference_answer/gpt-4.jsonl"
+questions_file: null
+judge_prompts_file: null
+reference_answers_file: null
 
 output_dir: "${hydra:runtime.cwd}/outputs"
 num_samples: null
