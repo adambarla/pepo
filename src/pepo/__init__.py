@@ -8,7 +8,7 @@ warnings.filterwarnings(
     "ignore", message=".*pkg_resources is deprecated.*", category=UserWarning
 )
 
-from .evaluator import AlpacaEvalEvaluator, BaseEvaluator  # noqa: E402
+from .evaluator import AlpacaEvalEvaluator, BaseEvaluator, MTBenchEvaluator  # noqa: E402
 from .model import BaseModel, DEPPOModel  # noqa: E402
 from .trainer import BaseTrainer, EnsembleTrainer, SingleModelTrainer  # noqa: E402
 
@@ -20,4 +20,5 @@ __all__ = [
     "SingleModelTrainer",
     "BaseEvaluator",
     "AlpacaEvalEvaluator",
+    "MTBenchEvaluator",
 ]
