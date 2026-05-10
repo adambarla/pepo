@@ -2,7 +2,7 @@ _target_: pepo.evaluator.mtbench.MTBenchEvaluator
 
 questions_file: "${hydra:runtime.cwd}/data/mt_bench/question.jsonl"
 judge_prompts_file: "${hydra:runtime.cwd}/data/mt_bench/judge_prompts.jsonl"
-reference_answers_file: null
+reference_answers_file: "${hydra:runtime.cwd}/data/mt_bench/reference_answer/gpt-4.jsonl"
 
 output_dir: "${hydra:runtime.cwd}/outputs"
 num_samples: null
@@ -15,18 +15,20 @@ judge:
   host: 127.0.0.1
   port: 8000
   api_key: EMPTY
+  vllm_executable: "${hydra:runtime.cwd}/.venv-vllm/bin/vllm"
   max_tokens: 512
   temperature: 0.0
   top_p: 1.0
-  tensor_parallel_size: 8
+  tensor_parallel_size: null
   dtype: float16
   gpu_memory_utilization: 0.9
   max_model_len: null
   trust_remote_code: false
   startup_timeout: 1800.0
   request_timeout: 600.0
-  shutdown_timeout: 60.0
+  shutdown_timeout: 10.0
   poll_interval: 5.0
   log_path: "${hydra:runtime.cwd}/outputs/mt_bench/vllm_judge.log"
   extra_args:
     - --disable-log-requests
+    - --disable-custom-all-reduce

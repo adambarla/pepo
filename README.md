@@ -71,6 +71,33 @@ Run scripts using `uv run`:
 uv run scripts/eval.py
 ```
 
+Run MT-Bench with PEPO answer generation and managed vLLM judging:
+
+```bash
+uv run scripts/eval.py evaluator=mtbench
+```
+
+The managed judge uses `evaluator.judge.vllm_executable`, which defaults to `.venv-vllm/bin/vllm` in the repo root. This keeps vLLM in a Python 3.12 environment while PEPO stays on Python 3.13:
+
+```bash
+uv venv .venv-vllm --python 3.12 --seed --managed-python --clear
+uv pip install --python .venv-vllm/bin/python "vllm==0.10.1" --torch-backend=cu128
+uv pip install --python .venv-vllm/bin/python "transformers>=4.55.0,<5"
+```
+
+Override `evaluator.judge.vllm_executable=/path/to/vllm` if vLLM is provided by a module or another environment.
+
+For a GPU smoke test, first generate only PEPO answers, then reuse those answers while the evaluator starts and stops the vLLM judge:
+
+```bash
+uv run scripts/eval.py evaluator=mtbench ns=1 stop_after_generation=true
+uv run scripts/eval.py evaluator=mtbench ns=1 overwrite=false
+```
+
+The MT-Bench evaluator unloads the PEPO model before launching the managed vLLM judge server. Judge tensor parallelism defaults to all GPUs visible to the device manager, so `CUDA_VISIBLE_DEVICES=1,2` starts vLLM with `--tensor-parallel-size 2`. If the cluster judge differs from the default `meta-llama/Meta-Llama-3-70B-Instruct`, override it with `evaluator.judge.model_name=...` and, if needed, `evaluator.judge.tensor_parallel_size=...`.
+
+Judging is sequential and shows a temporary `Judging MT-Bench` progress bar over the vLLM HTTP calls. WandB eval runs include the evaluator in the run name and job type, plus `model:<name>` and `evaluator:<name>` tags.
+
 Or run the training script:
 
 ```bash

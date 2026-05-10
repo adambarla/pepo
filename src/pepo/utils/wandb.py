@@ -180,11 +180,14 @@ class WandbManager:
         model_name: str,
         generator_name: str,
         epoch: Optional[int],
+        evaluator_name: Optional[str] = None,
     ) -> str:
         """Generate run name for evaluation runs."""
         parts = [model_name, generator_name]
         if epoch is not None:
             parts.append(f"e{epoch}")
+        if evaluator_name:
+            parts.append(evaluator_name)
         parts.append("eval")
         return "-".join(parts)
 
@@ -343,6 +346,7 @@ class WandbManager:
         model: BaseModel,
         generator: Generator,
         epoch: Optional[int] = None,
+        evaluator_name: Optional[str] = None,
     ) -> Optional["WandbRun"]:
         """
         Get a wandb handler for evaluation that shares group with training run.
@@ -354,6 +358,7 @@ class WandbManager:
             model: Model instance for evaluation. Must have get_name() method.
             generator: Generator instance. Must have get_name() method.
             epoch: Optional epoch number for unique run naming.
+            evaluator_name: Optional evaluator name to include in run metadata.
 
         Returns:
             WandbRun instance for the evaluation run, or None if wandb disabled.
@@ -367,20 +372,29 @@ class WandbManager:
         model_name = model.get_name()
         generator_name = generator.get_name()
         group = self.find_training_run_group(model, model_idx=0)
-        run_name = self._generate_eval_run_name(model_name, generator_name, epoch)
+        run_name = self._generate_eval_run_name(
+            model_name,
+            generator_name,
+            epoch,
+            evaluator_name=evaluator_name,
+        )
         existing_run_id = self.find_run_by_name(run_name)
+        tags = self._get_base_tags(model)
+        tags.append(f"model:{model_name}")
+        if evaluator_name:
+            tags.append(f"evaluator:{evaluator_name}")
 
         handler = WandbRun(
             enabled=self.enabled,
             wandb_module=self.wandb,
             project=self.project,
-            tags=self._get_base_tags(model),
+            tags=tags,
             notes=self.notes,
             entity=self.entity,
             mode=self.mode,
             cfg=self.cfg,
             run_name=run_name,
-            job_type="evaluation",
+            job_type=f"evaluation/{evaluator_name}" if evaluator_name else "evaluation",
             group=group,
             run_id=existing_run_id,  # Will resume if existing run found
         )

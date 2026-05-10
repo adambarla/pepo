@@ -3,6 +3,8 @@ logs/
 **/*out*
 .venv/
 .venv
+.venv-vllm/
+.venv-vllm
 arena-hard-auto/logs/*
 
 .ipynb_checkpoints/

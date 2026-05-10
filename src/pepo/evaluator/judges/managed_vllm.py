@@ -3,12 +3,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Optional, Sequence
 from urllib import error, request
 
+from tqdm.auto import tqdm
+
+from ...utils import get_device_manager
 from .base import BaseJudge, JudgePrompt
 
 logger = logging.getLogger(__name__)
@@ -24,10 +28,11 @@ class ManagedVLLMJudge(BaseJudge):
         host: str = "127.0.0.1",
         port: int = 8000,
         api_key: str = "EMPTY",
+        vllm_executable: str = "vllm",
         max_tokens: int = 512,
         temperature: float = 0.0,
         top_p: float = 1.0,
-        tensor_parallel_size: int = 1,
+        tensor_parallel_size: Optional[int] = None,
         dtype: str = "auto",
         gpu_memory_utilization: Optional[float] = None,
         max_model_len: Optional[int] = None,
@@ -46,6 +51,7 @@ class ManagedVLLMJudge(BaseJudge):
         self.host = host
         self.port = port
         self.api_key = api_key
+        self.vllm_executable = vllm_executable
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.top_p = top_p
@@ -69,7 +75,15 @@ class ManagedVLLMJudge(BaseJudge):
         if not prompts:
             return []
         self._ensure_server()
-        return [self._chat_completion(prompt) for prompt in prompts]
+        return [
+            self._chat_completion(prompt)
+            for prompt in tqdm(
+                prompts,
+                desc="Judging MT-Bench",
+                unit="prompt",
+                leave=False,
+            )
+        ]
 
     def unload(self) -> None:
         if self._process is None:
@@ -93,6 +107,7 @@ class ManagedVLLMJudge(BaseJudge):
             return
 
         command = self._build_command()
+        self._validate_runtime(command)
         logger.info("Starting vLLM judge server: %s", " ".join(command))
         stdout = subprocess.DEVNULL
         stderr = subprocess.DEVNULL
@@ -116,9 +131,11 @@ class ManagedVLLMJudge(BaseJudge):
         start_time = time.monotonic()
         while time.monotonic() - start_time < self.startup_timeout:
             if self._process is not None and self._process.poll() is not None:
+                log_tail = self._read_log_tail()
                 raise RuntimeError(
                     "vLLM judge server exited during startup with code "
                     f"{self._process.returncode}"
+                    + (f"\nRecent vLLM log lines:\n{log_tail}" if log_tail else "")
                 )
             if self._is_ready():
                 logger.info("vLLM judge server is ready")
@@ -193,7 +210,7 @@ class ManagedVLLMJudge(BaseJudge):
             ]
 
         command = [
-            "vllm",
+            self.vllm_executable,
             "serve",
             self.model_name,
             "--host",
@@ -205,7 +222,7 @@ class ManagedVLLMJudge(BaseJudge):
             "--api-key",
             self.api_key,
             "--tensor-parallel-size",
-            str(self.tensor_parallel_size),
+            str(self._resolve_tensor_parallel_size()),
             "--dtype",
             self.dtype,
         ]
@@ -220,7 +237,61 @@ class ManagedVLLMJudge(BaseJudge):
         command.extend(self.extra_args)
         return command
 
+    def _validate_runtime(self, command: Sequence[str]) -> None:
+        if not command:
+            raise ValueError("vLLM judge command is empty")
+
+        executable = command[0]
+        if os.path.sep not in executable and shutil.which(executable) is None:
+            raise RuntimeError(
+                "Could not find the vLLM executable "
+                f"{executable!r} on PATH. Install vLLM in this environment, load the "
+                "cluster module that provides it, or set "
+                "evaluator.judge.vllm_executable to the vLLM executable path."
+            )
+
+        visible_gpu_count = self._visible_gpu_count()
+        tensor_parallel_size = self._resolve_tensor_parallel_size()
+        if visible_gpu_count is not None and tensor_parallel_size > visible_gpu_count:
+            raise RuntimeError(
+                "vLLM judge tensor_parallel_size="
+                f"{tensor_parallel_size} but only {visible_gpu_count} GPU(s) "
+                "are visible through CUDA_VISIBLE_DEVICES. Expose enough GPUs for "
+                "the judge model or override evaluator.judge.tensor_parallel_size "
+                "and evaluator.judge.model_name."
+            )
+
+    def _resolve_tensor_parallel_size(self) -> int:
+        if self.tensor_parallel_size is not None:
+            return self.tensor_parallel_size
+        try:
+            return get_device_manager().num_available_gpus
+        except RuntimeError:
+            visible_gpu_count = self._visible_gpu_count()
+            if visible_gpu_count is not None:
+                return max(1, visible_gpu_count)
+            return 1
+
+    @staticmethod
+    def _visible_gpu_count() -> Optional[int]:
+        value = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if value is None or value.strip() == "":
+            return None
+        if value.strip() == "-1":
+            return 0
+        return len([item for item in value.split(",") if item.strip()])
+
     def _close_log_handle(self) -> None:
         if self._log_handle is not None:
             self._log_handle.close()
             self._log_handle = None
+
+    def _read_log_tail(self, max_lines: int = 80) -> str:
+        if self.log_path is None or not self.log_path.exists():
+            return ""
+        try:
+            with open(self.log_path, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()
+        except OSError:
+            return ""
+        return "".join(lines[-max_lines:]).strip()

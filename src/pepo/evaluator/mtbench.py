@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import logging
@@ -20,7 +21,11 @@ from .judges import BaseJudge, JudgePrompt
 
 logger = logging.getLogger(__name__)
 
-_SCORE_PATTERN = re.compile(r"\[\[(\d+(?:\.\d+)?)\]\]")
+_SCORE_PATTERNS = (
+    re.compile(r"\[\[\s*(\d+(?:\.\d+)?)\s*\]\]"),
+    re.compile(r"(?:rating|score)\s*[:=]\s*(\d+(?:\.\d+)?)(?:\s*/\s*10)?", re.I),
+    re.compile(r"\b(\d+(?:\.\d+)?)\s*/\s*10\b"),
+)
 _REFERENCE_CATEGORIES = {"math", "reasoning", "coding"}
 
 
@@ -66,9 +71,7 @@ class MTBenchEvaluator(BaseEvaluator):
             Path(judge_prompts_file) if judge_prompts_file is not None else None
         )
         self.reference_answers_file = (
-            Path(reference_answers_file)
-            if reference_answers_file is not None
-            else None
+            Path(reference_answers_file) if reference_answers_file is not None else None
         )
         self.judge = self._init_judge(judge)
         self.wandb_run = wandb_run
@@ -86,7 +89,9 @@ class MTBenchEvaluator(BaseEvaluator):
         **kwargs: Any,
     ) -> Path:
         if ref_model is not None:
-            raise ValueError("MTBenchEvaluator currently supports single-model grading.")
+            raise ValueError(
+                "MTBenchEvaluator currently supports single-model grading."
+            )
 
         answers_file = self._get_or_generate(model, epoch=epoch, overwrite=overwrite)
         logger.info("MT-Bench answers file: %s", answers_file)
@@ -175,11 +180,13 @@ class MTBenchEvaluator(BaseEvaluator):
             )
             turn_2_by_prompt = self._outputs_by_prompt(turn_2_outputs)
             turn_2_answers = [
-                turn_2_by_prompt[self._prompt_key(prompt)]
-                for prompt in turn_2_prompts
+                turn_2_by_prompt[self._prompt_key(prompt)] for prompt in turn_2_prompts
             ]
         finally:
-            model.unload()
+            try:
+                model.unload()
+            finally:
+                self._cleanup_cuda_after_unload()
 
         self._log_generation_metrics(
             metrics={**turn_1_metrics, **turn_2_metrics},
@@ -196,7 +203,9 @@ class MTBenchEvaluator(BaseEvaluator):
             answer_records.append(
                 {
                     "question_id": question.question_id,
-                    "answer_id": self._answer_id(model_name, question.question_id, turns),
+                    "answer_id": self._answer_id(
+                        model_name, question.question_id, turns
+                    ),
                     "model_id": model_name,
                     "choices": [{"index": 0, "turns": turns}],
                     "tstamp": time.time(),
@@ -204,7 +213,9 @@ class MTBenchEvaluator(BaseEvaluator):
             )
 
         self._write_jsonl(answers_file, answer_records)
-        logger.info("Saved %d MT-Bench answers to %s", len(answer_records), answers_file)
+        logger.info(
+            "Saved %d MT-Bench answers to %s", len(answer_records), answers_file
+        )
 
     def _judge_answers(
         self,
@@ -336,8 +347,9 @@ class MTBenchEvaluator(BaseEvaluator):
             return
 
         generator_config = "unknown"
-        if getattr(model, "generator", None) is not None:
-            generator_config = model.generator.get_short_name()
+        generator = model.generator
+        if generator is not None:
+            generator_config = generator.get_short_name()
         metric_prefix = f"eval/mt_bench/{generator_config}"
         metrics = leaderboard.iloc[0].to_dict()
         log_dict = {f"{metric_prefix}/{key}": value for key, value in metrics.items()}
@@ -353,7 +365,10 @@ class MTBenchEvaluator(BaseEvaluator):
     ) -> None:
         if not metrics or self.wandb_run is None or not self.wandb_run.enabled:
             return
-        generator_config = model.generator.get_short_name()
+        generator = model.generator
+        generator_config = (
+            generator.get_short_name() if generator is not None else "unknown"
+        )
         metric_prefix = f"eval/mt_bench/{generator_config}"
         log_dict = {f"{metric_prefix}/{key}": value for key, value in metrics.items()}
         if epoch is not None:
@@ -378,7 +393,9 @@ class MTBenchEvaluator(BaseEvaluator):
                 )
         if self.num_samples is not None and self.num_samples > 0:
             questions = questions[: self.num_samples]
-        logger.info("Loaded %d MT-Bench questions from %s", len(questions), self.questions_file)
+        logger.info(
+            "Loaded %d MT-Bench questions from %s", len(questions), self.questions_file
+        )
         return questions
 
     def _load_judge_prompts(self) -> dict[str, JudgePromptTemplate]:
@@ -416,10 +433,28 @@ class MTBenchEvaluator(BaseEvaluator):
 
     @staticmethod
     def parse_score(completion: str) -> Optional[float]:
-        match = _SCORE_PATTERN.search(completion)
-        if match is None:
-            return None
-        return float(match.group(1))
+        for pattern in _SCORE_PATTERNS:
+            match = pattern.search(completion)
+            if match is None:
+                continue
+            score = float(match.group(1))
+            if 0.0 <= score <= 10.0:
+                return score
+        return None
+
+    @staticmethod
+    def _cleanup_cuda_after_unload() -> None:
+        gc.collect()
+        try:
+            import torch
+        except ImportError:
+            return
+        if not torch.cuda.is_available():
+            return
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        if hasattr(torch.cuda, "ipc_collect"):
+            torch.cuda.ipc_collect()
 
     @staticmethod
     def _outputs_by_prompt(outputs: Sequence[dict[str, Any]]) -> dict[str, str]:
@@ -488,8 +523,8 @@ class MTBenchEvaluator(BaseEvaluator):
                     "level of detail. Begin with a short explanation. Be as "
                     "objective as possible. After the explanation, rate the "
                     "response from 1 to 10 by replacing rating with a number "
-                    "using exactly this format: \"[[rating]]\", for example: "
-                    "\"Rating: [[5]]\".\n\n"
+                    'using exactly this format: "[[rating]]", for example: '
+                    '"Rating: [[5]]".\n\n'
                     "[Question]\n{question}\n\n"
                     "[The Start of Assistant's Answer]\n{answer}\n"
                     "[The End of Assistant's Answer]"
@@ -503,7 +538,7 @@ class MTBenchEvaluator(BaseEvaluator):
                     "assistant's answer to the second user question. After the "
                     "explanation, rate the response from 1 to 10 by replacing "
                     "rating with a number using exactly this format: "
-                    "\"[[rating]]\", for example: \"Rating: [[5]]\"."
+                    '"[[rating]]", for example: "Rating: [[5]]".'
                 ),
                 prompt_template=(
                     "<|The Start of Assistant A's Conversation with User|>\n\n"
@@ -523,8 +558,8 @@ class MTBenchEvaluator(BaseEvaluator):
                     "and helpfulness. Compare the assistant's answer with the "
                     "reference answer. After the explanation, rate the response "
                     "from 1 to 10 by replacing rating with a number using "
-                    "exactly this format: \"[[rating]]\", for example: "
-                    "\"Rating: [[5]]\".\n\n"
+                    'exactly this format: "[[rating]]", for example: '
+                    '"Rating: [[5]]".\n\n'
                     "[Question]\n{question}\n\n"
                     "[The Start of Reference Answer]\n{ref_answer_1}\n"
                     "[The End of Reference Answer]\n\n"
@@ -539,8 +574,8 @@ class MTBenchEvaluator(BaseEvaluator):
                     "and helpfulness. Focus on the assistant's answer to the "
                     "second question. After the explanation, rate the response "
                     "from 1 to 10 by replacing rating with a number using "
-                    "exactly this format: \"[[rating]]\", for example: "
-                    "\"Rating: [[5]]\"."
+                    'exactly this format: "[[rating]]", for example: '
+                    '"Rating: [[5]]".'
                 ),
                 prompt_template=(
                     "<|The Start of Reference Answer|>\n\n"

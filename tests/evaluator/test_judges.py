@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from pepo.evaluator.judges import JudgePrompt, LocalHFJudge, ManagedVLLMJudge
@@ -37,7 +38,7 @@ def test_managed_vllm_judge_builds_serve_command() -> None:
         dtype="float16",
         gpu_memory_utilization=0.9,
         max_model_len=8192,
-        extra_args=["--disable-log-requests"],
+        extra_args=["--disable-log-requests", "--disable-custom-all-reduce"],
     )
 
     command = judge._build_command()
@@ -52,6 +53,35 @@ def test_managed_vllm_judge_builds_serve_command() -> None:
     assert "--tensor-parallel-size" in command
     assert "8" in command
     assert "--disable-log-requests" in command
+    assert "--disable-custom-all-reduce" in command
+
+
+def test_managed_vllm_judge_uses_configured_executable() -> None:
+    judge = ManagedVLLMJudge(
+        model_name="judge",
+        vllm_executable="/opt/vllm/bin/vllm",
+    )
+
+    command = judge._build_command()
+
+    assert command[:3] == ["/opt/vllm/bin/vllm", "serve", "judge"]
+
+
+def test_managed_vllm_judge_defaults_tensor_parallel_to_device_manager(
+    monkeypatch,
+) -> None:
+    class FakeDeviceManager:
+        num_available_gpus = 3
+
+    monkeypatch.setattr(
+        "pepo.evaluator.judges.managed_vllm.get_device_manager",
+        lambda: FakeDeviceManager(),
+    )
+    judge = ManagedVLLMJudge(model_name="judge")
+
+    command = judge._build_command()
+
+    assert command[command.index("--tensor-parallel-size") + 1] == "3"
 
 
 def test_managed_vllm_judge_builds_chat_payload() -> None:
@@ -78,3 +108,32 @@ def test_managed_vllm_judge_builds_chat_payload() -> None:
         {"role": "system", "content": "You are an impartial judge."},
         {"role": "user", "content": "Rate this answer."},
     ]
+
+
+def test_managed_vllm_judge_validates_missing_executable(monkeypatch) -> None:
+    monkeypatch.setattr("shutil.which", lambda executable: None)
+    judge = ManagedVLLMJudge(model_name="judge")
+
+    with pytest.raises(RuntimeError, match="Could not find the vLLM executable"):
+        judge._validate_runtime(["vllm", "serve", "judge"])
+
+
+def test_managed_vllm_judge_validates_visible_gpu_count(monkeypatch) -> None:
+    monkeypatch.setattr("shutil.which", lambda executable: "/usr/bin/vllm")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4")
+    judge = ManagedVLLMJudge(model_name="judge", tensor_parallel_size=8)
+
+    with pytest.raises(RuntimeError, match="tensor_parallel_size=8"):
+        judge._validate_runtime(["vllm", "serve", "judge"])
+
+
+def test_managed_vllm_judge_reads_log_tail(tmp_path) -> None:
+    log_path = tmp_path / "vllm.log"
+    log_path.write_text(
+        "\n".join(f"line {idx}" for idx in range(100)), encoding="utf-8"
+    )
+    judge = ManagedVLLMJudge(model_name="judge", log_path=str(log_path))
+
+    tail = judge._read_log_tail(max_lines=3)
+
+    assert tail == "line 97\nline 98\nline 99"
