@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -26,7 +27,7 @@ class ManagedVLLMJudge(BaseJudge):
         model_name: str,
         served_model_name: Optional[str] = None,
         host: str = "127.0.0.1",
-        port: int = 8000,
+        port: Optional[int] = None,
         api_key: str = "EMPTY",
         vllm_executable: str = "vllm",
         max_tokens: int = 512,
@@ -44,6 +45,7 @@ class ManagedVLLMJudge(BaseJudge):
         extra_args: Optional[list[str]] = None,
         env: Optional[dict[str, str]] = None,
         log_path: Optional[str] = None,
+        log_dir: str = "outputs/mt_bench",
         command: Optional[list[str]] = None,
     ) -> None:
         self.model_name = model_name
@@ -67,6 +69,7 @@ class ManagedVLLMJudge(BaseJudge):
         self.extra_args = extra_args or []
         self.env = env or {}
         self.log_path = Path(log_path) if log_path else None
+        self.log_dir = Path(log_dir)
         self.command = command
         self._process: Optional[subprocess.Popen[Any]] = None
         self._log_handle: Any = None
@@ -90,7 +93,7 @@ class ManagedVLLMJudge(BaseJudge):
             self._close_log_handle()
             return
 
-        logger.info("Stopping vLLM judge server on port %d", self.port)
+        logger.info("Stopping vLLM judge server on port %d", self._resolve_port())
         self._process.terminate()
         try:
             self._process.wait(timeout=self.shutdown_timeout)
@@ -106,6 +109,7 @@ class ManagedVLLMJudge(BaseJudge):
         if self._process is not None and self._process.poll() is None:
             return
 
+        self._resolve_runtime_paths()
         command = self._build_command()
         self._validate_runtime(command)
         logger.info("Starting vLLM judge server: %s", " ".join(command))
@@ -188,7 +192,7 @@ class ManagedVLLMJudge(BaseJudge):
             data = json.dumps(payload).encode("utf-8")
 
         req = request.Request(
-            f"http://{self.host}:{self.port}{path}",
+            f"http://{self.host}:{self._resolve_port()}{path}",
             data=data,
             headers=headers,
             method=method,
@@ -203,7 +207,7 @@ class ManagedVLLMJudge(BaseJudge):
                     model_name=self.model_name,
                     served_model_name=self.served_model_name,
                     host=self.host,
-                    port=self.port,
+                    port=self._resolve_port(),
                     api_key=self.api_key,
                 )
                 for part in self.command
@@ -216,7 +220,7 @@ class ManagedVLLMJudge(BaseJudge):
             "--host",
             self.host,
             "--port",
-            str(self.port),
+            str(self._resolve_port()),
             "--served-model-name",
             self.served_model_name,
             "--api-key",
@@ -236,6 +240,23 @@ class ManagedVLLMJudge(BaseJudge):
             command.append("--trust-remote-code")
         command.extend(self.extra_args)
         return command
+
+    def _resolve_runtime_paths(self) -> None:
+        self._resolve_port()
+        if self.log_path is None:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self.log_path = self.log_dir / (
+                f"vllm_judge_{timestamp}_{os.getpid()}_p{self.port}.log"
+            )
+
+    def _resolve_port(self) -> int:
+        if self.port is not None and self.port > 0:
+            return self.port
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((self.host, 0))
+            self.port = sock.getsockname()[1]
+        return self.port
 
     def _validate_runtime(self, command: Sequence[str]) -> None:
         if not command:

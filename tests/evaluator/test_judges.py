@@ -60,6 +60,18 @@ def test_managed_vllm_judge_defaults_tensor_parallel_to_device_manager(
     assert command[command.index("--tensor-parallel-size") + 1] == "3"
 
 
+def test_managed_vllm_judge_resolves_automatic_port_and_log_path(tmp_path) -> None:
+    judge = ManagedVLLMJudge(model_name="judge", port=None, log_dir=str(tmp_path))
+
+    judge._resolve_runtime_paths()
+
+    assert isinstance(judge.port, int)
+    assert judge.port > 0
+    assert judge.log_path is not None
+    assert judge.log_path.parent == tmp_path
+    assert f"_p{judge.port}.log" in judge.log_path.name
+
+
 def test_managed_vllm_judge_builds_chat_payload() -> None:
     judge = ManagedVLLMJudge(
         model_name="meta-llama/Meta-Llama-3-70B-Instruct",

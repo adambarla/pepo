@@ -13,7 +13,7 @@ judge:
   model_name: meta-llama/Meta-Llama-3-70B-Instruct
   served_model_name: mtbench-judge
   host: 127.0.0.1
-  port: 8000
+  port: null
   api_key: EMPTY
   vllm_executable: "${hydra:runtime.cwd}/.venv-vllm/bin/vllm"
   max_tokens: 512
@@ -28,7 +28,8 @@ judge:
   request_timeout: 600.0
   shutdown_timeout: 10.0
   poll_interval: 5.0
-  log_path: "${hydra:runtime.cwd}/outputs/mt_bench/vllm_judge.log"
+  log_path: null
+  log_dir: "${hydra:runtime.cwd}/outputs/mt_bench"
   extra_args:
     - --disable-log-requests
     - --disable-custom-all-reduce

@@ -94,7 +94,7 @@ uv run scripts/eval.py evaluator=mtbench ns=1 stop_after_generation=true
 uv run scripts/eval.py evaluator=mtbench ns=1 overwrite=false
 ```
 
-The MT-Bench evaluator unloads the PEPO model before launching the managed vLLM judge server. Judge tensor parallelism defaults to all GPUs visible to the device manager, so `CUDA_VISIBLE_DEVICES=1,2` starts vLLM with `--tensor-parallel-size 2`. If the cluster judge differs from the default `meta-llama/Meta-Llama-3-70B-Instruct`, override it with `evaluator.judge.model_name=...` and, if needed, `evaluator.judge.tensor_parallel_size=...`.
+The MT-Bench evaluator unloads the PEPO model before launching the managed vLLM judge server. Judge tensor parallelism defaults to all GPUs visible to the device manager, so `CUDA_VISIBLE_DEVICES=1,2` starts vLLM with `--tensor-parallel-size 2`. By default, each judge server picks an open localhost port and writes a unique log under `outputs/mt_bench`; set `evaluator.judge.port=...` or `evaluator.judge.log_path=...` only when a fixed value is needed. If the cluster judge differs from the default `meta-llama/Meta-Llama-3-70B-Instruct`, override it with `evaluator.judge.model_name=...` and, if needed, `evaluator.judge.tensor_parallel_size=...`.
 
 Judging is sequential and shows a temporary `Judging MT-Bench` progress bar over the vLLM HTTP calls. WandB eval runs include the evaluator in the run name and job type, plus `model:<name>` and `evaluator:<name>` tags.
 
