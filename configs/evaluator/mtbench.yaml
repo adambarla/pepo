@@ -7,6 +7,8 @@ reference_answers_file: null
 output_dir: "${hydra:runtime.cwd}/outputs"
 num_samples: null
 stop_after_generation: false
+overwrite_judgments: false
+judgment_tag: null
 
 judge:
   _target_: pepo.evaluator.judges.managed_vllm.ManagedVLLMJudge

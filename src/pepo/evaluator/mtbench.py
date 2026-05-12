@@ -15,7 +15,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from ..model import BaseModel
-from ..utils import WandbRun
+from ..utils import WandbRun, sanitize_filename
 from .base import BaseEvaluator
 from .judges import BaseJudge, JudgePrompt
 from .mt_bench_data import (
@@ -27,11 +27,9 @@ from .mt_bench_data import (
 logger = logging.getLogger(__name__)
 
 _SCORE_PATTERNS = (
-    re.compile(r"\[\[\s*(\d+(?:\.\d+)?)\s*\]\]"),
-    re.compile(r"(?:rating|score)\s*[:=]\s*(\d+(?:\.\d+)?)(?:\s*/\s*10)?", re.I),
-    re.compile(r"\b(\d+(?:\.\d+)?)\s*/\s*10\b"),
+    re.compile(r"\[\[(\d+\.?\d*)\]\]"),
+    re.compile(r"\[(\d+\.?\d*)\]"),
 )
-_PAIRWISE_PATTERN = re.compile(r"\[\[\s*([ABC])\s*\]\]", re.I)
 _REFERENCE_CATEGORIES = {"math", "reasoning", "coding"}
 
 
@@ -63,6 +61,8 @@ class MTBenchEvaluator(BaseEvaluator):
         dataset_split: str = "default",
         num_samples: Optional[int] = None,
         stop_after_generation: bool = False,
+        overwrite_judgments: bool = False,
+        judgment_tag: Optional[str] = None,
         wandb_run: Optional[WandbRun] = None,
     ) -> None:
         super().__init__(
@@ -78,6 +78,8 @@ class MTBenchEvaluator(BaseEvaluator):
             reference_answers_file
         )
         self.judge = self._init_judge(judge)
+        self.overwrite_judgments = overwrite_judgments
+        self.judgment_tag = judgment_tag
         self.wandb_run = wandb_run
         self.questions = self._load_questions()
         self.judge_prompts = self._load_judge_prompts()
@@ -115,10 +117,11 @@ class MTBenchEvaluator(BaseEvaluator):
         leaderboards_folder.mkdir(parents=True, exist_ok=True)
 
         filename = self._get_filename(model, epoch)
-        judgments_file = judgments_folder / f"{filename}_judgments.jsonl"
-        leaderboard_file = leaderboards_folder / f"{filename}_leaderboard.csv"
+        judgment_stem = self._get_judgment_stem(filename)
+        judgments_file = judgments_folder / f"{judgment_stem}_judgments.jsonl"
+        leaderboard_file = leaderboards_folder / f"{judgment_stem}_leaderboard.csv"
 
-        if overwrite or not judgments_file.exists():
+        if overwrite or self.overwrite_judgments or not judgments_file.exists():
             judgments = self._judge_answers(
                 answers=self._load_jsonl(answers_file),
                 model_name=model.get_name(epoch=epoch),
@@ -163,14 +166,15 @@ class MTBenchEvaluator(BaseEvaluator):
         leaderboards_folder.mkdir(parents=True, exist_ok=True)
 
         filename = self._get_filename(model, epoch)
-        judgments_file = judgments_folder / f"{filename}_pairwise_judgments.jsonl"
-        leaderboard_file = leaderboards_folder / f"{filename}_pairwise_leaderboard.csv"
+        judgment_stem = self._get_judgment_stem(filename, pairwise=True)
+        judgments_file = judgments_folder / f"{judgment_stem}_judgments.jsonl"
+        leaderboard_file = leaderboards_folder / f"{judgment_stem}_leaderboard.csv"
 
         answers = self._load_jsonl(answers_file)
         ref_answers = self._load_jsonl(ref_answers_file)
         model_name = model.get_name(epoch=epoch)
         ref_model_name = ref_model.get_name(epoch=ref_epoch)
-        if overwrite or not judgments_file.exists():
+        if overwrite or self.overwrite_judgments or not judgments_file.exists():
             judgments = self._judge_pairwise_answers(
                 answers=answers,
                 ref_answers=ref_answers,
@@ -180,6 +184,7 @@ class MTBenchEvaluator(BaseEvaluator):
             self._write_jsonl(judgments_file, judgments)
         else:
             judgments = self._load_jsonl(judgments_file)
+        self._validate_pairwise_judgments(judgments, judgments_file)
 
         leaderboard = self._build_pairwise_leaderboard(
             judgments=judgments,
@@ -345,7 +350,8 @@ class MTBenchEvaluator(BaseEvaluator):
         ref_answers_by_question_id = {
             int(answer["question_id"]): answer for answer in ref_answers
         }
-        judge_prompt_items: list[tuple[dict[str, Any], JudgePrompt]] = []
+        judge_prompt_items: list[tuple[int, str, JudgePrompt]] = []
+        judgments: list[dict[str, Any]] = []
         for question in self.questions:
             answer_turns = answers_by_question_id[question.question_id]["choices"][0][
                 "turns"
@@ -355,49 +361,73 @@ class MTBenchEvaluator(BaseEvaluator):
             ][0]["turns"]
             for turn_index in (0, 1):
                 template = self._select_pairwise_judge_template(question, turn_index)
-                prompt = self._format_pairwise_judge_prompt(
+                g1_prompt = self._format_pairwise_judge_prompt(
                     template=template,
                     question=question,
                     answer_a_turns=answer_turns,
                     answer_b_turns=ref_answer_turns,
                     turn_index=turn_index,
                 )
-                metadata = {
-                    "question_id": question.question_id,
-                    "category": question.category,
-                    "turn": turn_index + 1,
-                    "model_id": model_name,
-                    "ref_model_id": ref_model_name,
-                    "assistant_a": model_name,
-                    "assistant_b": ref_model_name,
-                    "judge_prompt": template.name,
-                }
-                judge_prompt_items.append((metadata, prompt))
+                g2_prompt = self._format_pairwise_judge_prompt(
+                    template=template,
+                    question=question,
+                    answer_a_turns=ref_answer_turns,
+                    answer_b_turns=answer_turns,
+                    turn_index=turn_index,
+                )
+                judgment_index = len(judgments)
+                judgments.append(
+                    {
+                        "question_id": question.question_id,
+                        "category": question.category,
+                        "turn": turn_index + 1,
+                        "model_1": model_name,
+                        "model_2": ref_model_name,
+                        "judge": ("local", template.name),
+                        "g1_winner": "error",
+                        "g2_winner": "error",
+                        "g1_judgment": "",
+                        "g2_judgment": "",
+                        "g1_user_prompt": g1_prompt.user_prompt,
+                        "g2_user_prompt": g2_prompt.user_prompt,
+                        "tstamp": time.time(),
+                    }
+                )
+                judge_prompt_items.append((judgment_index, "g1", g1_prompt))
+                judge_prompt_items.append((judgment_index, "g2", g2_prompt))
 
         logger.info(
-            "Pairwise judging %d MT-Bench answer turns", len(judge_prompt_items)
+            "Pairwise judging %d MT-Bench answer games for %d answer turns",
+            len(judge_prompt_items),
+            len(judgments),
         )
-        prompts = [item[1] for item in judge_prompt_items]
+        prompts = [item[2] for item in judge_prompt_items]
         try:
             completions = self.judge.generate(prompts)
         finally:
             self.judge.unload()
 
-        judgments = []
-        for (metadata, prompt), completion in zip(
+        for (judgment_index, game, _prompt), completion in zip(
             judge_prompt_items, completions, strict=True
         ):
             verdict = self.parse_pairwise_verdict(completion)
-            judgments.append(
-                {
-                    **metadata,
-                    "verdict": verdict,
-                    "winner": self._pairwise_winner(verdict, metadata),
-                    "judge_output": completion,
-                    "system_prompt": prompt.system_prompt,
-                    "user_prompt": prompt.user_prompt,
-                }
-            )
+            judgment = judgments[judgment_index]
+            if game == "g1":
+                winner = self._pairwise_game_winner(
+                    verdict=verdict,
+                    assistant_a="model_1",
+                    assistant_b="model_2",
+                )
+                judgment["g1_winner"] = winner
+                judgment["g1_judgment"] = completion
+            else:
+                winner = self._pairwise_game_winner(
+                    verdict=verdict,
+                    assistant_a="model_2",
+                    assistant_b="model_1",
+                )
+                judgment["g2_winner"] = winner
+                judgment["g2_judgment"] = completion
         return judgments
 
     def _format_judge_prompt(
@@ -482,28 +512,29 @@ class MTBenchEvaluator(BaseEvaluator):
     ) -> pd.DataFrame:
         judgments_df = pd.DataFrame(judgments)
         scores = pd.to_numeric(judgments_df["score"], errors="coerce")
+        valid_scores = scores[scores != -1]
+
+        def turn_score(turn: int) -> float:
+            turn_scores = pd.to_numeric(
+                judgments_df.loc[judgments_df["turn"] == turn, "score"],
+                errors="coerce",
+            )
+            return float(turn_scores[turn_scores != -1].mean())
+
         metrics: dict[str, float | int] = {
-            "score": float(scores.mean()),
-            "turn_1_score": float(
-                pd.to_numeric(
-                    judgments_df.loc[judgments_df["turn"] == 1, "score"],
-                    errors="coerce",
-                ).mean()
-            ),
-            "turn_2_score": float(
-                pd.to_numeric(
-                    judgments_df.loc[judgments_df["turn"] == 2, "score"],
-                    errors="coerce",
-                ).mean()
-            ),
-            "parse_error_rate": float(scores.isna().mean()),
+            "score": float(valid_scores.mean()),
+            "turn_1_score": turn_score(1),
+            "turn_2_score": turn_score(2),
+            "parse_error_rate": float((scores == -1).mean()),
             "n_questions": len(answers),
             "n_judgments": len(judgments),
             "avg_output_chars": self._avg_output_chars(answers),
         }
         for category, group in judgments_df.groupby("category"):
             category_scores = pd.to_numeric(group["score"], errors="coerce")
-            metrics[f"{category}_score"] = float(category_scores.mean())
+            metrics[f"{category}_score"] = float(
+                category_scores[category_scores != -1].mean()
+            )
 
         return pd.DataFrame.from_dict({model_name: metrics}, orient="index")
 
@@ -515,20 +546,42 @@ class MTBenchEvaluator(BaseEvaluator):
         ref_model_name: str,
     ) -> pd.DataFrame:
         judgments_df = pd.DataFrame(judgments)
-        verdicts = judgments_df["verdict"]
+        resolved = judgments_df.apply(self._resolve_pairwise_row_winner, axis=1)
+        valid = resolved != "error"
+        valid_resolved = resolved[valid]
+        total_valid = len(valid_resolved)
+
+        def rate(mask: pd.Series) -> float:
+            if total_valid == 0:
+                return 0.0
+            return float(mask.sum() / total_valid)
+
         metrics: dict[str, float | int | str] = {
             "ref_model": ref_model_name,
-            "win_rate": float((verdicts == "A").mean()),
-            "loss_rate": float((verdicts == "B").mean()),
-            "tie_rate": float((verdicts == "C").mean()),
-            "parse_error_rate": float(verdicts.isna().mean()),
+            "win_rate": rate(valid_resolved == "model_1"),
+            "loss_rate": rate(valid_resolved == "model_2"),
+            "tie_rate": rate(valid_resolved == "tie"),
+            "win_rate_adjusted": rate(valid_resolved == "model_1")
+            + 0.5 * rate(valid_resolved == "tie"),
+            "parse_error_rate": float((~valid).mean()),
             "n_questions": len(answers),
             "n_judgments": len(judgments),
+            "n_judge_games": len(judgments) * 2,
+            "n_valid_judgments": total_valid,
             "avg_output_chars": self._avg_output_chars(answers),
         }
         for category, group in judgments_df.groupby("category"):
-            group_verdicts = group["verdict"]
-            metrics[f"{category}_win_rate"] = float((group_verdicts == "A").mean())
+            group_resolved = group.apply(self._resolve_pairwise_row_winner, axis=1)
+            group_valid = group_resolved[group_resolved != "error"]
+            group_total = len(group_valid)
+            if group_total == 0:
+                metrics[f"{category}_win_rate"] = 0.0
+                metrics[f"{category}_win_rate_adjusted"] = 0.0
+                continue
+            win_rate = float((group_valid == "model_1").sum() / group_total)
+            tie_rate = float((group_valid == "tie").sum() / group_total)
+            metrics[f"{category}_win_rate"] = win_rate
+            metrics[f"{category}_win_rate_adjusted"] = win_rate + 0.5 * tie_rate
 
         return pd.DataFrame.from_dict({model_name: metrics}, orient="index")
 
@@ -593,6 +646,14 @@ class MTBenchEvaluator(BaseEvaluator):
         )
         return questions
 
+    def _get_judgment_stem(self, filename: str, pairwise: bool = False) -> str:
+        parts = [filename]
+        if self.judgment_tag:
+            parts.append(sanitize_filename(self.judgment_tag))
+        if pairwise:
+            parts.append("pairwise")
+        return "_".join(parts)
+
     def _load_judge_prompts(self) -> dict[str, JudgePromptTemplate]:
         if self.judge_prompts_file is None:
             return self._default_judge_prompts()
@@ -649,34 +710,87 @@ class MTBenchEvaluator(BaseEvaluator):
         return reference_turns[turn_index]
 
     @staticmethod
-    def parse_score(completion: str) -> Optional[float]:
+    def parse_score(completion: str) -> float:
         for pattern in _SCORE_PATTERNS:
             match = pattern.search(completion)
             if match is None:
                 continue
-            score = float(match.group(1))
-            if 0.0 <= score <= 10.0:
-                return score
-        return None
+            return float(match.group(1))
+        return -1.0
 
     @staticmethod
     def parse_pairwise_verdict(completion: str) -> Optional[str]:
-        match = _PAIRWISE_PATTERN.search(completion)
-        if match is None:
-            return None
-        return match.group(1).upper()
+        if "[[A]]" in completion:
+            return "A"
+        if "[[B]]" in completion:
+            return "B"
+        if "[[C]]" in completion:
+            return "C"
+        return None
 
     @staticmethod
-    def _pairwise_winner(
-        verdict: Optional[str], metadata: Mapping[str, Any]
-    ) -> Optional[str]:
+    def _pairwise_game_winner(
+        verdict: Optional[str],
+        assistant_a: str,
+        assistant_b: str,
+    ) -> str:
         if verdict == "A":
-            return str(metadata["assistant_a"])
+            return assistant_a
         if verdict == "B":
-            return str(metadata["assistant_b"])
+            return assistant_b
         if verdict == "C":
             return "tie"
-        return None
+        return "error"
+
+    @staticmethod
+    def _resolve_pairwise_winner(g1_winner: str, g2_winner: str) -> str:
+        if g1_winner == "error" or g2_winner == "error":
+            return "error"
+        if g1_winner == "tie" or g1_winner != g2_winner:
+            return "tie"
+        return g1_winner
+
+    @classmethod
+    def _resolve_pairwise_row_winner(cls, row: Mapping[str, Any]) -> str:
+        return cls._resolve_pairwise_winner(
+            str(row.get("g1_winner", "error")),
+            str(row.get("g2_winner", "error")),
+        )
+
+    @staticmethod
+    def _validate_pairwise_judgments(
+        judgments: Sequence[Mapping[str, Any]],
+        judgments_file: Path,
+    ) -> None:
+        required_fields = {
+            "model_1",
+            "model_2",
+            "g1_winner",
+            "g2_winner",
+            "g1_judgment",
+            "g2_judgment",
+        }
+        valid_winners = {"model_1", "model_2", "tie", "error"}
+        for index, judgment in enumerate(judgments):
+            missing = sorted(required_fields - judgment.keys())
+            if missing:
+                raise ValueError(
+                    "MT-Bench pairwise judgments must use the two-game FastChat "
+                    f"schema. {judgments_file} row {index} is missing {missing}. "
+                    "Regenerate judgments with evaluator.overwrite_judgments=true."
+                )
+            invalid_winners = {
+                field: judgment[field]
+                for field in ("g1_winner", "g2_winner")
+                if judgment[field] not in valid_winners
+            }
+            if invalid_winners:
+                raise ValueError(
+                    "MT-Bench pairwise judgments contain invalid winner values. "
+                    f"{judgments_file} row {index} has {invalid_winners}; expected "
+                    f"one of {sorted(valid_winners)}. Regenerate judgments with "
+                    "evaluator.overwrite_judgments=true."
+                )
 
     @staticmethod
     def _cleanup_cuda_after_unload() -> None:

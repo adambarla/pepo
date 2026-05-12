@@ -77,6 +77,9 @@ Run MT-Bench with PEPO answer generation and managed vLLM judging:
 uv run scripts/eval.py evaluator=mtbench
 ```
 
+For reviewer-facing details on how this tracks the original FastChat MT-Bench
+flow while using a local judge, see [docs/mt_bench_compatibility.md](docs/mt_bench_compatibility.md).
+
 The managed judge uses `evaluator.judge.vllm_executable`, which defaults to `.venv-vllm/bin/vllm` in the repo root. This keeps vLLM in a Python 3.12 environment while PEPO stays on Python 3.13:
 
 ```bash
