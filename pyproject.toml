@@ -60,6 +60,10 @@ exclude = [
 ]
 
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+
 [tool.ruff]
 src = ["src"]
 exclude = [
