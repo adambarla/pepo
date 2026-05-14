@@ -101,11 +101,11 @@ class SFTDPOModel(SingleModel):
             wandb_manager: Optional WandbManager instance for logging.
             continue_training: Whether to continue from checkpoint.
         """
-        if self._trainer is None:
+        trainer = self.trainer
+        if trainer is None:
             raise ValueError("Trainer not configured in model config.")
 
-        self.init_trainer()
-        self._trainer.train(
+        trainer.train(
             model=self,
             data_manager=data_manager,
             max_epochs=max_epochs,

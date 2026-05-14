@@ -162,7 +162,7 @@ class REPPORewardModel(EnsembleModel):
 
         config = AutoConfig.from_pretrained(self.model_id)
         hidden_size = config.hidden_size
-        model_dtype = self._device_manager.dtype
+        model_dtype = self.device_manager.dtype
         if isinstance(model_dtype, str):
             model_dtype = getattr(torch, model_dtype)
 
@@ -306,16 +306,16 @@ class REPPORewardModel(EnsembleModel):
         force_annotation: bool = False,
     ) -> None:
         """Train the reward model ensemble."""
-        if self.trainer is None:
+        reward_trainer = self.trainer
+        if reward_trainer is None:
             raise ValueError("Trainer not set in REPPORewardModel.")
 
-        self.init_trainer()
         r_epochs = (
-            max_epochs if max_epochs is not None else self.trainer.training_epochs
+            max_epochs if max_epochs is not None else reward_trainer.training_epochs
         )
 
         # Skip if models exist and not forced
-        trainer_force = self.trainer.force if self.trainer else False
+        trainer_force = reward_trainer.force
         can_load = r_epochs is not None and self.can_load_from_epoch(r_epochs)
         if not trainer_force and can_load:
             logger.info(
@@ -324,7 +324,7 @@ class REPPORewardModel(EnsembleModel):
             for i in range(self._num_models):
                 self.set_epoch(r_epochs if r_epochs is not None else 0, model_idx=i)
         else:
-            self.trainer.train(
+            reward_trainer.train(
                 model=self,
                 data_manager=data_manager,
                 max_epochs=r_epochs,
@@ -533,13 +533,12 @@ class REPPOModel(SingleModel):
 
         self.reward_model.unload()
 
-        self.init_trainer()
-
         # Force policy training if annotation was forced
         policy_continue = continue_training and not force_annotation
-        if self._trainer is None:
+        trainer = self.trainer
+        if trainer is None:
             raise ValueError("Policy trainer (_trainer) not set.")
-        self._trainer.train(
+        trainer.train(
             model=self,
             data_manager=data_manager,
             max_epochs=max_epochs,

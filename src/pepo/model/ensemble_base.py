@@ -120,7 +120,7 @@ class EnsembleModel(BaseModel):
         # (Deepcopying creates a new semaphore/queue state, breaking isolation)
         dm = getattr(self, "_device_manager", None)
         if dm is not None:
-            self._device_manager = None  # type: ignore
+            self._device_manager = None
 
         try:
             # Shallow copy self to preserve structure (minus DM)
