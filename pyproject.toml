@@ -54,6 +54,7 @@ build-backend = "hatchling.build"
 exclude = [
     "alpaca_eval",
     "arena-hard-auto",
+    "FastChat",
     "LLM",
     "figures",
     "notebooks"
