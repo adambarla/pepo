@@ -4,9 +4,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
+import alpaca_eval
 import pandas as pd
 import yaml
-from alpaca_eval import evaluate as alpaca_evaluate
 from alpaca_eval.constants import EVALUATORS_CONFIG_DIR
 from omegaconf import DictConfig, OmegaConf
 
@@ -15,6 +15,7 @@ from ..utils import WandbRun
 from .base import BaseEvaluator
 
 logger = logging.getLogger(__name__)
+alpaca_evaluate = getattr(alpaca_eval, "evaluate")
 
 
 class AlpacaEvalEvaluator(BaseEvaluator):
@@ -280,6 +281,8 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         model.unload()
 
         if metrics and self.wandb_run is not None:
+            if model.generator is None:
+                raise ValueError("Generator not found in model")
             generator_config = model.generator.get_short_name()
             metric_prefix = f"eval/{self.dataset_id}/{generator_config}"
             log_dict = {f"{metric_prefix}/{k}": v for k, v in metrics.items()}

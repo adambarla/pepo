@@ -2,3 +2,6 @@
 	path = alpaca_eval
 	url = https://github.com/adambarla/alpaca_eval.git
 	branch = fix/issue-449-model-caching
+[submodule "FastChat"]
+	path = FastChat
+	url = https://github.com/lm-sys/FastChat.git

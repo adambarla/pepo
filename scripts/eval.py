@@ -4,7 +4,7 @@ from typing import Any, Optional, cast
 
 import hydra
 from hydra.utils import instantiate
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, SCMode
 
 from pepo.evaluator.base import BaseEvaluator
 from pepo.model import BaseModel
@@ -36,6 +36,14 @@ try:
     )
 except ValueError:
     pass  # Already registered
+
+
+def _evaluator_name(cfg: DictConfig) -> str:
+    target = cfg.evaluator.get("_target_", "")
+    if target:
+        name = str(target).split(".")[-1]
+        return name.removesuffix("Evaluator").lower()
+    return "unknown"
 
 
 @hydra.main(config_path="../configs", config_name="eval", version_base="1.1")
@@ -74,7 +82,7 @@ def main(cfg: DictConfig) -> None:
         resolved_cfg_plain = OmegaConf.to_container(
             cfg,
             resolve=True,
-            structured_config_mode=False,  # type: ignore[arg-type]
+            structured_config_mode=SCMode.DICT,
         )
         # Strip Hydra _target_ keys to prevent recursive instantiation
         resolved_cfg_plain = strip_hydra_targets(resolved_cfg_plain)
@@ -84,7 +92,10 @@ def main(cfg: DictConfig) -> None:
         )
     if wandb_manager is not None:
         wandb_run = wandb_manager.get_evaluation_handler(
-            model=model, generator=model.generator, epoch=epoch
+            model=model,
+            generator=model.generator,
+            epoch=epoch,
+            evaluator_name=_evaluator_name(cfg),
         )
     if wandb_run is not None:
         wandb_run.init_run()

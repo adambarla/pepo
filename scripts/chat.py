@@ -17,7 +17,7 @@ from omegaconf import DictConfig, OmegaConf
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "../src"))
 
-from pepo.model import BaseModel
+from pepo.model import BaseModel, EnsembleModel
 from pepo.utils import (
     constants,  # added
     get_device_manager,
@@ -85,19 +85,22 @@ def main(cfg: DictConfig) -> None:
 
     logger.info("Moving models to GPU...")
     # Ensure models are loaded
-    if model._models is None:
+    if not model.is_loaded():
         model.load()
 
     # Move each submodel to its assigned device
-    if getattr(model, "shared_backbone", False):
+    if isinstance(model, EnsembleModel) and model.shared_backbone:
         logger.info("Shared backbone enabled: Moving to first allocated device")
         target_device = device_manager.get_device_for_model(0)
         model.models[0].to(target_device)
-    else:
+    elif isinstance(model, EnsembleModel):
         for i in range(model.num_models):
             target_device = device_manager.get_device_for_model(i)
             logger.info(f"Moving submodel {i} to {target_device}")
             model.models[i].to(target_device)
+    else:
+        target_device = device_manager.get_device_for_model(0)
+        model.to(torch.device(target_device))
 
     logger.info("\n" + "=" * 50)
     logger.info("Chat Interface Ready! (Ctrl+C to exit)")
@@ -126,7 +129,7 @@ def main(cfg: DictConfig) -> None:
             logging.getLogger("pepo.generator").setLevel(logging.WARNING)
 
             with torch.no_grad():
-                results = model.generate_responses(
+                results, _metrics = model.generate_responses(
                     prompts=[history],
                     apply_chat_template=True,
                     token_callback=print_token,

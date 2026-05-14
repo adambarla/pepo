@@ -54,10 +54,15 @@ build-backend = "hatchling.build"
 exclude = [
     "alpaca_eval",
     "arena-hard-auto",
+    "FastChat",
     "LLM",
     "figures",
     "notebooks"
 ]
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 
 [tool.ruff]

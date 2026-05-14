@@ -68,7 +68,12 @@ def get_runs_df(
         try:
             # Support pickle if extension is .pkl for better type preservation
             if cache_path.endswith(".pkl"):
-                df = pd.read_pickle(cache_path)
+                loaded_df = pd.read_pickle(cache_path)
+                df = (
+                    loaded_df
+                    if isinstance(loaded_df, pd.DataFrame)
+                    else pd.DataFrame(loaded_df)
+                )
             else:
                 df = pd.read_csv(cache_path)
 
@@ -277,9 +282,9 @@ def get_exp1_data(df, model_idx=0):
     # Handle tags parsing
     if "config/model/wandb/tags" in df.columns:
         df["config/model/wandb/tags"] = df["config/model/wandb/tags"].apply(
-            lambda x: ast.literal_eval(x)
-            if isinstance(x, str) and x.startswith("[")
-            else x
+            lambda x: (
+                ast.literal_eval(x) if isinstance(x, str) and x.startswith("[") else x
+            )
         )
 
         def get_algorithm(row):

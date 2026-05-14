@@ -5,7 +5,7 @@ from __future__ import annotations
 import functools
 import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 import torch
 from peft import PeftModel
@@ -60,7 +60,7 @@ class BaseModel(ABC):
         self._train_batch_size = train_batch_size
         self._eval_batch_size = eval_batch_size
         self._generation_batch_size = generation_batch_size
-        self._trainer = trainer
+        self._trainer: Optional["BaseTrainer"] | functools.partial[Any] = trainer
         self.generator = generator
 
     @property
@@ -260,14 +260,14 @@ class BaseModel(ABC):
     def init_trainer(self) -> None:
         """Initialize the trainer if it's a partial."""
         if isinstance(self._trainer, functools.partial):
-            self._trainer = self._trainer()
+            self._trainer = cast("BaseTrainer", self._trainer())
 
     @property
     def trainer(self) -> Optional["BaseTrainer"]:
         """Get the trainer instance."""
         if isinstance(self._trainer, functools.partial):
             self.init_trainer()
-        return self._trainer
+        return cast("BaseTrainer | None", self._trainer)
 
     @trainer.setter
     def trainer(self, value: Optional["BaseTrainer"]) -> None:

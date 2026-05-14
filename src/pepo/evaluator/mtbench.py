@@ -1,0 +1,945 @@
+from __future__ import annotations
+
+import gc
+import hashlib
+import json
+import logging
+import re
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping, Optional, Sequence
+
+import pandas as pd
+from hydra.utils import instantiate
+from omegaconf import DictConfig, OmegaConf
+
+from ..model import BaseModel
+from ..utils import WandbRun, sanitize_filename
+from .base import BaseEvaluator
+from .judges import BaseJudge, JudgePrompt
+from .mt_bench_data import (
+    default_judge_prompts_path,
+    default_question_path,
+    default_reference_answer_path,
+)
+
+logger = logging.getLogger(__name__)
+
+_SCORE_PATTERNS = (
+    re.compile(r"\[\[(\d+\.?\d*)\]\]"),
+    re.compile(r"\[(\d+\.?\d*)\]"),
+)
+_REFERENCE_CATEGORIES = {"math", "reasoning", "coding"}
+
+
+@dataclass(frozen=True)
+class MTBenchQuestion:
+    question_id: int
+    category: str
+    turns: list[str]
+
+
+@dataclass(frozen=True)
+class JudgePromptTemplate:
+    name: str
+    system_prompt: str
+    prompt_template: str
+
+
+class MTBenchEvaluator(BaseEvaluator):
+    """MT-Bench evaluator using PEPO generation and a configurable local judge."""
+
+    def __init__(
+        self,
+        output_dir: str,
+        judge: BaseJudge | DictConfig | Mapping[str, Any],
+        questions_file: Optional[str] = None,
+        judge_prompts_file: Optional[str] = None,
+        reference_answers_file: Optional[str] = None,
+        dataset_id: str = "mt_bench",
+        dataset_split: str = "default",
+        num_samples: Optional[int] = None,
+        stop_after_generation: bool = False,
+        overwrite_judgments: bool = False,
+        judgment_tag: Optional[str] = None,
+        wandb_run: Optional[WandbRun] = None,
+    ) -> None:
+        super().__init__(
+            dataset_id=dataset_id,
+            dataset_split=dataset_split,
+            output_dir=f"{output_dir}/mt_bench/",
+            num_samples=num_samples,
+            stop_after_generation=stop_after_generation,
+        )
+        self.questions_file = self._resolve_questions_file(questions_file)
+        self.judge_prompts_file = self._resolve_judge_prompts_file(judge_prompts_file)
+        self.reference_answers_file = self._resolve_reference_answers_file(
+            reference_answers_file
+        )
+        self.judge = self._init_judge(judge)
+        self.overwrite_judgments = overwrite_judgments
+        self.judgment_tag = judgment_tag
+        self.wandb_run = wandb_run
+        self.questions = self._load_questions()
+        self.judge_prompts = self._load_judge_prompts()
+        self.reference_answers = self._load_reference_answers()
+
+    def evaluate(
+        self,
+        model: BaseModel,
+        epoch: Optional[int] = None,
+        ref_model: Optional[BaseModel] = None,
+        ref_epoch: Optional[int] = None,
+        overwrite: bool = False,
+        **kwargs: Any,
+    ) -> Path:
+        if ref_model is not None:
+            return self._evaluate_pairwise(
+                model=model,
+                epoch=epoch,
+                ref_model=ref_model,
+                ref_epoch=ref_epoch,
+                overwrite=overwrite,
+            )
+
+        answers_file = self._get_or_generate(model, epoch=epoch, overwrite=overwrite)
+        logger.info("MT-Bench answers file: %s", answers_file)
+
+        if self.stop_after_generation:
+            logger.info("Stopping MT-Bench evaluation after response generation.")
+            return answers_file
+
+        folder = self._get_folder()
+        judgments_folder = folder / "judgments"
+        judgments_folder.mkdir(parents=True, exist_ok=True)
+        leaderboards_folder = folder / "leaderboards"
+        leaderboards_folder.mkdir(parents=True, exist_ok=True)
+
+        filename = self._get_filename(model, epoch)
+        judgment_stem = self._get_judgment_stem(filename)
+        judgments_file = judgments_folder / f"{judgment_stem}_judgments.jsonl"
+        leaderboard_file = leaderboards_folder / f"{judgment_stem}_leaderboard.csv"
+
+        if overwrite or self.overwrite_judgments or not judgments_file.exists():
+            judgments = self._judge_answers(
+                answers=self._load_jsonl(answers_file),
+                model_name=model.get_name(epoch=epoch),
+            )
+            self._write_jsonl(judgments_file, judgments)
+        else:
+            judgments = self._load_jsonl(judgments_file)
+
+        leaderboard = self._build_leaderboard(
+            judgments=judgments,
+            answers=self._load_jsonl(answers_file),
+            model_name=self._get_filename(model, epoch),
+        )
+        leaderboard.to_csv(leaderboard_file, index=True)
+        self._log_metrics(leaderboard=leaderboard, model=model, epoch=epoch)
+        return judgments_file
+
+    def _evaluate_pairwise(
+        self,
+        model: BaseModel,
+        epoch: Optional[int],
+        ref_model: BaseModel,
+        ref_epoch: Optional[int],
+        overwrite: bool,
+    ) -> Path:
+        self.check_generator_consistency(model, ref_model)
+        answers_file = self._get_or_generate(model, epoch=epoch, overwrite=overwrite)
+        ref_answers_file = self._get_or_generate(
+            ref_model, epoch=ref_epoch, overwrite=overwrite
+        )
+        logger.info("MT-Bench answers file: %s", answers_file)
+        logger.info("MT-Bench reference answers file: %s", ref_answers_file)
+
+        if self.stop_after_generation:
+            logger.info("Stopping MT-Bench evaluation after response generation.")
+            return answers_file
+
+        folder = self._get_folder(ref_model=ref_model, ref_epoch=ref_epoch)
+        judgments_folder = folder / "judgments"
+        judgments_folder.mkdir(parents=True, exist_ok=True)
+        leaderboards_folder = folder / "leaderboards"
+        leaderboards_folder.mkdir(parents=True, exist_ok=True)
+
+        filename = self._get_filename(model, epoch)
+        judgment_stem = self._get_judgment_stem(filename, pairwise=True)
+        judgments_file = judgments_folder / f"{judgment_stem}_judgments.jsonl"
+        leaderboard_file = leaderboards_folder / f"{judgment_stem}_leaderboard.csv"
+
+        answers = self._load_jsonl(answers_file)
+        ref_answers = self._load_jsonl(ref_answers_file)
+        model_name = model.get_name(epoch=epoch)
+        ref_model_name = ref_model.get_name(epoch=ref_epoch)
+        if overwrite or self.overwrite_judgments or not judgments_file.exists():
+            judgments = self._judge_pairwise_answers(
+                answers=answers,
+                ref_answers=ref_answers,
+                model_name=model_name,
+                ref_model_name=ref_model_name,
+            )
+            self._write_jsonl(judgments_file, judgments)
+        else:
+            judgments = self._load_jsonl(judgments_file)
+        self._validate_pairwise_judgments(judgments, judgments_file)
+
+        leaderboard = self._build_pairwise_leaderboard(
+            judgments=judgments,
+            answers=answers,
+            model_name=self._get_filename(model, epoch),
+            ref_model_name=self._get_filename(ref_model, ref_epoch),
+        )
+        leaderboard.to_csv(leaderboard_file, index=True)
+        self._log_metrics(leaderboard=leaderboard, model=model, epoch=epoch)
+        return judgments_file
+
+    def _get_or_generate(
+        self,
+        model: BaseModel,
+        epoch: Optional[int],
+        overwrite: bool,
+    ) -> Path:
+        responses_folder = self.output_dir / "responses"
+        responses_folder.mkdir(parents=True, exist_ok=True)
+        filename = self._get_filename(model, epoch)
+        answers_file = responses_folder / f"{filename}_answers.jsonl"
+        if overwrite or not answers_file.exists():
+            self._generate_answers(answers_file, model, epoch=epoch)
+        return answers_file
+
+    def _generate_answers(
+        self,
+        answers_file: Path,
+        model: BaseModel,
+        epoch: Optional[int],
+    ) -> None:
+        logger.info(
+            "Generating MT-Bench answers for %d questions with %s",
+            len(self.questions),
+            model.get_name(epoch=epoch),
+        )
+        model.load(epoch=epoch)
+        try:
+            turn_1_prompts = [question.turns[0] for question in self.questions]
+            turn_1_outputs, turn_1_metrics = model.generate_responses(
+                prompts=turn_1_prompts
+            )
+            turn_1_by_prompt = self._outputs_by_prompt(turn_1_outputs)
+            turn_1_answers = [
+                turn_1_by_prompt[self._prompt_key(question.turns[0])]
+                for question in self.questions
+            ]
+
+            turn_2_prompts = [
+                [
+                    {"role": "user", "content": question.turns[0]},
+                    {"role": "assistant", "content": turn_1_answer},
+                    {"role": "user", "content": question.turns[1]},
+                ]
+                for question, turn_1_answer in zip(
+                    self.questions, turn_1_answers, strict=True
+                )
+            ]
+            turn_2_outputs, turn_2_metrics = model.generate_responses(
+                prompts=turn_2_prompts
+            )
+            turn_2_by_prompt = self._outputs_by_prompt(turn_2_outputs)
+            turn_2_answers = [
+                turn_2_by_prompt[self._prompt_key(prompt)] for prompt in turn_2_prompts
+            ]
+        finally:
+            try:
+                model.unload()
+            finally:
+                self._cleanup_cuda_after_unload()
+
+        self._log_generation_metrics(
+            metrics={**turn_1_metrics, **turn_2_metrics},
+            model=model,
+            epoch=epoch,
+        )
+
+        model_name = model.get_name(epoch=epoch)
+        answer_records = []
+        for question, turn_1_answer, turn_2_answer in zip(
+            self.questions, turn_1_answers, turn_2_answers, strict=True
+        ):
+            turns = [turn_1_answer, turn_2_answer]
+            answer_records.append(
+                {
+                    "question_id": question.question_id,
+                    "answer_id": self._answer_id(
+                        model_name, question.question_id, turns
+                    ),
+                    "model_id": model_name,
+                    "choices": [{"index": 0, "turns": turns}],
+                    "tstamp": time.time(),
+                }
+            )
+
+        self._write_jsonl(answers_file, answer_records)
+        logger.info(
+            "Saved %d MT-Bench answers to %s", len(answer_records), answers_file
+        )
+
+    def _judge_answers(
+        self,
+        answers: list[dict[str, Any]],
+        model_name: str,
+    ) -> list[dict[str, Any]]:
+        answers_by_question_id = {
+            int(answer["question_id"]): answer for answer in answers
+        }
+        judge_prompt_items: list[tuple[dict[str, Any], JudgePrompt]] = []
+        for question in self.questions:
+            answer = answers_by_question_id[question.question_id]
+            turns = answer["choices"][0]["turns"]
+            for turn_index in (0, 1):
+                template = self._select_judge_template(question, turn_index)
+                prompt = self._format_judge_prompt(
+                    template=template,
+                    question=question,
+                    answer_turns=turns,
+                    turn_index=turn_index,
+                )
+                metadata = {
+                    "question_id": question.question_id,
+                    "category": question.category,
+                    "turn": turn_index + 1,
+                    "model_id": model_name,
+                    "judge_prompt": template.name,
+                }
+                judge_prompt_items.append((metadata, prompt))
+
+        logger.info("Judging %d MT-Bench answer turns", len(judge_prompt_items))
+        prompts = [item[1] for item in judge_prompt_items]
+        try:
+            completions = self.judge.generate(prompts)
+        finally:
+            self.judge.unload()
+
+        judgments = []
+        for (metadata, prompt), completion in zip(
+            judge_prompt_items, completions, strict=True
+        ):
+            score = self.parse_score(completion)
+            judgments.append(
+                {
+                    **metadata,
+                    "score": score,
+                    "judge_output": completion,
+                    "system_prompt": prompt.system_prompt,
+                    "user_prompt": prompt.user_prompt,
+                }
+            )
+        return judgments
+
+    def _judge_pairwise_answers(
+        self,
+        answers: list[dict[str, Any]],
+        ref_answers: list[dict[str, Any]],
+        model_name: str,
+        ref_model_name: str,
+    ) -> list[dict[str, Any]]:
+        answers_by_question_id = {
+            int(answer["question_id"]): answer for answer in answers
+        }
+        ref_answers_by_question_id = {
+            int(answer["question_id"]): answer for answer in ref_answers
+        }
+        judge_prompt_items: list[tuple[int, str, JudgePrompt]] = []
+        judgments: list[dict[str, Any]] = []
+        for question in self.questions:
+            answer_turns = answers_by_question_id[question.question_id]["choices"][0][
+                "turns"
+            ]
+            ref_answer_turns = ref_answers_by_question_id[question.question_id][
+                "choices"
+            ][0]["turns"]
+            for turn_index in (0, 1):
+                template = self._select_pairwise_judge_template(question, turn_index)
+                g1_prompt = self._format_pairwise_judge_prompt(
+                    template=template,
+                    question=question,
+                    answer_a_turns=answer_turns,
+                    answer_b_turns=ref_answer_turns,
+                    turn_index=turn_index,
+                )
+                g2_prompt = self._format_pairwise_judge_prompt(
+                    template=template,
+                    question=question,
+                    answer_a_turns=ref_answer_turns,
+                    answer_b_turns=answer_turns,
+                    turn_index=turn_index,
+                )
+                judgment_index = len(judgments)
+                judgments.append(
+                    {
+                        "question_id": question.question_id,
+                        "category": question.category,
+                        "turn": turn_index + 1,
+                        "model_1": model_name,
+                        "model_2": ref_model_name,
+                        "judge": ("local", template.name),
+                        "g1_winner": "error",
+                        "g2_winner": "error",
+                        "g1_judgment": "",
+                        "g2_judgment": "",
+                        "g1_user_prompt": g1_prompt.user_prompt,
+                        "g2_user_prompt": g2_prompt.user_prompt,
+                        "tstamp": time.time(),
+                    }
+                )
+                judge_prompt_items.append((judgment_index, "g1", g1_prompt))
+                judge_prompt_items.append((judgment_index, "g2", g2_prompt))
+
+        logger.info(
+            "Pairwise judging %d MT-Bench answer games for %d answer turns",
+            len(judge_prompt_items),
+            len(judgments),
+        )
+        prompts = [item[2] for item in judge_prompt_items]
+        try:
+            completions = self.judge.generate(prompts)
+        finally:
+            self.judge.unload()
+
+        for (judgment_index, game, _prompt), completion in zip(
+            judge_prompt_items, completions, strict=True
+        ):
+            verdict = self.parse_pairwise_verdict(completion)
+            judgment = judgments[judgment_index]
+            if game == "g1":
+                winner = self._pairwise_game_winner(
+                    verdict=verdict,
+                    assistant_a="model_1",
+                    assistant_b="model_2",
+                )
+                judgment["g1_winner"] = winner
+                judgment["g1_judgment"] = completion
+            else:
+                winner = self._pairwise_game_winner(
+                    verdict=verdict,
+                    assistant_a="model_2",
+                    assistant_b="model_1",
+                )
+                judgment["g2_winner"] = winner
+                judgment["g2_judgment"] = completion
+        return judgments
+
+    def _format_judge_prompt(
+        self,
+        template: JudgePromptTemplate,
+        question: MTBenchQuestion,
+        answer_turns: Sequence[str],
+        turn_index: int,
+    ) -> JudgePrompt:
+        values = {
+            "question": question.turns[turn_index],
+            "answer": answer_turns[turn_index],
+            "question_1": question.turns[0],
+            "question_2": question.turns[1],
+            "answer_1": answer_turns[0],
+            "answer_2": answer_turns[1],
+            "ref_answer_1": self._get_reference_answer(question.question_id, 0),
+            "ref_answer_2": self._get_reference_answer(question.question_id, 1),
+        }
+        return JudgePrompt(
+            system_prompt=template.system_prompt,
+            user_prompt=template.prompt_template.format(**values),
+        )
+
+    def _format_pairwise_judge_prompt(
+        self,
+        template: JudgePromptTemplate,
+        question: MTBenchQuestion,
+        answer_a_turns: Sequence[str],
+        answer_b_turns: Sequence[str],
+        turn_index: int,
+    ) -> JudgePrompt:
+        values = {
+            "question": question.turns[turn_index],
+            "answer_a": answer_a_turns[turn_index],
+            "answer_b": answer_b_turns[turn_index],
+            "question_1": question.turns[0],
+            "question_2": question.turns[1],
+            "answer_a_1": answer_a_turns[0],
+            "answer_a_2": answer_a_turns[1],
+            "answer_b_1": answer_b_turns[0],
+            "answer_b_2": answer_b_turns[1],
+            "ref_answer_1": self._get_reference_answer(question.question_id, 0),
+            "ref_answer_2": self._get_reference_answer(question.question_id, 1),
+        }
+        return JudgePrompt(
+            system_prompt=template.system_prompt,
+            user_prompt=template.prompt_template.format(**values),
+        )
+
+    def _select_judge_template(
+        self,
+        question: MTBenchQuestion,
+        turn_index: int,
+    ) -> JudgePromptTemplate:
+        has_reference = question.question_id in self.reference_answers
+        use_reference = question.category in _REFERENCE_CATEGORIES and has_reference
+        if use_reference:
+            key = "single-math-v1-multi-turn" if turn_index == 1 else "single-math-v1"
+        else:
+            key = "single-v1-multi-turn" if turn_index == 1 else "single-v1"
+        return self.judge_prompts[key]
+
+    def _select_pairwise_judge_template(
+        self,
+        question: MTBenchQuestion,
+        turn_index: int,
+    ) -> JudgePromptTemplate:
+        has_reference = question.question_id in self.reference_answers
+        use_reference = question.category in _REFERENCE_CATEGORIES and has_reference
+        if use_reference:
+            key = "pair-math-v1-multi-turn" if turn_index == 1 else "pair-math-v1"
+        else:
+            key = "pair-v2-multi-turn" if turn_index == 1 else "pair-v2"
+        return self.judge_prompts[key]
+
+    def _build_leaderboard(
+        self,
+        judgments: list[dict[str, Any]],
+        answers: list[dict[str, Any]],
+        model_name: str,
+    ) -> pd.DataFrame:
+        judgments_df = pd.DataFrame(judgments)
+        scores = pd.to_numeric(judgments_df["score"], errors="coerce")
+        valid_scores = scores[scores != -1]
+
+        def turn_score(turn: int) -> float:
+            turn_scores = pd.to_numeric(
+                judgments_df.loc[judgments_df["turn"] == turn, "score"],
+                errors="coerce",
+            )
+            return float(turn_scores[turn_scores != -1].mean())
+
+        metrics: dict[str, float | int] = {
+            "score": float(valid_scores.mean()),
+            "turn_1_score": turn_score(1),
+            "turn_2_score": turn_score(2),
+            "parse_error_rate": float((scores == -1).mean()),
+            "n_questions": len(answers),
+            "n_judgments": len(judgments),
+            "avg_output_chars": self._avg_output_chars(answers),
+        }
+        for category, group in judgments_df.groupby("category"):
+            category_scores = pd.to_numeric(group["score"], errors="coerce")
+            metrics[f"{category}_score"] = float(
+                category_scores[category_scores != -1].mean()
+            )
+
+        return pd.DataFrame.from_dict({model_name: metrics}, orient="index")
+
+    def _build_pairwise_leaderboard(
+        self,
+        judgments: list[dict[str, Any]],
+        answers: list[dict[str, Any]],
+        model_name: str,
+        ref_model_name: str,
+    ) -> pd.DataFrame:
+        judgments_df = pd.DataFrame(judgments)
+        resolved = judgments_df.apply(self._resolve_pairwise_row_winner, axis=1)
+        valid = resolved != "error"
+        valid_resolved = resolved[valid]
+        total_valid = len(valid_resolved)
+
+        def rate(mask: pd.Series) -> float:
+            if total_valid == 0:
+                return 0.0
+            return float(mask.sum() / total_valid)
+
+        metrics: dict[str, float | int | str] = {
+            "ref_model": ref_model_name,
+            "win_rate": rate(valid_resolved == "model_1"),
+            "loss_rate": rate(valid_resolved == "model_2"),
+            "tie_rate": rate(valid_resolved == "tie"),
+            "win_rate_adjusted": rate(valid_resolved == "model_1")
+            + 0.5 * rate(valid_resolved == "tie"),
+            "parse_error_rate": float((~valid).mean()),
+            "n_questions": len(answers),
+            "n_judgments": len(judgments),
+            "n_judge_games": len(judgments) * 2,
+            "n_valid_judgments": total_valid,
+            "avg_output_chars": self._avg_output_chars(answers),
+        }
+        for category, group in judgments_df.groupby("category"):
+            group_resolved = group.apply(self._resolve_pairwise_row_winner, axis=1)
+            group_valid = group_resolved[group_resolved != "error"]
+            group_total = len(group_valid)
+            if group_total == 0:
+                metrics[f"{category}_win_rate"] = 0.0
+                metrics[f"{category}_win_rate_adjusted"] = 0.0
+                continue
+            win_rate = float((group_valid == "model_1").sum() / group_total)
+            tie_rate = float((group_valid == "tie").sum() / group_total)
+            metrics[f"{category}_win_rate"] = win_rate
+            metrics[f"{category}_win_rate_adjusted"] = win_rate + 0.5 * tie_rate
+
+        return pd.DataFrame.from_dict({model_name: metrics}, orient="index")
+
+    def _log_metrics(
+        self,
+        leaderboard: pd.DataFrame,
+        model: BaseModel,
+        epoch: Optional[int],
+    ) -> None:
+        if self.wandb_run is None or not self.wandb_run.enabled:
+            return
+
+        generator_config = "unknown"
+        generator = model.generator
+        if generator is not None:
+            generator_config = generator.get_short_name()
+        metric_prefix = f"eval/mt_bench/{generator_config}"
+        metrics = leaderboard.iloc[0].to_dict()
+        log_dict = {f"{metric_prefix}/{key}": value for key, value in metrics.items()}
+        if epoch is not None:
+            log_dict["eval/epoch"] = epoch
+        self.wandb_run.log(log_dict)
+
+    def _log_generation_metrics(
+        self,
+        metrics: dict[str, Any],
+        model: BaseModel,
+        epoch: Optional[int],
+    ) -> None:
+        if not metrics or self.wandb_run is None or not self.wandb_run.enabled:
+            return
+        generator = model.generator
+        generator_config = (
+            generator.get_short_name() if generator is not None else "unknown"
+        )
+        metric_prefix = f"eval/mt_bench/{generator_config}"
+        log_dict = {f"{metric_prefix}/{key}": value for key, value in metrics.items()}
+        if epoch is not None:
+            log_dict["eval/epoch"] = epoch
+        self.wandb_run.log(log_dict)
+
+    def _load_questions(self) -> list[MTBenchQuestion]:
+        records = self._load_jsonl(self.questions_file)
+        questions = [
+            MTBenchQuestion(
+                question_id=int(record["question_id"]),
+                category=str(record.get("category", "unknown")),
+                turns=list(record["turns"]),
+            )
+            for record in records
+        ]
+        for question in questions:
+            if len(question.turns) != 2:
+                raise ValueError(
+                    "MT-Bench evaluator expects exactly two turns per question; "
+                    f"question {question.question_id} has {len(question.turns)}"
+                )
+        if self.num_samples is not None and self.num_samples > 0:
+            questions = questions[: self.num_samples]
+        logger.info(
+            "Loaded %d MT-Bench questions from %s", len(questions), self.questions_file
+        )
+        return questions
+
+    def _get_judgment_stem(self, filename: str, pairwise: bool = False) -> str:
+        parts = [filename]
+        if self.judgment_tag:
+            parts.append(sanitize_filename(self.judgment_tag))
+        if pairwise:
+            parts.append("pairwise")
+        return "_".join(parts)
+
+    def _load_judge_prompts(self) -> dict[str, JudgePromptTemplate]:
+        if self.judge_prompts_file is None:
+            return self._default_judge_prompts()
+
+        prompts = {}
+        for record in self._load_jsonl(self.judge_prompts_file):
+            if record.get("type") not in {"single", "pairwise"}:
+                continue
+            prompts[str(record["name"])] = JudgePromptTemplate(
+                name=str(record["name"]),
+                system_prompt=str(record["system_prompt"]),
+                prompt_template=str(record["prompt_template"]),
+            )
+        defaults = self._default_judge_prompts()
+        defaults.update(prompts)
+        return defaults
+
+    @staticmethod
+    def _resolve_judge_prompts_file(
+        judge_prompts_file: Optional[str],
+    ) -> Optional[Path]:
+        if judge_prompts_file is not None:
+            return Path(judge_prompts_file)
+        return default_judge_prompts_path()
+
+    @staticmethod
+    def _resolve_questions_file(questions_file: Optional[str]) -> Path:
+        if questions_file is not None:
+            return Path(questions_file)
+        return default_question_path()
+
+    @staticmethod
+    def _resolve_reference_answers_file(
+        reference_answers_file: Optional[str],
+    ) -> Optional[Path]:
+        if reference_answers_file is not None:
+            return Path(reference_answers_file)
+        return default_reference_answer_path()
+
+    def _load_reference_answers(self) -> dict[int, list[str]]:
+        if self.reference_answers_file is None:
+            return {}
+        answers = {}
+        for record in self._load_jsonl(self.reference_answers_file):
+            answers[int(record["question_id"])] = list(record["choices"][0]["turns"])
+        return answers
+
+    def _get_reference_answer(self, question_id: int, turn_index: int) -> str:
+        if question_id not in self.reference_answers:
+            return ""
+        reference_turns = self.reference_answers[question_id]
+        if turn_index >= len(reference_turns):
+            return ""
+        return reference_turns[turn_index]
+
+    @staticmethod
+    def parse_score(completion: str) -> float:
+        for pattern in _SCORE_PATTERNS:
+            match = pattern.search(completion)
+            if match is None:
+                continue
+            return float(match.group(1))
+        return -1.0
+
+    @staticmethod
+    def parse_pairwise_verdict(completion: str) -> Optional[str]:
+        if "[[A]]" in completion:
+            return "A"
+        if "[[B]]" in completion:
+            return "B"
+        if "[[C]]" in completion:
+            return "C"
+        return None
+
+    @staticmethod
+    def _pairwise_game_winner(
+        verdict: Optional[str],
+        assistant_a: str,
+        assistant_b: str,
+    ) -> str:
+        if verdict == "A":
+            return assistant_a
+        if verdict == "B":
+            return assistant_b
+        if verdict == "C":
+            return "tie"
+        return "error"
+
+    @staticmethod
+    def _resolve_pairwise_winner(g1_winner: str, g2_winner: str) -> str:
+        if g1_winner == "error" or g2_winner == "error":
+            return "error"
+        if g1_winner == "tie" or g1_winner != g2_winner:
+            return "tie"
+        return g1_winner
+
+    @classmethod
+    def _resolve_pairwise_row_winner(cls, row: Mapping[str, Any]) -> str:
+        return cls._resolve_pairwise_winner(
+            str(row.get("g1_winner", "error")),
+            str(row.get("g2_winner", "error")),
+        )
+
+    @staticmethod
+    def _validate_pairwise_judgments(
+        judgments: Sequence[Mapping[str, Any]],
+        judgments_file: Path,
+    ) -> None:
+        required_fields = {
+            "model_1",
+            "model_2",
+            "g1_winner",
+            "g2_winner",
+            "g1_judgment",
+            "g2_judgment",
+        }
+        valid_winners = {"model_1", "model_2", "tie", "error"}
+        for index, judgment in enumerate(judgments):
+            missing = sorted(required_fields - judgment.keys())
+            if missing:
+                raise ValueError(
+                    "MT-Bench pairwise judgments must use the two-game FastChat "
+                    f"schema. {judgments_file} row {index} is missing {missing}. "
+                    "Regenerate judgments with evaluator.overwrite_judgments=true."
+                )
+            invalid_winners = {
+                field: judgment[field]
+                for field in ("g1_winner", "g2_winner")
+                if judgment[field] not in valid_winners
+            }
+            if invalid_winners:
+                raise ValueError(
+                    "MT-Bench pairwise judgments contain invalid winner values. "
+                    f"{judgments_file} row {index} has {invalid_winners}; expected "
+                    f"one of {sorted(valid_winners)}. Regenerate judgments with "
+                    "evaluator.overwrite_judgments=true."
+                )
+
+    @staticmethod
+    def _cleanup_cuda_after_unload() -> None:
+        gc.collect()
+        try:
+            import torch
+        except ImportError:
+            return
+        if not torch.cuda.is_available():
+            return
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        if hasattr(torch.cuda, "ipc_collect"):
+            torch.cuda.ipc_collect()
+
+    @staticmethod
+    def _outputs_by_prompt(outputs: Sequence[dict[str, Any]]) -> dict[str, str]:
+        return {
+            MTBenchEvaluator._prompt_key(output["prompt"]): str(output["output"])
+            for output in outputs
+        }
+
+    @staticmethod
+    def _prompt_key(prompt: Any) -> str:
+        return json.dumps(prompt, sort_keys=True, ensure_ascii=False)
+
+    @staticmethod
+    def _answer_id(model_name: str, question_id: int, turns: Sequence[str]) -> str:
+        value = json.dumps(
+            {"model": model_name, "question_id": question_id, "turns": list(turns)},
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        return hashlib.sha1(value.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _avg_output_chars(answers: list[dict[str, Any]]) -> float:
+        lengths = []
+        for answer in answers:
+            for turn in answer["choices"][0]["turns"]:
+                lengths.append(len(str(turn)))
+        if not lengths:
+            return 0.0
+        return float(sum(lengths) / len(lengths))
+
+    @staticmethod
+    def _init_judge(judge: BaseJudge | DictConfig | Mapping[str, Any]) -> BaseJudge:
+        if isinstance(judge, BaseJudge):
+            return judge
+        if isinstance(judge, DictConfig):
+            return instantiate(judge)
+        if "_target_" in judge:
+            return instantiate(OmegaConf.create(dict(judge)))
+        raise ValueError("judge must be a BaseJudge or Hydra config with _target_")
+
+    @staticmethod
+    def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+        with open(path, "r", encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+    @staticmethod
+    def _write_jsonl(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _default_judge_prompts() -> dict[str, JudgePromptTemplate]:
+        return {
+            "single-v1": JudgePromptTemplate(
+                name="single-v1",
+                system_prompt="You are a helpful assistant.",
+                prompt_template=(
+                    "[Instruction]\n"
+                    "Please act as an impartial judge and evaluate the quality "
+                    "of the response provided by an AI assistant to the user "
+                    "question displayed below. Your evaluation should consider "
+                    "helpfulness, relevance, accuracy, depth, creativity, and "
+                    "level of detail. Begin with a short explanation. Be as "
+                    "objective as possible. After the explanation, rate the "
+                    "response from 1 to 10 by replacing rating with a number "
+                    'using exactly this format: "[[rating]]", for example: '
+                    '"Rating: [[5]]".\n\n'
+                    "[Question]\n{question}\n\n"
+                    "[The Start of Assistant's Answer]\n{answer}\n"
+                    "[The End of Assistant's Answer]"
+                ),
+            ),
+            "single-v1-multi-turn": JudgePromptTemplate(
+                name="single-v1-multi-turn",
+                system_prompt=(
+                    "Please act as an impartial judge and evaluate the quality "
+                    "of the response provided by an AI assistant. Focus on the "
+                    "assistant's answer to the second user question. After the "
+                    "explanation, rate the response from 1 to 10 by replacing "
+                    "rating with a number using exactly this format: "
+                    '"[[rating]]", for example: "Rating: [[5]]".'
+                ),
+                prompt_template=(
+                    "<|The Start of Assistant A's Conversation with User|>\n\n"
+                    "### User:\n{question_1}\n\n"
+                    "### Assistant A:\n{answer_1}\n\n"
+                    "### User:\n{question_2}\n\n"
+                    "### Assistant A:\n{answer_2}\n\n"
+                    "<|The End of Assistant A's Conversation with User|>"
+                ),
+            ),
+            "single-math-v1": JudgePromptTemplate(
+                name="single-math-v1",
+                system_prompt="You are a helpful assistant.",
+                prompt_template=(
+                    "[Instruction]\n"
+                    "Please act as an impartial judge and evaluate correctness "
+                    "and helpfulness. Compare the assistant's answer with the "
+                    "reference answer. After the explanation, rate the response "
+                    "from 1 to 10 by replacing rating with a number using "
+                    'exactly this format: "[[rating]]", for example: '
+                    '"Rating: [[5]]".\n\n'
+                    "[Question]\n{question}\n\n"
+                    "[The Start of Reference Answer]\n{ref_answer_1}\n"
+                    "[The End of Reference Answer]\n\n"
+                    "[The Start of Assistant's Answer]\n{answer}\n"
+                    "[The End of Assistant's Answer]"
+                ),
+            ),
+            "single-math-v1-multi-turn": JudgePromptTemplate(
+                name="single-math-v1-multi-turn",
+                system_prompt=(
+                    "Please act as an impartial judge and evaluate correctness "
+                    "and helpfulness. Focus on the assistant's answer to the "
+                    "second question. After the explanation, rate the response "
+                    "from 1 to 10 by replacing rating with a number using "
+                    'exactly this format: "[[rating]]", for example: '
+                    '"Rating: [[5]]".'
+                ),
+                prompt_template=(
+                    "<|The Start of Reference Answer|>\n\n"
+                    "### User:\n{question_1}\n\n"
+                    "### Reference answer:\n{ref_answer_1}\n\n"
+                    "### User:\n{question_2}\n\n"
+                    "### Reference answer:\n{ref_answer_2}\n\n"
+                    "<|The End of Reference Answer|>\n\n\n"
+                    "<|The Start of Assistant A's Conversation with User|>\n\n"
+                    "### User:\n{question_1}\n\n"
+                    "### Assistant A:\n{answer_1}\n\n"
+                    "### User:\n{question_2}\n\n"
+                    "### Assistant A:\n{answer_2}\n\n"
+                    "<|The End of Assistant A's Conversation with User|>"
+                ),
+            ),
+        }

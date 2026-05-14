@@ -1,0 +1,37 @@
+_target_: pepo.evaluator.mtbench.MTBenchEvaluator
+
+questions_file: null
+judge_prompts_file: null
+reference_answers_file: null
+
+output_dir: "${hydra:runtime.cwd}/outputs"
+num_samples: null
+stop_after_generation: false
+overwrite_judgments: false
+judgment_tag: null
+
+judge:
+  _target_: pepo.evaluator.judges.managed_vllm.ManagedVLLMJudge
+  model_name: meta-llama/Meta-Llama-3-70B-Instruct
+  served_model_name: mtbench-judge
+  host: 127.0.0.1
+  port: null
+  api_key: EMPTY
+  vllm_executable: "${hydra:runtime.cwd}/.venv-vllm/bin/vllm"
+  max_tokens: 512
+  temperature: 0.0
+  top_p: 1.0
+  tensor_parallel_size: null
+  dtype: float16
+  gpu_memory_utilization: 0.9
+  max_model_len: null
+  trust_remote_code: false
+  startup_timeout: 1800.0
+  request_timeout: 600.0
+  shutdown_timeout: 10.0
+  poll_interval: 5.0
+  log_path: null
+  log_dir: "${hydra:runtime.cwd}/outputs/mt_bench"
+  extra_args:
+    - --disable-log-requests
+    - --disable-custom-all-reduce

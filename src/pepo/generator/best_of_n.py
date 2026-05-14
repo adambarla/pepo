@@ -530,7 +530,7 @@ class BestOfNGenerator(BaseGenerator):
 
     def get_name(self) -> str:
         """Get generator name for file naming."""
-        parts = [f"bon-{self.sampling_mode}"]
+        parts: list[str] = [f"bon-{self.sampling_mode}"]
         if self.sampling_mode == "mean_std":
             parts.append(f"eta{self.eta}")
         parts.append(f"n{self.max_trials}")

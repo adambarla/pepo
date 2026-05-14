@@ -33,7 +33,7 @@ repos:
         entry: uvx ty check
         language: system
         types: [python]
-        # args: [] # Add any args if needed
+        args: [--force-exclude]
 
   # General hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks
