@@ -77,30 +77,33 @@ def get_runs_df(
             else:
                 df = pd.read_csv(cache_path)
 
-            # Smart Refresh Logic
+            # Smart refresh logic: use the cache even if W&B is unavailable.
             if "created_at" in df.columns and not df.empty:
                 last_time = df["created_at"].max()
                 print(
                     f"Cache contains runs up to {last_time}. Checking for new runs..."
                 )
 
-                # Prepare filter for new runs
-                time_filter = {"created_at": {"$gt": last_time}}
-                if filters:
-                    new_filters = {"$and": [filters, time_filter]}
-                else:
-                    new_filters = time_filter
+                try:
+                    # Prepare filter for new runs
+                    time_filter = {"created_at": {"$gt": last_time}}
+                    if filters:
+                        new_filters = {"$and": [filters, time_filter]}
+                    else:
+                        new_filters = time_filter
 
-                new_runs = fetch_runs(entity, project, new_filters)
-                new_df = extract_metrics(new_runs)
+                    new_runs = fetch_runs(entity, project, new_filters)
+                    new_df = extract_metrics(new_runs)
 
-                if not new_df.empty:
-                    print(f"Found {len(new_df)} new runs. Merging...")
-                    df = pd.concat([df, new_df], ignore_index=True)
-                    # Deduplicate just in case
-                    df = df.drop_duplicates(subset=["run_id"], keep="last")
-                else:
-                    print("No new runs found.")
+                    if not new_df.empty:
+                        print(f"Found {len(new_df)} new runs. Merging...")
+                        df = pd.concat([df, new_df], ignore_index=True)
+                        # Deduplicate just in case
+                        df = df.drop_duplicates(subset=["run_id"], keep="last")
+                    else:
+                        print("No new runs found.")
+                except Exception as e:
+                    print(f"W&B incremental refresh skipped, using cache: {e}")
             else:
                 print(
                     "Cache missing 'created_at' or empty. "
@@ -114,8 +117,23 @@ def get_runs_df(
 
     if df is None:
         print("Fetching all runs from WandB...")
-        runs = fetch_runs(entity, project, filters)
-        df = extract_metrics(runs)
+        try:
+            runs = fetch_runs(entity, project, filters)
+            df = extract_metrics(runs)
+        except Exception as e:
+            if not force_refresh and os.path.exists(cache_path):
+                print(f"W&B full fetch failed ({e}). Using existing cache.")
+                if cache_path.endswith(".pkl"):
+                    loaded_df = pd.read_pickle(cache_path)
+                    df = (
+                        loaded_df
+                        if isinstance(loaded_df, pd.DataFrame)
+                        else pd.DataFrame(loaded_df)
+                    )
+                else:
+                    df = pd.read_csv(cache_path)
+            else:
+                raise
 
     print(f"Saving cache to {cache_path}")
     if cache_path.endswith(".pkl"):
@@ -265,7 +283,10 @@ def get_exp1_data(df, model_idx=0):
 
     # Filter for greedy sampling
     if "config/model/generator/greedy_sampling" in df.columns:
-        df = df[df["config/model/generator/greedy_sampling"]]
+        greedy_sampling = df["config/model/generator/greedy_sampling"].map(
+            lambda value: value is True or str(value).lower() == "true"
+        )
+        df = df[greedy_sampling].copy()
 
     # Filter for eval runs
     df = df[df["name"].str.contains("eval", na=False)]
@@ -341,6 +362,88 @@ def get_exp1_data(df, model_idx=0):
                 # Clear run specific info that might be confusing if duplicated?
                 # For plotting purposes, copying is fine.
                 new_rows.append(base_row)
+
+        if new_rows:
+            df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+
+    return df
+
+
+def _parse_wandb_tags(value):
+    if isinstance(value, str) and value.startswith("["):
+        return ast.literal_eval(value)
+    return value
+
+
+def _algorithm_from_tags_or_l(row):
+    tags = row.get("config/model/wandb/tags")
+    if isinstance(tags, list) and len(tags) > 0:
+        return tags[0]
+
+    L = row.get("L", row.get("config/L", None))
+    if pd.notna(L):
+        return f"pepo-L{int(L)}"
+
+    return "unknown"
+
+
+def get_mtbench_data(df, model_idx=0):
+    """
+    Processes dataframe for MT-Bench win-rate plots.
+    """
+    model_id = MODELS[model_idx]
+    df = df[
+        (df["config/model/model_id"] == model_id)
+        | (df["config/backbone/model_id"] == model_id)
+        | (df["config/model/backbone/model_id"] == model_id)
+    ].copy()
+
+    # MT-Bench eval runs are named with mtbench-eval and carry mt_bench metrics.
+    df = df[df["name"].str.contains("mtbench-eval", na=False)].copy()
+
+    metric_prefix = "summary/eval/mt_bench/mt1024/"
+    win_col = f"{metric_prefix}win_rate"
+    adjusted_win_col = f"{metric_prefix}win_rate_adjusted"
+
+    if win_col in df.columns:
+        df["mtbench_winrate"] = df[win_col] * 100.0
+
+    if adjusted_win_col in df.columns:
+        df["mtbench_winrate_adjusted"] = df[adjusted_win_col] * 100.0
+
+    if "summary/eval/epoch" in df.columns:
+        df["epoch"] = df["summary/eval/epoch"]
+
+    if "config/L" in df.columns:
+        df["L"] = df["config/L"]
+
+    df["model"] = model_id
+
+    if "config/model/wandb/tags" in df.columns:
+        df["config/model/wandb/tags"] = df["config/model/wandb/tags"].apply(
+            _parse_wandb_tags
+        )
+
+    df["algorithm"] = df.apply(_algorithm_from_tags_or_l, axis=1)
+
+    if "epoch" in df.columns and "mtbench_winrate_adjusted" in df.columns:
+        df.loc[df["epoch"] == 0, "mtbench_winrate_adjusted"] = 50.0
+
+    if (
+        "algorithm" in df.columns
+        and "epoch" in df.columns
+        and "mtbench_winrate_adjusted" in df.columns
+    ):
+        new_rows = []
+        for algo in df["algorithm"].dropna().unique():
+            algo_df = df[df["algorithm"] == algo]
+            if algo_df.empty or (algo_df["epoch"] == 0).any():
+                continue
+
+            base_row = algo_df.iloc[0].copy()
+            base_row["epoch"] = 0
+            base_row["mtbench_winrate_adjusted"] = 50.0
+            new_rows.append(base_row)
 
         if new_rows:
             df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
@@ -584,6 +687,10 @@ def plot_metrics_over_epochs(
             return "Win Rate against the Initial Model (%)"
         if s == "winrate_gpt4":
             return "Win Rate against GPT-4 (%)"
+        if s == "mtbench_winrate":
+            return "MT-Bench Win Rate (%)"
+        if s == "mtbench_winrate_adjusted":
+            return "MT-Bench Tie-Adjusted Win Rate (%)"
         return s.replace("_", " ").replace("/", " ").title()
 
     if title:
@@ -762,6 +869,10 @@ def plot_multi_model_comparison(
             return "Win Rate against the Initial Model (%)"
         if s == "winrate_gpt4":
             return "Win Rate against GPT-4 (%)"
+        if s == "mtbench_winrate":
+            return "MT-Bench Win Rate (%)"
+        if s == "mtbench_winrate_adjusted":
+            return "MT-Bench Tie-Adjusted Win Rate (%)"
         return s.replace("_", " ").replace("/", " ").title()
 
     for idx, (ax, df) in enumerate(zip(axes, processed_dfs)):
