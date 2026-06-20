@@ -167,8 +167,9 @@ class Generator(BaseGenerator):
 
             adjusted_batch_size = max(1, math.ceil(len(prompts) / num_gpus))
             logger.info(
-                f"Dynamically adjusting batch size from {batch_size} to {adjusted_batch_size} "
-                f"to distribute workload evenly across all {num_gpus} GPUs."
+                f"Dynamically adjusting batch size from {batch_size} "
+                f"to {adjusted_batch_size} to distribute workload evenly "
+                f"across all {num_gpus} GPUs."
             )
             batch_size = adjusted_batch_size
 

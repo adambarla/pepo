@@ -18,6 +18,6 @@ ulimit -c 0
 uenv run prgenv-gnu/26.3:v1 -- bash -c '
   export CUDA_HOME=/user-environment/env/default
   export PATH="${CUDA_HOME}/bin:${PATH}"
-  
+
   uv run scripts/eval.py "$@"
 ' -- "$@"
