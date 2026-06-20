@@ -10,6 +10,9 @@
 
 cd ~/projects/pepo
 
+# Disable core dump generation
+ulimit -c 0
+
 # Redirect uv and Hugging Face caches to Lustre scratch directory to avoid quota limits
 export UV_CACHE_DIR="/capstor/scratch/cscs/barla/uv_cache"
 export HF_HOME="/capstor/scratch/cscs/barla/hf_cache"
