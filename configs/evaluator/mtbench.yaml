@@ -33,5 +33,5 @@ judge:
   log_path: null
   log_dir: "${hydra:runtime.cwd}/outputs/mt_bench"
   extra_args:
-    - --disable-log-requests
+    - --no-enable-log-requests
     - --disable-custom-all-reduce

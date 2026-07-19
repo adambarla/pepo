@@ -84,8 +84,8 @@ The managed judge uses `evaluator.judge.vllm_executable`, which defaults to `.ve
 
 ```bash
 uv venv .venv-vllm --python 3.12 --seed --managed-python --clear
-uv pip install --python .venv-vllm/bin/python "vllm==0.10.1" --torch-backend=cu128
-uv pip install --python .venv-vllm/bin/python "transformers>=4.55.0,<5"
+uv pip install --python .venv-vllm/bin/python "vllm>=0.10.1" --torch-backend=cu128
+uv pip install --python .venv-vllm/bin/python "transformers>=4.55.0,<5" "fastapi<0.137.0"
 ```
 
 Override `evaluator.judge.vllm_executable=/path/to/vllm` if vLLM is provided by a module or another environment.

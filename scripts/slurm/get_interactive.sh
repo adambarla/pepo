@@ -22,7 +22,7 @@ fi
 
 # Use srun directly - this creates one interactive shell
 # To get additional shells, use: ./scripts/slurm/connect_to_node.sh
-srun --account=infra01 -p $PARTITION --nodes=1 --time=$TIME --gpus=4 \
+srun --account=a0136 -p $PARTITION --nodes=1 --time=$TIME --gpus=4 \
      --exclusive --job-name="interactive" --pty bash -c "
   # Print connection info
   echo \"\" >&2

@@ -160,6 +160,19 @@ class Generator(BaseGenerator):
         )
 
         batch_size = model.generation_batch_size
+
+        # Dynamically adjust batch size to utilize all available GPUs evenly
+        if num_gpus > 1 and len(prompts) < batch_size * num_gpus:
+            import math
+
+            adjusted_batch_size = max(1, math.ceil(len(prompts) / num_gpus))
+            logger.info(
+                f"Dynamically adjusting batch size from {batch_size} "
+                f"to {adjusted_batch_size} to distribute workload evenly "
+                f"across all {num_gpus} GPUs."
+            )
+            batch_size = adjusted_batch_size
+
         batch_queue = queue.Queue()
 
         # Fill queue
