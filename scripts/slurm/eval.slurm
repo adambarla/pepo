@@ -7,6 +7,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --account=a0136
 #SBATCH --exclusive --mem=450G
+# No nodes excluded (race condition fixed)
 
 cd ~/projects/pepo
 
@@ -19,5 +20,5 @@ uenv run prgenv-gnu/26.3:v1 -- bash -c '
   export CUDA_HOME=/user-environment/env/default
   export PATH="${CUDA_HOME}/bin:${PATH}"
 
-  uv run scripts/eval.py "$@"
+  .venv/bin/python scripts/eval.py "$@"
 ' -- "$@"
