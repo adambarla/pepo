@@ -1,5 +1,6 @@
 import ast
 import os
+import re
 
 import pandas as pd
 import wandb
@@ -12,18 +13,20 @@ MODELS = [
 ]
 
 
-def fetch_runs(entity=os.getenv("WANDB_ENTITY"), project="pepo", filters=None):
+def fetch_runs(entity=None, project="pepo", filters=None):
     """
     Fetches runs from WandB.
 
     Args:
-        entity (str): WandB entity name.
+        entity (str): WandB entity name. Defaults to the WANDB_ENTITY
+                      environment variable, falling back to "pepo-team".
         project (str): WandB project name.
         filters (dict, optional): MongoDB-style filter dictionary.
 
     Returns:
         wandb.Runs: An iterator over run objects.
     """
+    entity = entity or os.getenv("WANDB_ENTITY") or "pepo-team"
     api = wandb.Api()
     path = f"{entity}/{project}"
     runs = api.runs(path=path, filters=filters)
@@ -32,7 +35,7 @@ def fetch_runs(entity=os.getenv("WANDB_ENTITY"), project="pepo", filters=None):
 
 
 def get_runs_df(
-    entity=os.getenv("WANDB_ENTITY"),
+    entity=None,
     project="pepo",
     filters=None,
     cache_path=None,
@@ -42,7 +45,8 @@ def get_runs_df(
     Fetches runs and returns a DataFrame, with local caching.
 
     Args:
-        entity (str): WandB entity.
+        entity (str): WandB entity. Defaults to the WANDB_ENTITY
+                      environment variable, falling back to "pepo-team".
         project (str): WandB project.
         filters (dict): Filters for WandB.
         cache_path (str): Path to save/load cache. Defaults to .cache/runs_cache.pkl
@@ -51,6 +55,8 @@ def get_runs_df(
     Returns:
         pd.DataFrame: Runs data.
     """
+    entity = entity or os.getenv("WANDB_ENTITY") or "pepo-team"
+
     if cache_path is None:
         # Default to .cache folder in the same directory as this file
         base_dir = os.path.dirname(__file__)
@@ -75,7 +81,7 @@ def get_runs_df(
                     else pd.DataFrame(loaded_df)
                 )
             else:
-                df = pd.read_csv(cache_path)
+                df = pd.read_csv(cache_path, low_memory=False)
 
             # Smart refresh logic: use the cache even if W&B is unavailable.
             if "created_at" in df.columns and not df.empty:
@@ -131,7 +137,7 @@ def get_runs_df(
                         else pd.DataFrame(loaded_df)
                     )
                 else:
-                    df = pd.read_csv(cache_path)
+                    df = pd.read_csv(cache_path, low_memory=False)
             else:
                 raise
 
@@ -269,6 +275,13 @@ def extract_history(runs, keys=None, samples=500):
     return pd.concat(all_history, ignore_index=True)
 
 
+def _is_alpaca_eval_run(names):
+    """True for AlpacaEval runs; excludes MT-Bench eval runs."""
+    is_eval = names.str.contains("eval", na=False)
+    is_mtbench = names.str.contains("mtbench", na=False)
+    return is_eval & ~is_mtbench
+
+
 def get_exp1_data(df, model_idx=0):
     """
     Processes dataframe for Experiment 1.
@@ -288,8 +301,8 @@ def get_exp1_data(df, model_idx=0):
         )
         df = df[greedy_sampling].copy()
 
-    # Filter for eval runs
-    df = df[df["name"].str.contains("eval", na=False)]
+    # Filter for AlpacaEval runs (exclude MT-Bench eval runs)
+    df = df[_is_alpaca_eval_run(df["name"])]
 
     # Create derived columns
     if "config/L" in df.columns:
@@ -343,6 +356,18 @@ def get_exp1_data(df, model_idx=0):
     if se_col in df.columns:
         df["standard_error_initial"] = df[se_col]
 
+    # Length-controlled variants (correct for verbosity bias)
+    lc_win_col = f"{initial_cols}length_controlled_winrate"
+    lc_se_col = f"{initial_cols}lc_standard_error"
+
+    if lc_win_col in df.columns:
+        df["winrate_initial_lc"] = df[lc_win_col]
+        if "epoch" in df.columns:
+            df.loc[df["epoch"] == 0, "winrate_initial_lc"] = 50.0
+
+    if lc_se_col in df.columns:
+        df["standard_error_initial_lc"] = df[lc_se_col]
+
     # Ensure epoch 0 exists for every algorithm
     if (
         "algorithm" in df.columns
@@ -359,6 +384,8 @@ def get_exp1_data(df, model_idx=0):
                 base_row = algo_df.iloc[0].copy()
                 base_row["epoch"] = 0
                 base_row["winrate_initial"] = 50.0
+                if "winrate_initial_lc" in df.columns:
+                    base_row["winrate_initial_lc"] = 50.0
                 # Clear run specific info that might be confusing if duplicated?
                 # For plotting purposes, copying is fine.
                 new_rows.append(base_row)
@@ -474,8 +501,8 @@ def get_exp2_data(df, model_idx=0, epoch_range=None):
         | (df["config/model/backbone/model_id"] == model_id)
     ].copy()
 
-    # Filter for eval runs only
-    df = df[df["name"].str.contains("eval", na=False)]
+    # Filter for AlpacaEval runs only (exclude MT-Bench eval runs)
+    df = df[_is_alpaca_eval_run(df["name"])]
 
     # Identify BON runs by name pattern (they should be kept even without L >= 2)
     def is_bon_run(row):
@@ -575,6 +602,56 @@ def get_exp2_data(df, model_idx=0, epoch_range=None):
         df = df[(df["epoch"] >= min_epoch) & (df["epoch"] <= max_epoch)]
 
     return df
+
+
+def keep_best_pepo_L(df, y_col, hue_col="algorithm", tol=1.0):
+    """
+    Reduces PEPO L variants (pepo-L2, pepo-L3, ...) to the single best L,
+    renamed to "PEPO" for display. All other algorithms are kept unchanged.
+
+    Since get_*_data() returns one model per DataFrame, the best L is
+    selected per model. Variants are ranked by their peak y_col value
+    across the DataFrame (e.g., across epochs); among variants within
+    `tol` of the best (i.e., statistically indistinguishable, given that
+    win-rate standard errors are ~1.5), the smallest L wins.
+
+    Args:
+        df (pd.DataFrame): DataFrame from get_exp1_data()/get_mtbench_data().
+        y_col (str): Metric column used to rank the L variants.
+        hue_col (str): Column containing algorithm names.
+        tol (float): Tolerance in y_col units for preferring smaller L.
+
+    Returns:
+        pd.DataFrame: Copy of df with only the best PEPO L variant kept.
+    """
+    if df.empty or hue_col not in df.columns or y_col not in df.columns:
+        return df
+
+    def parse_l(algo):
+        match = re.fullmatch(r"pepo-L(\d+)", str(algo))
+        return int(match.group(1)) if match else None
+
+    plot_df = df.copy()
+    variant_l = plot_df[hue_col].map(parse_l)
+    # pepo-L1 is DPO; only L >= 2 are actual PEPO variants
+    is_variant = variant_l.fillna(0) >= 2
+    candidates = plot_df.loc[is_variant, hue_col].unique()
+
+    if len(candidates) == 0:
+        return plot_df
+
+    def max_y(algo):
+        m = plot_df.loc[plot_df[hue_col] == algo, y_col].max()
+        return m if pd.notna(m) else float("-inf")
+
+    maxima = {algo: max_y(algo) for algo in candidates}
+    best_y = max(maxima.values())
+    tied = [a for a in candidates if maxima[a] >= best_y - tol]
+    best_algo = min(tied, key=lambda a: parse_l(a))
+
+    plot_df = plot_df[~is_variant | (plot_df[hue_col] == best_algo)].copy()
+    plot_df.loc[plot_df[hue_col] == best_algo, hue_col] = "PEPO"
+    return plot_df
 
 
 def plot_metrics_over_epochs(
@@ -685,6 +762,8 @@ def plot_metrics_over_epochs(
     def format_label(s):
         if s == "winrate_initial":
             return "Win Rate against the Initial Model (%)"
+        if s == "winrate_initial_lc":
+            return "Length-Controlled Win Rate (%)"
         if s == "winrate_gpt4":
             return "Win Rate against GPT-4 (%)"
         if s == "mtbench_winrate":
@@ -838,6 +917,7 @@ def plot_multi_model_comparison(
     # Aggregated special colors
     custom_palette["Rejection Sampling"] = "#27ae60"  # Strong Green
     custom_palette[r"Token Level \texttt{PEPO}"] = "#2980b9"  # Strong Blue
+    custom_palette["PEPO"] = "#2980b9"  # Strong Blue (best-L PEPO)
 
     # Assign colors by type (for non-aggregated or remaining items)
     rej_min_algos = [a for a in unique_algos if "Rej.Min" in a]
@@ -867,6 +947,8 @@ def plot_multi_model_comparison(
     def format_label(s):
         if s == "winrate_initial":
             return "Win Rate against the Initial Model (%)"
+        if s == "winrate_initial_lc":
+            return "Length-Controlled Win Rate (%)"
         if s == "winrate_gpt4":
             return "Win Rate against GPT-4 (%)"
         if s == "mtbench_winrate":
