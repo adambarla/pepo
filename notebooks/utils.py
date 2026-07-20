@@ -282,6 +282,35 @@ def _is_alpaca_eval_run(names):
     return is_eval & ~is_mtbench
 
 
+def deduplicate_runs(df, group_cols, strategy="last", time_col="created_at"):
+    """
+    When multiple runs share the same group keys (e.g. same algorithm
+    and epoch), keeps one representative according to *strategy*.
+
+    Strategies
+    ----------
+    ``"last"``
+        Keep the run with the latest *time_col* value.
+    ``"best"``
+        Keep the run with the highest value in the group's *y_col*.
+    ``"mean"``
+        Average all numeric columns within the group (placeholder).
+    """
+    if df.empty or not all(c in df.columns for c in group_cols):
+        return df
+
+    if strategy == "last":
+        if time_col not in df.columns:
+            return df
+        return df.sort_values(time_col).groupby(group_cols, as_index=False).last()
+    elif strategy == "best":
+        raise NotImplementedError("best strategy requires a y_col parameter")
+    elif strategy == "mean":
+        raise NotImplementedError("mean strategy not yet implemented")
+    else:
+        raise ValueError(f"Unknown deduplication strategy: {strategy}")
+
+
 def get_exp1_data(df, model_idx=0):
     """
     Processes dataframe for Experiment 1.
@@ -330,6 +359,10 @@ def get_exp1_data(df, model_idx=0):
             return f"pepo-L{row['L']}" if "L" in row else "unknown"
 
         df["algorithm"] = df.apply(get_algorithm, axis=1)
+
+    # Deduplicate: keep the last run per (algorithm, epoch)
+    if "algorithm" in df.columns and "epoch" in df.columns:
+        df = deduplicate_runs(df, group_cols=["algorithm", "epoch"])
 
     # Extract winrates
     gpt4_cols = "summary/eval/tatsu-lab/alpaca_eval/mt1024/"
@@ -453,6 +486,10 @@ def get_mtbench_data(df, model_idx=0):
 
     df["algorithm"] = df.apply(_algorithm_from_tags_or_l, axis=1)
 
+    # Deduplicate: keep the last run per (algorithm, epoch)
+    if "algorithm" in df.columns and "epoch" in df.columns:
+        df = deduplicate_runs(df, group_cols=["algorithm", "epoch"])
+
     if "epoch" in df.columns and "mtbench_winrate_adjusted" in df.columns:
         df.loc[df["epoch"] == 0, "mtbench_winrate_adjusted"] = 50.0
 
@@ -571,6 +608,10 @@ def get_exp2_data(df, model_idx=0, epoch_range=None):
         return f"pepo-L{int(L)}" if L and str(L) != "nan" else "pepo"
 
     df["algorithm"] = df.apply(get_sampling_strategy, axis=1)
+
+    # Deduplicate: keep the last run per (algorithm, epoch)
+    if "algorithm" in df.columns and "epoch" in df.columns:
+        df = deduplicate_runs(df, group_cols=["algorithm", "epoch"])
 
     # Extract winrates (same as exp1)
     gpt4_cols = "summary/eval/tatsu-lab/alpaca_eval/mt1024/"
