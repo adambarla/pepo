@@ -85,24 +85,6 @@ utils.plot_multi_model_comparison(
 )
 
 # %% [markdown]
-# ### Length-Controlled Win Rate (7/8B Models)
-#
-# Same comparison as above, but using the length-controlled win rate to
-# correct for verbosity bias.
-
-# %%
-best_lc_dfs = [utils.keep_best_pepo_L(d, y_col="winrate_initial_lc") for d in dfs_78b]
-
-utils.plot_multi_model_comparison(
-    best_lc_dfs,
-    exclude_algos=[],
-    x_col="epoch",
-    y_col="winrate_initial_lc",
-    se_col="standard_error_initial_lc",
-    save_path=str(FIGURES_DIR / "win_rate_initial_lc_best_pepo.pdf"),
-)
-
-# %% [markdown]
 # ### DPO vs. PEPO $L$ Variants
 #
 # Compare DPO against the different PEPO $L$ values for each model.
@@ -225,43 +207,3 @@ print("=== MT-Bench ===")
 latex = utils.format_winrates_latex(mtbench_summary, pivot=True, include_se=False)
 print(latex)
 (FIGURES_DIR / "table_mtbench.tex").write_text(latex)
-
-# %% [markdown]
-# # Experiment 2: Rejection Sampling vs Token-Level
-#
-# Comparing performance across different sampling strategies (Greedy vs.
-# Rejection Sampling variants).
-
-# %%
-# Get data for Experiment 2 (epochs 1-5).
-df_exp2 = utils.get_exp2_data(df, model_idx=0, epoch_range=(1, 5))
-
-print("Algorithms found:", sorted(df_exp2["algorithm"].dropna().unique().tolist()))
-
-# Plot individual variants.
-utils.plot_multi_model_comparison(
-    [df_exp2],
-    aggregate_best=False,
-    se_col="standard_error_initial",
-)
-
-# Plot aggregated (Best Rejection vs Best Token-Level).
-utils.plot_multi_model_comparison(
-    [df_exp2],
-    aggregate_best=True,
-    se_col="standard_error_initial",
-)
-
-# %% [markdown]
-# ### Rejection Sampling vs Token-Level Comparison Table
-
-# %%
-# Comparison table for epochs 1-3.
-comp_table = utils.format_exp2_comparison_table(
-    df_exp2,
-    epochs=[1, 2, 3],
-    aggregate_best=True,
-)
-print(comp_table)
-(FIGURES_DIR / "table_exp2_rej_vs_token_epoch.tex").write_text(comp_table)
-print("Saved to figures/table_exp2_rej_vs_token_epoch.tex")
