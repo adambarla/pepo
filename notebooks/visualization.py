@@ -160,6 +160,33 @@ utils.plot_multi_model_comparison(
     save_path=str(FIGURES_DIR / "mtbench_win_rate_L_ablation.pdf"),
 )
 
+# %% [markdown]
+# ### Raw MT-Bench Scores
+#
+# Average judge score (0-10 scale) over epochs. Higher is better.
+
+# %%
+mtbench_best_score_dfs = [
+    utils.keep_best_pepo_L(d, y_col="mtbench_score") for d in mtbench_dfs_78b
+]
+
+utils.plot_multi_model_comparison(
+    mtbench_best_score_dfs,
+    exclude_algos=[],
+    x_col="epoch",
+    y_col="mtbench_score",
+    save_path=str(FIGURES_DIR / "mtbench_score_methods.pdf"),
+)
+
+# %%
+utils.plot_multi_model_comparison(
+    mtbench_dfs,
+    exclude_algos=["sftdpo", "chi2po"],
+    x_col="epoch",
+    y_col="mtbench_score",
+    save_path=str(FIGURES_DIR / "mtbench_score_L_ablation.pdf"),
+)
+
 # %%
 # Combined main figure with all 4 panels.
 utils.plot_main_figure(

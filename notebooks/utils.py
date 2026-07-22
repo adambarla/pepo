@@ -467,12 +467,15 @@ def get_mtbench_data(df, model_idx=0):
     metric_prefix = "summary/eval/mt_bench/mt1024/"
     win_col = f"{metric_prefix}win_rate"
     adjusted_win_col = f"{metric_prefix}win_rate_adjusted"
-
     if win_col in df.columns:
         df["mtbench_winrate"] = df[win_col] * 100.0
 
     if adjusted_win_col in df.columns:
         df["mtbench_winrate_adjusted"] = df[adjusted_win_col] * 100.0
+
+    score_col = f"{metric_prefix}score"
+    if score_col in df.columns:
+        df["mtbench_score"] = df[score_col]
 
     if "summary/eval/epoch" in df.columns:
         df["epoch"] = df["summary/eval/epoch"]
@@ -817,6 +820,8 @@ def plot_metrics_over_epochs(
             return "MT-Bench Win Rate (%)"
         if s == "mtbench_winrate_adjusted":
             return "MT-Bench Tie-Adjusted Win Rate (%)"
+        if s == "mtbench_score":
+            return "MT-Bench Score"
         return s.replace("_", " ").replace("/", " ").title()
 
     if title:
@@ -1002,6 +1007,8 @@ def plot_multi_model_comparison(
             return "MT-Bench Win Rate (%)"
         if s == "mtbench_winrate_adjusted":
             return "MT-Bench Tie-Adjusted Win Rate (%)"
+        if s == "mtbench_score":
+            return "MT-Bench Score"
         return s.replace("_", " ").replace("/", " ").title()
 
     for idx, (ax, df) in enumerate(zip(axes, processed_dfs)):
