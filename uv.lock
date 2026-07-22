@@ -3,7 +3,8 @@ revision = 3
 requires-python = "==3.13.*"
 resolution-markers = [
     "sys_platform == 'linux'",
-    "sys_platform != 'linux'",
+    "sys_platform == 'win32'",
+    "sys_platform != 'linux' and sys_platform != 'win32'",
 ]
 
 [[package]]
@@ -1855,20 +1856,16 @@ name = "pepo"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "accelerate" },
     { name = "alpaca-eval" },
-    { name = "bitsandbytes" },
     { name = "datasets" },
     { name = "hydra-core" },
     { name = "jupyter" },
     { name = "matplotlib" },
     { name = "notebook" },
     { name = "numpy" },
-    { name = "peft" },
     { name = "python-dotenv" },
     { name = "seaborn" },
     { name = "setuptools" },
-    { name = "torch" },
     { name = "transformers" },
     { name = "wandb" },
 ]
@@ -1882,23 +1879,25 @@ dev = [
     { name = "ruff" },
     { name = "ty" },
 ]
+gpu = [
+    { name = "accelerate" },
+    { name = "bitsandbytes" },
+    { name = "peft" },
+    { name = "torch" },
+]
 
 [package.metadata]
 requires-dist = [
-    { name = "accelerate" },
     { name = "alpaca-eval", editable = "alpaca_eval" },
-    { name = "bitsandbytes", specifier = ">=0.48.2" },
     { name = "datasets", specifier = "<4.0.0" },
     { name = "hydra-core" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "notebook", specifier = ">=7.5.1" },
     { name = "numpy" },
-    { name = "peft" },
     { name = "python-dotenv" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "setuptools", specifier = "<81" },
-    { name = "torch", index = "https://download.pytorch.org/whl/cu126" },
     { name = "transformers" },
     { name = "wandb", specifier = ">=0.23.0" },
 ]
@@ -1912,13 +1911,19 @@ dev = [
     { name = "ruff", specifier = ">=0.1.0" },
     { name = "ty", specifier = ">=0.0.11" },
 ]
+gpu = [
+    { name = "accelerate" },
+    { name = "bitsandbytes", specifier = ">=0.48.2" },
+    { name = "peft" },
+    { name = "torch", index = "https://download.pytorch.org/whl/cu126" },
+]
 
 [[package]]
 name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess" },
+    { name = "ptyprocess", marker = "sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
 wheels = [

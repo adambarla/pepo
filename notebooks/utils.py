@@ -299,6 +299,9 @@ def deduplicate_runs(df, group_cols, strategy="last", time_col="created_at"):
     if df.empty or not all(c in df.columns for c in group_cols):
         return df
 
+    # Defragment to avoid PerformanceWarning from groupby on a highly-fragmented df
+    df = df.copy()
+
     if strategy == "last":
         if time_col not in df.columns:
             return df
@@ -645,27 +648,29 @@ def get_exp2_data(df, model_idx=0, epoch_range=None):
     return df
 
 
-def keep_best_pepo_L(df, y_col, hue_col="algorithm", tol=1.0):
+def keep_best_pepo_L(df, y_col, hue_col="algorithm", n_last=3):
     """
     Reduces PEPO L variants (pepo-L2, pepo-L3, ...) to the single best L,
     renamed to "PEPO" for display. All other algorithms are kept unchanged.
 
-    Since get_*_data() returns one model per DataFrame, the best L is
-    selected per model. Variants are ranked by their peak y_col value
-    across the DataFrame (e.g., across epochs); among variants within
-    `tol` of the best (i.e., statistically indistinguishable, given that
-    win-rate standard errors are ~1.5), the smallest L wins.
+    The best L is the one with the highest average *y_col* over its last
+    *n_last* epochs (i.e., the converged performance).
 
     Args:
         df (pd.DataFrame): DataFrame from get_exp1_data()/get_mtbench_data().
         y_col (str): Metric column used to rank the L variants.
         hue_col (str): Column containing algorithm names.
-        tol (float): Tolerance in y_col units for preferring smaller L.
+        n_last (int): Number of final epochs to average over.
 
     Returns:
         pd.DataFrame: Copy of df with only the best PEPO L variant kept.
     """
-    if df.empty or hue_col not in df.columns or y_col not in df.columns:
+    if (
+        df.empty
+        or hue_col not in df.columns
+        or y_col not in df.columns
+        or "epoch" not in df.columns
+    ):
         return df
 
     def parse_l(algo):
@@ -674,21 +679,22 @@ def keep_best_pepo_L(df, y_col, hue_col="algorithm", tol=1.0):
 
     plot_df = df.copy()
     variant_l = plot_df[hue_col].map(parse_l)
-    # pepo-L1 is DPO; only L >= 2 are actual PEPO variants
     is_variant = variant_l.fillna(0) >= 2
     candidates = plot_df.loc[is_variant, hue_col].unique()
 
     if len(candidates) == 0:
         return plot_df
 
-    def max_y(algo):
-        m = plot_df.loc[plot_df[hue_col] == algo, y_col].max()
-        return m if pd.notna(m) else float("-inf")
+    def mean_last_n(algo):
+        adf = plot_df[plot_df[hue_col] == algo].dropna(subset=[y_col, "epoch"])
+        if adf.empty:
+            return float("-inf")
+        last_epoch = adf["epoch"].max()
+        tail = adf[adf["epoch"] > last_epoch - n_last][y_col]
+        return tail.mean() if len(tail) > 0 else float("-inf")
 
-    maxima = {algo: max_y(algo) for algo in candidates}
-    best_y = max(maxima.values())
-    tied = [a for a in candidates if maxima[a] >= best_y - tol]
-    best_algo = min(tied, key=lambda a: parse_l(a))
+    scores = {algo: mean_last_n(algo) for algo in candidates}
+    best_algo = max(scores, key=lambda a: (scores[a], -parse_l(a)))
 
     plot_df = plot_df[~is_variant | (plot_df[hue_col] == best_algo)].copy()
     plot_df.loc[plot_df[hue_col] == best_algo, hue_col] = "PEPO"
@@ -1090,6 +1096,188 @@ def plot_multi_model_comparison(
             # For PDF, dpi only affects rasterized elements (none in line plots)
             # metadata can be added for better document properties
             metadata={"Creator": "PEPO Visualization", "Title": "Model Comparison"},
+        )
+        print(f"Figure saved to {save_path}")
+
+    plt.show()
+
+
+def plot_main_figure(
+    alpaca_best_dfs,
+    alpaca_ablation_dfs,
+    mtbench_best_dfs,
+    mtbench_ablation_dfs,
+    save_path=None,
+):
+    """
+    Creates a 4×3 figure (4 rows × 3 models) combining AlpacaEval and
+    MT-Bench methods & L-ablation panels, with a single shared legend.
+
+    Section labels appear as column-spanning headings on the left of
+    each pair of rows.
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "mathtext.fontset": "cm",
+            "figure.dpi": 300,
+            "axes.labelsize": 10,
+            "axes.titlesize": 11,
+            "xtick.labelsize": 9,
+            "ytick.labelsize": 9,
+            "legend.fontsize": 10,
+        }
+    )
+
+    n_models = 3
+    row_configs = [
+        (alpaca_best_dfs, "winrate_initial", "standard_error_initial", []),
+        (
+            alpaca_ablation_dfs,
+            "winrate_initial",
+            "standard_error_initial",
+            ["sftdpo", "chi2po"],
+        ),
+        (mtbench_best_dfs, "mtbench_winrate_adjusted", None, []),
+        (mtbench_ablation_dfs, "mtbench_winrate_adjusted", None, ["sftdpo", "chi2po"]),
+    ]
+
+    algo_map = {
+        "pepo-L1": "DPO",
+        "dpo": "DPO",
+        "sftdpo": r"SFT+DPO",
+        "chi2po": r"$\chi^2$PO",
+        "pepo-L2": r"PEPO $L=2$",
+        "pepo-L3": r"PEPO $L=3$",
+        "pepo-L4": r"PEPO $L=4$",
+    }
+
+    panels = []
+    all_algos = set()
+    for dfs, y_col, se_col, exclude in row_configs:
+        processed = []
+        for df in dfs:
+            plot_df = df.dropna(subset=["epoch", y_col]).copy()
+            if exclude:
+                plot_df = plot_df[~plot_df["algorithm"].isin(exclude)]
+            plot_df["display_algo"] = plot_df["algorithm"].replace(algo_map)
+            processed.append(plot_df)
+            all_algos.update(plot_df["display_algo"].unique())
+        panels.append(processed)
+
+    custom_palette = {
+        "DPO": "#e74c3c",
+        r"SFT+DPO": "#2ecc71",
+        r"$\chi^2$PO": "#f1c40f",
+        "PEPO": "#2980b9",
+    }
+    pepo_shades = sns.color_palette("Blues", n_colors=5)[2:]
+    for i, algo in enumerate(sorted(a for a in all_algos if "PEPO $L=" in a)):
+        custom_palette[algo] = pepo_shades[i % len(pepo_shades)]
+    remaining = [a for a in sorted(all_algos) if a not in custom_palette]
+    cb_palette = sns.color_palette("colorblind", n_colors=len(remaining))
+    for i, algo in enumerate(remaining):
+        custom_palette[algo] = cb_palette[i]
+    unique_algos = sorted(all_algos)
+
+    def fmt(s):
+        return {
+            "winrate_initial": "Win Rate (%)",
+            "mtbench_winrate_adjusted": "Tie-Adj. Win Rate (%)",
+        }.get(s, s)
+
+    fig, axes = plt.subplots(4, n_models, figsize=(10, 9), sharex="col", sharey="row")
+
+    for row_idx in range(4):
+        processed = panels[row_idx]
+        y_col = row_configs[row_idx][1]
+        se_col = row_configs[row_idx][2]
+
+        for col_idx in range(n_models):
+            ax = axes[row_idx, col_idx]
+            df = processed[col_idx]
+
+            if df.empty:
+                ax.set_visible(False)
+                continue
+
+            plot_data = df.sort_values("epoch")
+            sns.lineplot(
+                data=plot_data,
+                x="epoch",
+                y=y_col,
+                hue="display_algo",
+                palette=custom_palette,
+                linewidth=1.8,
+                ax=ax,
+                legend=False,
+            )
+
+            if se_col and se_col in df.columns:
+                for algo in df["display_algo"].unique():
+                    adf = df[df["display_algo"] == algo].sort_values("epoch")
+                    if adf[se_col].isna().all():
+                        continue
+                    ax.fill_between(
+                        adf["epoch"].values,
+                        adf[y_col].values - adf[se_col].fillna(0).values,
+                        adf[y_col].values + adf[se_col].fillna(0).values,
+                        alpha=0.15,
+                        color=custom_palette.get(algo, "#888"),
+                        linewidth=0,
+                    )
+
+            if "model" in df.columns:
+                ax.set_title(df["model"].iloc[0].split("/")[-1], fontsize=10)
+
+            ax.set_xlabel("Epoch" if row_idx == 3 else "")
+            ax.set_ylabel(fmt(y_col) if col_idx == 0 else "", labelpad=12)
+            ax.grid(True, alpha=0.15, linestyle="--")
+            sns.despine(ax=ax)
+
+    # Shared legend
+    handles = [
+        plt.Line2D([0], [0], color=custom_palette[a], linewidth=2) for a in unique_algos
+    ]
+    fig.legend(
+        handles,
+        unique_algos,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.01),
+        ncol=4,
+        frameon=False,
+        fontsize=10,
+    )
+
+    plt.tight_layout()
+    plt.subplots_adjust(bottom=0.08, left=0.08)
+
+    # Section labels centred on each pair of rows (after layout)
+    x_center = axes[0, 0].get_position().x0 / 2
+    for sec_idx, label in enumerate(["AlpacaEval", "MT-Bench"]):
+        top = axes[sec_idx * 2, 0].get_position().y1
+        bot = axes[sec_idx * 2 + 1, 0].get_position().y0
+        fig.text(
+            x_center,
+            (top + bot) / 2,
+            label,
+            fontsize=13,
+            fontweight="bold",
+            va="center",
+            ha="center",
+            rotation=90,
+        )
+
+    if save_path:
+        plt.savefig(
+            save_path,
+            format="pdf",
+            bbox_inches="tight",
+            pad_inches=0.05,
+            metadata={"Creator": "PEPO Visualization", "Title": "Main Figure"},
         )
         print(f"Figure saved to {save_path}")
 
