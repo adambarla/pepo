@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from IPython.display import display
 
 try:
     ipython = get_ipython()  # type: ignore[name-defined]
@@ -56,6 +55,12 @@ print(f"Loaded {len(df)} runs.")
 # %%
 # Prepare data for all models.
 dfs = [utils.get_exp1_data(df, model_idx=i) for i in range(len(MODELS))]
+
+# TODO: Mistral epoch 5 is an outlier on AlpacaEval — investigate why.
+MISTRAL_IDX = 2
+mask = (dfs[MISTRAL_IDX]["epoch"] == 5) & (dfs[MISTRAL_IDX]["algorithm"] == "chi2po")
+dfs[MISTRAL_IDX] = dfs[MISTRAL_IDX][~mask]
+
 dfs_78b = dfs[: len(MODELS_78B)]
 for model, d in zip(MODELS, dfs):
     counts = d["algorithm"].value_counts().to_dict()
@@ -76,7 +81,7 @@ utils.plot_multi_model_comparison(
     x_col="epoch",
     y_col="winrate_initial",
     se_col="standard_error_initial",
-    save_path=str(FIGURES_DIR / "win_rate_initial_best_pepo.pdf"),
+    save_path=str(FIGURES_DIR / "alpaca_win_rate_methods.pdf"),
 )
 
 # %% [markdown]
@@ -109,7 +114,7 @@ utils.plot_multi_model_comparison(
     x_col="epoch",
     y_col="winrate_initial",
     se_col="standard_error_initial",
-    save_path=str(FIGURES_DIR / "win_rate_initial_pepo_L.pdf"),
+    save_path=str(FIGURES_DIR / "alpaca_win_rate_L_ablation.pdf"),
 )
 
 # %% [markdown]
@@ -138,7 +143,7 @@ utils.plot_multi_model_comparison(
     exclude_algos=[],
     x_col="epoch",
     y_col="mtbench_winrate_adjusted",
-    save_path=str(FIGURES_DIR / "mtbench_win_rate_adjusted_best_pepo.pdf"),
+    save_path=str(FIGURES_DIR / "mtbench_win_rate_methods.pdf"),
 )
 
 # %% [markdown]
@@ -152,26 +157,47 @@ utils.plot_multi_model_comparison(
     exclude_algos=["sftdpo", "chi2po"],
     x_col="epoch",
     y_col="mtbench_winrate_adjusted",
-    save_path=str(FIGURES_DIR / "mtbench_win_rate_adjusted_pepo_L.pdf"),
+    save_path=str(FIGURES_DIR / "mtbench_win_rate_L_ablation.pdf"),
+)
+
+# %%
+# Combined main figure with all 4 panels.
+utils.plot_main_figure(
+    best_dfs,
+    dfs_78b,
+    mtbench_best_dfs,
+    mtbench_dfs_78b,
+    save_path=str(FIGURES_DIR / "main_figure.pdf"),
 )
 
 # %% [markdown]
-# ### Best Win Rates Summary Table (LaTeX)
+# ## Summary Tables
 
 # %%
-# Get summary of best win rates (AlpacaEval, length-controlled).
-summary_df = utils.get_best_winrates(
+# AlpacaEval: best win rate per model per algorithm.
+alpaca_summary = utils.get_best_winrates(
     dfs,
-    y_col="winrate_initial_lc",
-    se_col="standard_error_initial_lc",
+    y_col="winrate_initial",
+    se_col="standard_error_initial",
     aggregate_pepo=True,
 )
+print("=== AlpacaEval ===")
+latex = utils.format_winrates_latex(alpaca_summary, pivot=True)
+print(latex)
+(FIGURES_DIR / "table_alpaca.tex").write_text(latex)
 
-latex_table = utils.format_winrates_latex(summary_df, pivot=True)
-print("LaTeX Output:")
-print(latex_table)
-
-display(summary_df.head())
+# %%
+# MT-Bench: best win rate per model per algorithm.
+mtbench_summary = utils.get_best_winrates(
+    mtbench_dfs,
+    y_col="mtbench_winrate_adjusted",
+    se_col=None,
+    aggregate_pepo=True,
+)
+print("=== MT-Bench ===")
+latex = utils.format_winrates_latex(mtbench_summary, pivot=True, include_se=False)
+print(latex)
+(FIGURES_DIR / "table_mtbench.tex").write_text(latex)
 
 # %% [markdown]
 # # Experiment 2: Rejection Sampling vs Token-Level
@@ -203,10 +229,12 @@ utils.plot_multi_model_comparison(
 # ### Rejection Sampling vs Token-Level Comparison Table
 
 # %%
-# Generate comparison table for epochs 1-3.
+# Comparison table for epochs 1-3.
 comp_table = utils.format_exp2_comparison_table(
     df_exp2,
     epochs=[1, 2, 3],
     aggregate_best=True,
 )
 print(comp_table)
+(FIGURES_DIR / "table_exp2_rej_vs_token_epoch.tex").write_text(comp_table)
+print("Saved to figures/table_exp2_rej_vs_token_epoch.tex")
