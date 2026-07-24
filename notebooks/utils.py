@@ -91,7 +91,7 @@ def get_runs_df(
                 )
 
                 try:
-                    # Prepare filter for new runs
+                    # Fetch runs created after the last cached run
                     time_filter = {"created_at": {"$gt": last_time}}
                     if filters:
                         new_filters = {"$and": [filters, time_filter]}
@@ -104,7 +104,6 @@ def get_runs_df(
                     if not new_df.empty:
                         print(f"Found {len(new_df)} new runs. Merging...")
                         df = pd.concat([df, new_df], ignore_index=True)
-                        # Deduplicate just in case
                         df = df.drop_duplicates(subset=["run_id"], keep="last")
                     else:
                         print("No new runs found.")
@@ -651,7 +650,30 @@ def get_exp2_data(df, model_idx=0, epoch_range=None):
     return df
 
 
-def keep_best_pepo_L(df, y_col, hue_col="algorithm", n_last=3):
+def find_best_global_L(df, models=None):
+    """Find the single L (2, 3, or 4) with the highest avg final-epoch win rate
+    across models and benchmarks."""
+    if models is None:
+        models = [m for m in MODELS if "Yi" not in m]
+    scores = {L: [] for L in [2, 3, 4]}
+    for get_data, y_col in [
+        (get_exp1_data, "winrate_initial"),
+        (get_mtbench_data, "mtbench_winrate_adjusted"),
+    ]:
+        for midx, model_id in enumerate(MODELS):
+            if model_id not in models:
+                continue
+            d = get_data(df, midx)
+            for L in [2, 3, 4]:
+                adf = d[(d["algorithm"] == f"pepo-L{L}") & d[y_col].notna()]
+                if not adf.empty:
+                    last = adf.loc[adf["epoch"].idxmax()]
+                    scores[L].append(last[y_col])
+    avgs = {L: (sum(v) / len(v) if v else float("-inf")) for L, v in scores.items()}
+    return max(avgs, key=lambda L: (avgs[L], -L))
+
+
+def keep_best_pepo_L(df, y_col, hue_col="algorithm", n_last=3, fixed_L=None):
     """
     Reduces PEPO L variants (pepo-L2, pepo-L3, ...) to the single best L,
     renamed to "PEPO" for display. All other algorithms are kept unchanged.
@@ -683,6 +705,33 @@ def keep_best_pepo_L(df, y_col, hue_col="algorithm", n_last=3):
     plot_df = df.copy()
     variant_l = plot_df[hue_col].map(parse_l)
     is_variant = variant_l.fillna(0) >= 2
+
+    if fixed_L is not None:
+        keep_algo = f"pepo-L{fixed_L}"
+        candidates = plot_df.loc[is_variant, hue_col].unique().tolist()
+
+        def has_data(algo):
+            adf = plot_df[plot_df[hue_col] == algo].dropna(subset=[y_col])
+            return adf["epoch"].max() > 0 if not adf.empty else False
+
+        if keep_algo in candidates and has_data(keep_algo):
+            chosen = keep_algo
+        elif candidates:
+            # Fallback to the variant with the highest final-epoch value
+            def final_val(algo):
+                adf = plot_df[plot_df[hue_col] == algo].dropna(subset=[y_col])
+                if adf.empty:
+                    return float("-inf")
+                return adf.loc[adf["epoch"].idxmax(), y_col]
+
+            chosen = max(candidates, key=lambda a: (final_val(a), -parse_l(a)))
+        else:
+            return plot_df
+        plot_df = plot_df[~is_variant | (plot_df[hue_col] == chosen)].copy()
+        L_used = parse_l(chosen)
+        plot_df.loc[plot_df[hue_col] == chosen, hue_col] = f"PEPO $L={L_used}$"
+        return plot_df
+
     candidates = plot_df.loc[is_variant, hue_col].unique()
 
     if len(candidates) == 0:
@@ -1190,12 +1239,6 @@ def plot_main_figure(
         custom_palette[algo] = cb_palette[i]
     unique_algos = sorted(all_algos)
 
-    def fmt(s):
-        return {
-            "winrate_initial": "Win Rate (%)",
-            "mtbench_winrate_adjusted": "Tie-Adj. Win Rate (%)",
-        }.get(s, s)
-
     fig, axes = plt.subplots(4, n_models, figsize=(10, 9), sharex="col", sharey="row")
 
     for row_idx in range(4):
@@ -1241,34 +1284,20 @@ def plot_main_figure(
                 ax.set_title(df["model"].iloc[0].split("/")[-1], fontsize=10)
 
             ax.set_xlabel("Epoch" if row_idx == 3 else "")
-            ax.set_ylabel(fmt(y_col) if col_idx == 0 else "", labelpad=12)
+            ax.set_ylabel("Win Rate (%)" if col_idx == 0 else "", labelpad=8)
             ax.grid(True, alpha=0.15, linestyle="--")
             sns.despine(ax=ax)
 
-    # Shared legend
-    handles = [
-        plt.Line2D([0], [0], color=custom_palette[a], linewidth=2) for a in unique_algos
-    ]
-    fig.legend(
-        handles,
-        unique_algos,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.01),
-        ncol=4,
-        frameon=False,
-        fontsize=10,
-    )
+    plt.tight_layout(pad=0.5)
+    plt.subplots_adjust(bottom=0.09, left=0.07)
 
-    plt.tight_layout()
-    plt.subplots_adjust(bottom=0.08, left=0.08)
-
-    # Section labels centred on each pair of rows (after layout)
-    x_center = axes[0, 0].get_position().x0 / 2
+    # Section labels on the left of each row-pair
+    x_label = -0.04
     for sec_idx, label in enumerate(["AlpacaEval", "MT-Bench"]):
         top = axes[sec_idx * 2, 0].get_position().y1
         bot = axes[sec_idx * 2 + 1, 0].get_position().y0
         fig.text(
-            x_center,
+            x_label,
             (top + bot) / 2,
             label,
             fontsize=13,
@@ -1276,7 +1305,25 @@ def plot_main_figure(
             va="center",
             ha="center",
             rotation=90,
+            transform=fig.transFigure,
         )
+
+    # Shared legend: all items in one row
+    order = sorted(a for a in unique_algos if "PEPO $L=" in a) + [
+        a for a in ["DPO", r"$\chi^2$PO", r"SFT+DPO"] if a in unique_algos
+    ]
+    handles = [
+        plt.Line2D([0], [0], color=custom_palette[a], linewidth=2) for a in order
+    ]
+    fig.legend(
+        handles,
+        order,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.01),
+        ncol=len(order),
+        frameon=False,
+        fontsize=10,
+    )
 
     if save_path:
         plt.savefig(
@@ -1324,6 +1371,9 @@ def get_best_winrates(
             "pepo-L2": "PEPO",
             "pepo-L3": "PEPO",
             "pepo-L4": "PEPO",
+            r"PEPO $L=2$": "PEPO",
+            r"PEPO $L=3$": "PEPO",
+            r"PEPO $L=4$": "PEPO",
         }
     else:
         algo_map = {
@@ -1607,3 +1657,96 @@ def format_exp2_comparison_table(
     lines.append(r"\end{table}")
 
     return "\n".join(lines)
+
+
+def get_final_epoch_winrates(
+    dataframes, y_col="winrate_initial", se_col=None, aggregate_pepo=True, fixed_L=None
+):
+    results = []
+
+    for df in dataframes:
+        if df.empty:
+            continue
+        model_name = df["model"].iloc[0].split("/")[-1]
+        plot_df = df.dropna(subset=[y_col]).copy()
+
+        def parse_l(algo):
+            match = re.fullmatch(r"pepo-L(\d+)", str(algo))
+            return int(match.group(1)) if match else None
+
+        # Per-source algorithm final epoch
+        final_by_source = {}
+        for algo in plot_df["algorithm"].unique():
+            adf = plot_df[plot_df["algorithm"] == algo]
+            last = adf.loc[adf["epoch"].idxmax()]
+            final_by_source[algo] = last
+
+        # Display-name mapping
+        if aggregate_pepo:
+            algo_map = {
+                "pepo-L1": "DPO",
+                "dpo": "DPO",
+                "sftdpo": r"SFT+DPO",
+                "chi2po": r"$\chi^2$PO",
+                "pepo-L2": "PEPO",
+                "pepo-L3": "PEPO",
+                "pepo-L4": "PEPO",
+            }
+        else:
+            algo_map = {
+                "pepo-L1": "DPO",
+                "dpo": "DPO",
+                "sftdpo": r"SFT+DPO",
+                "chi2po": r"$\chi^2$PO",
+                "pepo-L2": r"PEPO $L=2$",
+                "pepo-L3": r"PEPO $L=3$",
+                "pepo-L4": r"PEPO $L=4$",
+            }
+
+        # When fixed_L is set, only that PEPO L variant maps to "PEPO"
+        if fixed_L is not None:
+            used_L = fixed_L
+            # Fallback: if fixed_L has no data for this model, pick best available
+            key = f"pepo-L{fixed_L}"
+            if key not in final_by_source or final_by_source[key].get("epoch", 0) == 0:
+                avail = [
+                    L
+                    for L in [2, 3, 4]
+                    if f"pepo-L{L}" in final_by_source
+                    and final_by_source[f"pepo-L{L}"].get("epoch", 0) > 0
+                ]
+                if avail:
+
+                    def final_val(L):
+                        r = final_by_source[f"pepo-L{L}"]
+                        return r[y_col] if y_col in r.index else float("-inf")
+
+                    used_L = max(avail, key=final_val)
+            for L in [2, 3, 4]:
+                key = f"pepo-L{L}"
+                if L == used_L:
+                    algo_map[key] = "PEPO"
+                elif key in algo_map:
+                    del algo_map[key]
+
+        # Group sources by display name, pick the source with highest final-epoch value
+        display_groups = {}
+        for source, row in final_by_source.items():
+            if source not in algo_map:
+                continue
+            display = algo_map[source]
+            display_groups.setdefault(display, []).append(row)
+
+        for display, rows in display_groups.items():
+            best = max(rows, key=lambda r: r[y_col])
+            entry = {
+                "model": model_name,
+                "algorithm": display,
+                "best_winrate": best[y_col],
+                "best_epoch": best.get("epoch", None),
+            }
+            if se_col and se_col in best.index:
+                entry["standard_error"] = best.get(se_col, None)
+            results.append(entry)
+
+    return pd.DataFrame(results)
