@@ -23,3 +23,9 @@ wandb/
 .cache/
 
 gpu-queue/
+
+# Generated notebook figures (intermediate runs)
+notebooks/figures/
+
+# Debug/inspection scripts
+notebooks/dump_*.py
