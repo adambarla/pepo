@@ -1,41 +1,25 @@
-#
-# This notebook provides analysis and visualization for PEPO (Preference
-# Ensemble Policy Optimization) experiments.
-
-# %% [markdown]
-# ## Setup
-#
-# Import necessary libraries and the `utils` module.
-
 # %%
 import sys
 from pathlib import Path
 
+import matplotlib
+import pandas as pd
+import utils
 from dotenv import load_dotenv
 
 try:
-    ipython = get_ipython()  # type: ignore[name-defined]
+    ipython = get_ipython()
 except NameError:
     ipython = None
 
-if ipython is not None:
-    ipython.run_line_magic("load_ext", "autoreload")
-    ipython.run_line_magic("autoreload", "2")
-else:
-    import matplotlib
-
-    matplotlib.use("Agg")
-
 REPO_ROOT = Path.cwd()
 load_dotenv(REPO_ROOT / ".env")
-
-# Append cwd/notebooks to sys.path.
 sys.path.append(str(REPO_ROOT / "notebooks"))
 
-import utils  # noqa: E402
+if ipython is None:
+    matplotlib.use("Agg")
 
 MODELS = utils.MODELS
-# 7/8B models only (exclude Yi-34B-Chat).
 MODELS_78B = MODELS[:3]
 try:
     HERE = Path(__file__).resolve()
@@ -44,226 +28,225 @@ except NameError:
     FIGURES_DIR = Path.cwd().parent / "figures"
 FIGURES_DIR.mkdir(exist_ok=True)
 
-# %% [markdown]
-# ## Data Loading
-#
-# Fetch runs from WandB or load from local cache.
-
-# %%
-# Set force_refresh=True to fetch new runs from WandB.
+# Data Loading
 df = utils.get_runs_df(force_refresh=False)
 print(f"Loaded {len(df)} runs.")
-
-# Compute global best L once, use for all figures and tables.
 BEST_L = utils.find_best_global_L(df)
 print(f"Global best PEPO L = {BEST_L}")
 
-# %% [markdown]
-# # Experiment 1: Greedy Sampling (AlpacaEval)
-#
-# Comparing various algorithms (DPO, SFT+DPO, $\chi^2$PO, PEPO) using
-# token-level greedy sampling.
-
 # %%
-# Prepare data for all models.
-dfs = [utils.get_exp1_data(df, model_idx=i) for i in range(len(MODELS))]
+# Exp1: AlpacaEval
+dfs = [utils.get_exp1_data(df, i) for i in range(len(MODELS))]
+mask = (dfs[2]["epoch"] == 5) & (dfs[2]["algorithm"] == "chi2po")
+dfs[2] = dfs[2][~mask]
+dfs_78b = dfs[:3]
+for m, d in zip(MODELS, dfs):
+    sn = m.split("/")[-1]
+    print(f"{sn}: {len(d)} runs, {d['algorithm'].value_counts().to_dict()}")
 
-# TODO: Mistral epoch 5 is an outlier on AlpacaEval — investigate why.
-MISTRAL_IDX = 2
-mask = (dfs[MISTRAL_IDX]["epoch"] == 5) & (dfs[MISTRAL_IDX]["algorithm"] == "chi2po")
-dfs[MISTRAL_IDX] = dfs[MISTRAL_IDX][~mask]
 
-dfs_78b = dfs[: len(MODELS_78B)]
-for model, d in zip(MODELS, dfs):
-    counts = d["algorithm"].value_counts().to_dict()
-    print(f"{model.split('/')[-1]}: {len(d)} runs, {counts}")
+def kbp(d, y, f):
+    return utils.keep_best_pepo_L(d, y_col=y, fixed_L=f)
 
-# %% [markdown]
-# ### Best PEPO $L$ vs. Other Algorithms (7/8B Models)
-#
-# For each model, keep only the best-performing PEPO $L$ variant and compare
-# it against DPO, SFT+DPO and $\chi^2$PO.
 
-# %%
-best_dfs = [
-    utils.keep_best_pepo_L(d, y_col="winrate_initial", fixed_L=BEST_L) for d in dfs
-]
+best_dfs = [kbp(d, "winrate_initial", BEST_L) for d in dfs]
 
+# Best PEPO L vs other algorithms (7/8B)
 utils.plot_multi_model_comparison(
     best_dfs,
-    exclude_algos=[],
     x_col="epoch",
     y_col="winrate_initial",
     se_col="standard_error_initial",
+    exclude_algos=[],
     save_path=str(FIGURES_DIR / "alpaca_win_rate_methods.pdf"),
 )
 
-# %% [markdown]
-# ### DPO vs. PEPO $L$ Variants
-#
-# Compare DPO against the different PEPO $L$ values for each model.
-
-# %%
+# DPO vs PEPO L Variants
 utils.plot_multi_model_comparison(
     dfs,
-    exclude_algos=["sftdpo", "chi2po"],
     x_col="epoch",
     y_col="winrate_initial",
     se_col="standard_error_initial",
+    exclude_algos=["sftdpo", "chi2po"],
     save_path=str(FIGURES_DIR / "alpaca_win_rate_L_ablation.pdf"),
 )
 
-# %% [markdown]
-# # MT-Bench Win Rate
-#
-# Plot MT-Bench win rate against each model's initial checkpoint.
-# Use the tie-adjusted win rate so the epoch-0 initial self-comparison is 50%.
-
 # %%
-mtbench_dfs = [utils.get_mtbench_data(df, model_idx=i) for i in range(len(MODELS))]
-mtbench_dfs_78b = mtbench_dfs[: len(MODELS_78B)]
+# MT-Bench
+mt_df = [utils.get_mtbench_data(df, i) for i in range(len(MODELS))]
+mt_df_78b = mt_df[:3]
 
-# %% [markdown]
-# ### Best PEPO $L$ vs. Other Algorithms (7/8B Models)
-#
-# For each model, keep only the best-performing PEPO $L$ variant and compare
-# it against DPO, SFT+DPO and $\chi^2$PO.
-
-# %%
-mtbench_best_dfs = [
-    utils.keep_best_pepo_L(d, y_col="mtbench_winrate_adjusted", fixed_L=BEST_L)
-    for d in mtbench_dfs_78b
-]
+mt_best = [kbp(d, "mtbench_winrate_adjusted", BEST_L) for d in mt_df_78b]
 
 utils.plot_multi_model_comparison(
-    mtbench_best_dfs,
-    exclude_algos=[],
+    mt_best,
     x_col="epoch",
     y_col="mtbench_winrate_adjusted",
+    exclude_algos=[],
     save_path=str(FIGURES_DIR / "mtbench_win_rate_methods.pdf"),
 )
-
-# %% [markdown]
-# ### DPO vs. PEPO $L$ Variants
-#
-# Compare DPO against the different PEPO $L$ values for each model.
-
-# %%
 utils.plot_multi_model_comparison(
-    mtbench_dfs,
-    exclude_algos=["sftdpo", "chi2po"],
+    mt_df,
     x_col="epoch",
     y_col="mtbench_winrate_adjusted",
+    exclude_algos=["sftdpo", "chi2po"],
     save_path=str(FIGURES_DIR / "mtbench_win_rate_L_ablation.pdf"),
 )
 
-# %% [markdown]
-# ### Raw MT-Bench Scores
-#
-# Average judge score (0-10 scale) over epochs. Higher is better.
 
-# %%
-mtbench_best_score_dfs = [
-    utils.keep_best_pepo_L(d, y_col="mtbench_score", fixed_L=BEST_L)
-    for d in mtbench_dfs_78b
-]
-mtbench_best_score_dfs = [d for d in mtbench_best_score_dfs if not d.empty]
-
-if mtbench_best_score_dfs:
-    try:
-        utils.plot_multi_model_comparison(
-            mtbench_best_score_dfs,
-            exclude_algos=[],
-            x_col="epoch",
-            y_col="mtbench_score",
-            save_path=str(FIGURES_DIR / "mtbench_score_methods.pdf"),
-        )
-    except (IndexError, ValueError):
-        print("Skipping mtbench_score_methods plot (no data).")
-
-# %%
-try:
-    utils.plot_multi_model_comparison(
-        mtbench_dfs,
-        exclude_algos=["sftdpo", "chi2po"],
-        x_col="epoch",
-        y_col="mtbench_score",
-        save_path=str(FIGURES_DIR / "mtbench_score_L_ablation.pdf"),
-    )
-except (IndexError, ValueError):
-    print("Skipping mtbench_score_L_ablation plot (no data).")
-
-# %%
-# Combined main figure with all 4 panels.
 try:
     utils.plot_main_figure(
-        best_dfs,
+        best_dfs[:3],
         dfs_78b,
-        mtbench_best_dfs,
-        mtbench_dfs_78b,
+        mt_best,
+        mt_df_78b,
         save_path=str(FIGURES_DIR / "main_figure.pdf"),
     )
 except (IndexError, ValueError):
     print("Skipping main_figure plot (no data).")
 
-# %% [markdown]
-# ## Summary Tables
 
 # %%
-# AlpacaEval: best win rate per model per algorithm — fixed PEPO L=3 (no oracle over L).
-dfs_fixedL = [
-    utils.keep_best_pepo_L(d, y_col="winrate_initial", fixed_L=BEST_L) for d in dfs
+# Summary tables
+def _table(name, data, y_col, se_col, write_best=True, write_final=True):
+    fl = [kbp(d, y_col, BEST_L) for d in data]
+    inc = se_col is not None
+    if write_best:
+        s = utils.get_best_winrates(fl, y_col=y_col, se_col=se_col, aggregate_pepo=True)
+        latex = utils.format_winrates_latex(s, pivot=True, include_se=inc)
+        print(f"=== {name.title()} (L=3) ===")
+        print(latex)
+        (FIGURES_DIR / f"table_{name}_bestepoch.tex").write_text(latex)
+    if write_final:
+        f = utils.get_final_epoch_winrates(
+            data,
+            y_col=y_col,
+            se_col=se_col,
+            fixed_L=BEST_L,
+        )
+        latex = utils.format_winrates_latex(f, pivot=True, include_se=inc)
+        print(f"=== {name.title()} (Final Epoch) ===")
+        print(latex)
+        (FIGURES_DIR / f"table_{name}_final_epoch.tex").write_text(latex)
+
+
+_table("alpaca", dfs, "winrate_initial", "standard_error_initial")
+_table("mtbench", mt_df, "mtbench_winrate_adjusted", None)
+
+
+# %%
+# Margin analysis
+def _sub(mid):
+    mask = (
+        (df["config/model/model_id"] == mid)
+        | (df["config/backbone/model_id"] == mid)
+        | (df["config/model/backbone/model_id"] == mid)
+    )
+    sub = df[mask]
+    c = "config/model/generator/greedy_sampling"
+    if c in sub.columns:
+        sub = sub[sub[c].map(lambda v: v is True or str(v).lower() == "true")]
+    return sub[
+        sub["name"].str.contains("eval", na=False)
+        & ~sub["name"].str.contains("mtbench", na=False)
+    ]
+
+
+rows = []
+for i in range(3):
+    mid = utils.MODELS[i]
+    sub = _sub(mid)
+    short = mid.rsplit("/", 1)[-1]
+    wr_col = f"summary/eval/tatsu-lab/alpaca_eval/mt1024/{short}-a0.0-b0.1-L1/win_rate"
+    se_col = (
+        f"summary/eval/tatsu-lab/alpaca_eval/mt1024/{short}-a0.0-b0.1-L1/standard_error"
+    )
+    for algo_label, L, a in [("DPO", 1, 0.0), ("Margin", 1, 0.1), ("PEPO", 3, 0.1)]:
+        runs = sub[
+            (sub["config/L"] == L)
+            & (sub["config/model/alpha"] == a)
+            & sub[wr_col].notna()
+        ]
+        if runs.empty:
+            continue
+        best = runs.loc[runs[wr_col].idxmax()]
+        se_val = best.get(se_col)
+        rows.append(
+            {
+                "model": short,
+                "algorithm": algo_label,
+                "best_winrate": best[wr_col],
+                "best_epoch": best.get("summary/eval/epoch"),
+                "standard_error": se_val if pd.notna(se_val) else None,
+            }
+        )
+
+margin_summary = pd.DataFrame(rows)
+lt = utils.format_winrates_latex(
+    margin_summary,
+    pivot=True,
+    include_se=True,
+    short_names=True,
+)
+print("=== Margin Experiment: Best Win Rate ===")
+print(lt)
+(FIGURES_DIR / "table_margin_bestepoch.tex").write_text(lt)
+
+# %%
+# Method x epochs (Tulu-3-8B rebuttal)
+mid = utils.MODELS[0]
+sub = _sub(mid)
+short = mid.rsplit("/", 1)[-1]
+wr_col = f"summary/eval/tatsu-lab/alpaca_eval/mt1024/{short}-a0.0-b0.1-L1/win_rate"
+epochs = list(range(0, 17, 2))
+methods = [
+    ("DPO (L=1)", 1, 0.0),
+    ("Margin (L=1)", 1, 0.1),
+    ("PEPO L=2", 2, 0.1),
+    ("PEPO L=3", 3, 0.1),
+    ("PEPO L=4", 4, 0.1),
 ]
-alpaca_summary = utils.get_best_winrates(
-    dfs_fixedL,
-    y_col="winrate_initial",
-    se_col="standard_error_initial",
-    aggregate_pepo=True,
-)
-print("=== AlpacaEval (L=3) ===")
-latex = utils.format_winrates_latex(alpaca_summary, pivot=True)
-print(latex)
-(FIGURES_DIR / "table_alpaca_bestepoch.tex").write_text(latex)
+print(f"\n% {short}")
+print("\\begin{tabular}{l" + "c" * len(epochs) + "}")
+print("\\toprule")
+print("Method & " + " & ".join(f"E{ep}" for ep in epochs) + " \\\\")
+print("\\midrule")
+for label, L, a in methods:
+    vals = []
+    for ep in epochs:
+        r = sub[
+            (sub["config/L"] == L)
+            & (sub["config/model/alpha"] == a)
+            & (sub["summary/eval/epoch"] == float(ep))
+        ]
+        vals.append(
+            f"{float(r.iloc[0][wr_col]):.1f}"
+            if not r.empty and pd.notna(r.iloc[0].get(wr_col))
+            else "---"
+        )
+    print(label + " & " + " & ".join(vals) + " \\\\")
+print("\\bottomrule")
+print("\\end{tabular}")
 
 # %%
-# MT-Bench: best win rate per model per algorithm — fixed PEPO L=3.
-mtbench_dfs_fixedL = [
-    utils.keep_best_pepo_L(d, y_col="mtbench_winrate_adjusted", fixed_L=BEST_L)
-    for d in mtbench_dfs
-]
-mtbench_summary = utils.get_best_winrates(
-    mtbench_dfs_fixedL,
-    y_col="mtbench_winrate_adjusted",
-    se_col=None,
-    aggregate_pepo=True,
-)
-print("=== MT-Bench (L=3) ===")
-latex = utils.format_winrates_latex(mtbench_summary, pivot=True, include_se=False)
-print(latex)
-# save
-(FIGURES_DIR / "table_mtbench_bestepoch.tex").write_text(latex)
-
-# %% [markdown]
-# ## Final-Epoch (Non-Oracle) Tables
-#
-# Win rates at the last epoch available per algorithm, rather than the best epoch.
-
-# %%
-# AlpacaEval: final epoch win rate per model per algorithm.
-alpaca_final = utils.get_final_epoch_winrates(
-    dfs, y_col="winrate_initial", se_col="standard_error_initial", fixed_L=BEST_L
-)
-print("=== AlpacaEval (Final Epoch) ===")
-latex = utils.format_winrates_latex(alpaca_final, pivot=True)
-print(latex)
-(FIGURES_DIR / "table_alpaca_final_epoch.tex").write_text(latex)
-
-# %%
-# MT-Bench: final epoch win rate per model per algorithm.
-mtbench_final = utils.get_final_epoch_winrates(
-    mtbench_dfs, y_col="mtbench_winrate_adjusted", se_col=None, fixed_L=BEST_L
-)
-print("=== MT-Bench (Final Epoch) ===")
-latex = utils.format_winrates_latex(mtbench_final, pivot=True, include_se=False)
-print(latex)
-(FIGURES_DIR / "table_mtbench_final_epoch.tex").write_text(latex)
+# Disjoint vs bootstrap (Tulu-3-8B)
+mid = utils.MODELS[0]
+sub = _sub(mid)
+short = mid.rsplit("/", 1)[-1]
+sub = sub[(sub["config/L"] == 4) & (sub["config/model/alpha"] == 0.1)]
+wr_col = f"summary/eval/tatsu-lab/alpaca_eval/mt1024/{short}-a0.0-b0.1-L1/win_rate"
+epochs = list(range(0, 17, 2))
+print(f"\n% {short}")
+print("\\begin{tabular}{l" + "c" * len(epochs) + "}")
+print("\\toprule")
+print("Method & " + " & ".join(f"E{ep}" for ep in epochs) + " \\\\")
+print("\\midrule")
+is_boot = sub["name"].str.contains("bootstrap", na=False)
+for label, mask in [("PEPO L=4 disjoint", ~is_boot), ("PEPO L=4 bootstrap", is_boot)]:
+    vals = []
+    for ep in epochs:
+        r = sub[mask & (sub["summary/eval/epoch"] == float(ep)) & sub[wr_col].notna()]
+        vals.append(f"{float(r.iloc[0][wr_col]):.1f}" if not r.empty else "---")
+    print(label + " & " + " & ".join(vals) + " \\\\")
+print("\\bottomrule")
+print("\\end{tabular}")
