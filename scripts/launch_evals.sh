@@ -45,10 +45,15 @@ if [[ $AGAINST == "gpt" ]]; then
     # for L in 4; do
         for e in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
         # for e in 0 1 2 3; do
-            # if L is 1 a should be 0.0
-            A=0.1
-            if [[ $L -eq 1 ]]; then
-                A=0.0
+            A=""
+            for arg in "${FILTERED_ARGS[@]}"; do
+                if [[ "$arg" == a=* ]]; then
+                    A="${arg#a=}"
+                    break
+                fi
+            done
+            if [[ -z "$A" ]]; then
+                A=0.1
             fi
             sbatch --job-name="ev_${MODEL}_l${L}_e${e}" scripts/slurm/eval.slurm model=$MODEL e=${e} L=${L} a=${A} "${FILTERED_ARGS[@]}"
         done
@@ -61,9 +66,15 @@ if [[ $AGAINST == "init" ]]; then
     for L in 1 4; do
         # for e in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
         for e in 0 1 2 3 4; do
-            A=0.1
-            if [[ $L -eq 1 ]]; then
-                A=0.0
+            A=""
+            for arg in "${FILTERED_ARGS[@]}"; do
+                if [[ "$arg" == a=* ]]; then
+                    A="${arg#a=}"
+                    break
+                fi
+            done
+            if [[ -z "$A" ]]; then
+                A=0.1
             fi
             sbatch --job-name="ev_${MODEL}_l${L}_e${e}_init" scripts/slurm/eval.slurm model=$MODEL e=${e} L=${L} a=${A} model@ref_model=$MODEL ref_e=0 ref_L=1 ref_a=0.0 "${FILTERED_ARGS[@]}"
         done

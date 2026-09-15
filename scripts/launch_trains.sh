@@ -49,10 +49,14 @@ JOB_NAME="tr_${MODEL}_${EPOCHS}"
 for L in 1 2 3 4; do
     # if L is 1 a should be 0.0
     # if model is deppo, adjust A and pass it , else don't
-    if [[ $MODEL == "deppo" ]]; then
-        if [[ $L -eq 1 ]]; then
-            A=0.0
+    A=""
+    for arg in "$@"; do
+        if [[ "$arg" == a=* ]]; then
+            A="${arg#a=}"
+            break
         fi
+    done
+    if [[ -n "$A" ]]; then
         sbatch --job-name="${JOB_NAME}_${L}" scripts/slurm/train.slurm model=$MODEL e=$EPOCHS L=$L a=$A backbone=$BACKBONE $@
     else
         sbatch --job-name="${JOB_NAME}_${L}" scripts/slurm/train.slurm model=$MODEL e=$EPOCHS L=$L backbone=$BACKBONE $@
