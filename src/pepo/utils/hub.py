@@ -1,6 +1,8 @@
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Optional, cast
+import time
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Optional, TypeVar, cast
 
 import dotenv
 from huggingface_hub import HfApi, login
@@ -16,6 +18,40 @@ logger = logging.getLogger(__name__)
 
 # Singleton instance
 _instance: Optional["HubManager"] = None
+
+T = TypeVar("T")
+
+# Transient hub/network failures (DNS blips, rate limits, etc.)
+_DEFAULT_MAX_ATTEMPTS = 5
+_DEFAULT_BASE_DELAY_S = 10.0
+_DEFAULT_MAX_DELAY_S = 300.0
+
+
+def _retry(
+    fn: Callable[[], T],
+    *,
+    desc: str,
+    max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+    base_delay: float = _DEFAULT_BASE_DELAY_S,
+    max_delay: float = _DEFAULT_MAX_DELAY_S,
+) -> T:
+    """Run ``fn`` with exponential backoff on failure."""
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            if attempt == max_attempts:
+                break
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            logger.warning(
+                f"{desc} failed (attempt {attempt}/{max_attempts}): {e}. "
+                f"Retrying in {delay:.0f}s..."
+            )
+            time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
 
 
 def init_hub_manager(
@@ -247,20 +283,31 @@ class HubManager:
 
         logger.info(f"Pushing model to {repo_id}...")
 
-        # Push model
-        cast(Any, model).push_to_hub(
-            repo_id=repo_id,
-            commit_message=commit_message,
-            private=private,
-        )
-        tokenizer.push_to_hub(
-            repo_id=repo_id,
-            commit_message=commit_message,
-            private=private,
-        )
+        def _do_push() -> None:
+            cast(Any, model).push_to_hub(
+                repo_id=repo_id,
+                commit_message=commit_message,
+                private=private,
+            )
+            tokenizer.push_to_hub(
+                repo_id=repo_id,
+                commit_message=commit_message,
+                private=private,
+            )
+
+        try:
+            _retry(_do_push, desc=f"Push model {repo_id}")
+        except Exception as e:
+            # Non-fatal: keep training so later epochs can still be saved.
+            logger.error(
+                f"Failed to push {repo_id} after {_DEFAULT_MAX_ATTEMPTS} attempts: {e}. "
+                f"Continuing without this checkpoint."
+            )
+            return
 
         logger.info(
-            f"Model and tokenizer successfully pushed to: https://huggingface.co/{repo_id}"
+            f"Model and tokenizer successfully pushed to: "
+            f"https://huggingface.co/{repo_id}"
         )
 
     def push_dataset(
@@ -277,8 +324,20 @@ class HubManager:
         repo_id = self.get_repo_id(name)
         logger.info(f"Pushing dataset to Hub: {repo_id}")
 
-        kwargs = {"repo_id": repo_id, "private": private}
+        kwargs: dict[str, Any] = {"repo_id": repo_id, "private": private}
         if split:
             kwargs["split"] = split
-        dataset.push_to_hub(**kwargs)
+
+        def _do_push() -> None:
+            dataset.push_to_hub(**kwargs)
+
+        try:
+            _retry(_do_push, desc=f"Push dataset {repo_id}")
+        except Exception as e:
+            logger.error(
+                f"Failed to push dataset {repo_id} after "
+                f"{_DEFAULT_MAX_ATTEMPTS} attempts: {e}."
+            )
+            raise
+
         logger.info(f"Dataset pushed to: https://huggingface.co/{repo_id}")
