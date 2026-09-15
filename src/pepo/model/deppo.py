@@ -225,7 +225,9 @@ class DEPPOModel(EnsembleModel):
     ) -> str:
         model_name = self.model_id.rsplit("/", 1)[-1]
         split_suffix = f"-{self.split_mode}" if self.split_mode != "disjoint" else ""
-        repo_name = f"{model_name}-a{self.alpha}-b{self.beta}-L{self._num_models}{split_suffix}"
+        repo_name = (
+            f"{model_name}-a{self.alpha}-b{self.beta}-L{self._num_models}{split_suffix}"
+        )
         if model_idx is not None:
             repo_name = f"{repo_name}-l{model_idx}"
         if epoch is not None:

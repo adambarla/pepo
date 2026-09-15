@@ -139,7 +139,9 @@ class DataManager:
                 Dataset, load_dataset(self.dataset_id, split=self.eval_split_name)
             )
             if self.max_examples is not None:
-                train_raw = train_raw.select(range(min(self.max_examples, len(train_raw))))
+                train_raw = train_raw.select(
+                    range(min(self.max_examples, len(train_raw)))
+                )
                 logger.info(f"Truncated training set to {len(train_raw)} examples")
 
             logger.info(

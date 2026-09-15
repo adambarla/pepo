@@ -20,7 +20,7 @@ def test_disjoint_split_basic() -> None:
     dm.n_splits = 4
     dm.seed = 42
     dm.split_mode = "disjoint"
-    dm._sort_by_length = lambda ds: ds  # type: ignore[method-assign]
+    setattr(dm, "_sort_by_length", lambda ds: ds)
 
     dm._split_train(data)
 
@@ -41,14 +41,14 @@ def test_disjoint_split_reproducible() -> None:
     dm1.n_splits = 4
     dm1.seed = 42
     dm1.split_mode = "disjoint"
-    dm1._sort_by_length = lambda ds: ds  # type: ignore[method-assign]
+    setattr(dm1, "_sort_by_length", lambda ds: ds)
     dm1._split_train(data)
 
     dm2 = object.__new__(DataManager)
     dm2.n_splits = 4
     dm2.seed = 42
     dm2.split_mode = "disjoint"
-    dm2._sort_by_length = lambda ds: ds  # type: ignore[method-assign]
+    setattr(dm2, "_sort_by_length", lambda ds: ds)
     dm2._split_train(data)
 
     for i in range(4):
@@ -56,13 +56,14 @@ def test_disjoint_split_reproducible() -> None:
 
 
 def test_overlap_subsample_split_subset_size() -> None:
-    """Overlapping subsampling: each model gets N/L distinct samples; members may overlap."""
+    """Overlapping subsampling: each model gets N/L distinct samples;
+    members may overlap."""
     data = _make_dataset(100)
     dm = object.__new__(DataManager)
     dm.n_splits = 4
     dm.seed = 42
     dm.split_mode = "overlap_subsample"
-    dm._sort_by_length = lambda ds: ds  # type: ignore[method-assign]
+    setattr(dm, "_sort_by_length", lambda ds: ds)
 
     dm._split_train(data)
 
@@ -74,14 +75,15 @@ def test_overlap_subsample_split_subset_size() -> None:
 
 
 def test_overlap_subsample_has_overlap() -> None:
-    """Overlapping subsampling: different models share samples, but each member has no duplicates."""
+    """Overlapping subsampling: different models share samples, but each
+    member has no duplicates."""
     np.random.seed(0)
     data = _make_dataset(1000)
     dm = object.__new__(DataManager)
     dm.n_splits = 4
     dm.seed = 42
     dm.split_mode = "overlap_subsample"
-    dm._sort_by_length = lambda ds: ds  # type: ignore[method-assign]
+    setattr(dm, "_sort_by_length", lambda ds: ds)
 
     dm._split_train(data)
 
@@ -104,7 +106,7 @@ def test_overlap_subsample_samples_from_original() -> None:
     dm.n_splits = 4
     dm.seed = 42
     dm.split_mode = "overlap_subsample"
-    dm._sort_by_length = lambda ds: ds  # type: ignore[method-assign]
+    setattr(dm, "_sort_by_length", lambda ds: ds)
 
     dm._split_train(data)
 
@@ -120,14 +122,14 @@ def test_overlap_subsample_reproducible() -> None:
     dm1.n_splits = 4
     dm1.seed = 42
     dm1.split_mode = "overlap_subsample"
-    dm1._sort_by_length = lambda ds: ds  # type: ignore[method-assign]
+    setattr(dm1, "_sort_by_length", lambda ds: ds)
     dm1._split_train(data)
 
     dm2 = object.__new__(DataManager)
     dm2.n_splits = 4
     dm2.seed = 42
     dm2.split_mode = "overlap_subsample"
-    dm2._sort_by_length = lambda ds: ds  # type: ignore[method-assign]
+    setattr(dm2, "_sort_by_length", lambda ds: ds)
     dm2._split_train(data)
 
     for i in range(4):
@@ -142,7 +144,7 @@ def test_single_model_ignores_split_mode() -> None:
         dm.n_splits = 1
         dm.seed = 42
         dm.split_mode = mode
-        dm._sort_by_length = lambda ds: ds  # type: ignore[method-assign]
+        setattr(dm, "_sort_by_length", lambda ds: ds)
         dm._split_train(data)
         assert len(dm.train_datasets) == 1
         assert list(dm.train_datasets[0]["id"]) == list(range(100))
@@ -155,15 +157,17 @@ def test_unknown_split_mode_raises() -> None:
     dm.n_splits = 4
     dm.seed = 42
     dm.split_mode = "overlap_50"
-    dm._sort_by_length = lambda ds: ds  # type: ignore[method-assign]
+    setattr(dm, "_sort_by_length", lambda ds: ds)
 
     import pytest
+
     with pytest.raises(ValueError, match="Unknown split_mode"):
         dm._split_train(data)
 
 
 def test_get_name_overlap_subsample_suffix() -> None:
-    """Overlapping subsampling models get a -overlap_subsample suffix in their Hub name."""
+    """Overlapping subsampling models get a -overlap_subsample suffix in
+    their Hub name."""
     model = object.__new__(DEPPOModel)
     model.model_id = "org/MyModel"
     model.alpha = 0.1
@@ -200,4 +204,7 @@ def test_get_name_all_combinations() -> None:
     assert model.get_name() == "M-a0.1-b0.1-L4-overlap_subsample"
     assert model.get_name(model_idx=0) == "M-a0.1-b0.1-L4-overlap_subsample-l0"
     assert model.get_name(epoch=5) == "M-a0.1-b0.1-L4-overlap_subsample-e5"
-    assert model.get_name(model_idx=3, epoch=16) == "M-a0.1-b0.1-L4-overlap_subsample-l3-e16"
+    assert (
+        model.get_name(model_idx=3, epoch=16)
+        == "M-a0.1-b0.1-L4-overlap_subsample-l3-e16"
+    )
