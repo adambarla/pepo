@@ -49,6 +49,7 @@ ref_model:
   num_networks: ${ref_L}
   alpha: ${ref_a}
   beta: ${ref_b}
+  split_mode: disjoint
   generator:
     max_new_tokens: ${mt}
 
@@ -64,6 +65,7 @@ ref_b: 0.1
 mt: 1024
 ns: null
 
+split_mode: disjoint
 overwrite: false
 stop_after_generation: false
 seed: 42

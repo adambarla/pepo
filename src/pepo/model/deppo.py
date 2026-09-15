@@ -35,6 +35,7 @@ class DEPPOModel(EnsembleModel):
         num_networks: int,  # This will be overridden by L in config usually
         alpha: float,
         beta: float = 0.1,  # Default for safety
+        split_mode: str = "disjoint",
         trainer: Optional[EnsembleTrainer] = None,
         generator: Optional[Generator] = None,
         debug: bool = False,
@@ -73,6 +74,7 @@ class DEPPOModel(EnsembleModel):
 
         self.alpha = alpha
         self.beta = beta
+        self.split_mode = split_mode
         self.tokenizer_id = backbone.tokenizer_id
         self.chat_template = backbone.chat_template
         self.debug = debug
@@ -222,7 +224,10 @@ class DEPPOModel(EnsembleModel):
         **kwargs: Any,
     ) -> str:
         model_name = self.model_id.rsplit("/", 1)[-1]
-        repo_name = f"{model_name}-a{self.alpha}-b{self.beta}-L{self._num_models}"
+        split_suffix = f"-{self.split_mode}" if self.split_mode != "disjoint" else ""
+        repo_name = (
+            f"{model_name}-a{self.alpha}-b{self.beta}-L{self._num_models}{split_suffix}"
+        )
         if model_idx is not None:
             repo_name = f"{repo_name}-l{model_idx}"
         if epoch is not None:
