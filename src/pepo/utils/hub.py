@@ -300,8 +300,11 @@ class HubManager:
         except Exception as e:
             # Non-fatal: keep training so later epochs can still be saved.
             logger.error(
-                f"Failed to push {repo_id} after {_DEFAULT_MAX_ATTEMPTS} attempts: {e}. "
-                f"Continuing without this checkpoint."
+                "Failed to push %s after %d attempts: %s. Continuing without "
+                "this checkpoint.",
+                repo_id,
+                _DEFAULT_MAX_ATTEMPTS,
+                e,
             )
             return
 
