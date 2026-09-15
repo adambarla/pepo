@@ -8,7 +8,9 @@ backbone: ${backbone}
 
 alpha: 0.1
 beta: 0.1
+split_mode: ${split_mode}
 num_networks: ${L} # placeholder, will be overridden by L
+shared_backbone: true
 
 trainer:
   gradient_accumulation_steps: 1

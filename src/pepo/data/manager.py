@@ -42,12 +42,15 @@ class DataManager:
         annotators: Optional[list[BaseAnnotator]] = None,
         device_manager: Optional["DeviceManager"] = None,
         force_recompute: bool = False,
+        split_mode: str = "disjoint",
+        max_examples: Optional[int] = None,
     ):
         self.dataset_id = dataset_id
         self.train_split_name = train_split_name
         self.eval_split_name = eval_split_name
         self.seed = seed
         self.n_splits = n_splits
+        self.split_mode = split_mode
         self.tokenizer = tokenizer
         self.processor = processor
         self.collator = collator
@@ -59,6 +62,7 @@ class DataManager:
         self.annotators = annotators or []
         self.device_manager = device_manager or get_device_manager()
         self.force_recompute = force_recompute
+        self.max_examples = max_examples
         self._hub_manager = get_hub_manager()
 
         self._initialize_dataset()
@@ -121,6 +125,11 @@ class DataManager:
                 Dataset, load_dataset(repo_id, split=self.train_split_name)
             )
             eval_data = cast(Dataset, load_dataset(repo_id, split=self.eval_split_name))
+            if self.max_examples is not None:
+                train_data = train_data.select(
+                    range(min(self.max_examples, len(train_data)))
+                )
+                logger.info(f"Truncated training set to {len(train_data)} examples")
         else:
             # Load raw and process
             train_raw = cast(
@@ -129,6 +138,10 @@ class DataManager:
             eval_raw = cast(
                 Dataset, load_dataset(self.dataset_id, split=self.eval_split_name)
             )
+            if self.max_examples is not None:
+                train_raw = train_raw.select(range(min(self.max_examples, len(train_raw))))
+                logger.info(f"Truncated training set to {len(train_raw)} examples")
+
             logger.info(
                 f"Loaded {self.dataset_id}: "
                 f"train={len(train_raw)}, eval={len(eval_raw)}"
@@ -171,16 +184,30 @@ class DataManager:
             return
 
         np.random.seed(self.seed)
-        indices = np.arange(len(dataset))
-        np.random.shuffle(indices)
-        shuffled = dataset.select(indices)
 
-        split_indices = np.array_split(np.arange(len(shuffled)), self.n_splits)
-        self.train_datasets = {
-            i: self._sort_by_length(shuffled.select(idx))
-            for i, idx in enumerate(split_indices)
-        }
-        logger.info(f"Split train into {self.n_splits} splits")
+        if self.split_mode == "disjoint":
+            indices = np.arange(len(dataset))
+            np.random.shuffle(indices)
+            shuffled = dataset.select(indices)
+            split_indices = np.array_split(np.arange(len(shuffled)), self.n_splits)
+            self.train_datasets = {
+                i: self._sort_by_length(shuffled.select(idx))
+                for i, idx in enumerate(split_indices)
+            }
+        elif self.split_mode == "overlap_subsample":
+            rng = np.random.default_rng(self.seed)
+            n = len(dataset)
+            k = max(1, n // self.n_splits)
+            self.train_datasets = {
+                i: self._sort_by_length(
+                    dataset.select(rng.choice(n, size=k, replace=False))
+                )
+                for i in range(self.n_splits)
+            }
+        else:
+            raise ValueError(f"Unknown split_mode: {self.split_mode}")
+
+        logger.info(f"Split train into {self.n_splits} splits (mode={self.split_mode})")
 
     def _sort_by_length(self, dataset: Dataset) -> Dataset:
         if "chosen_text" not in dataset.column_names:
