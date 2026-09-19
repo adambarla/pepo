@@ -138,16 +138,15 @@ class DeviceManager:
         gpu_id = self._gpu_queue.get()
 
         try:
-            yield torch.device(f"cuda:{gpu_id}")
+            # CUDA's current device is thread-local.  Set it for the whole
+            # lease so implicit-device operations (synchronize, empty_cache,
+            # and library kernels) target the GPU handed to this thread.
+            with torch.cuda.device(gpu_id):
+                yield torch.device(f"cuda:{gpu_id}")
+                torch.cuda.synchronize()
         finally:
-            try:
-                with torch.cuda.device(gpu_id):
-                    torch.cuda.synchronize()
-            except Exception:
-                pass
-            finally:
-                self._gpu_queue.put(gpu_id)
-                self._gpu_semaphore.release()
+            self._gpu_queue.put(gpu_id)
+            self._gpu_semaphore.release()
 
     @property
     def num_available_gpus(self) -> int:
