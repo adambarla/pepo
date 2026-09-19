@@ -439,10 +439,12 @@ class EnsembleTrainer(BaseTrainer):
                     additional_log_items={"train/epoch": epoch},
                 )
 
-            # Synchronize and move model back to CPU and clear cache
+            # Synchronize before moving the model and optimizer back to CPU.
+            # Do not call torch.cuda.empty_cache() here: every ensemble
+            # thread can still be using another GPU, and the global allocator
+            # cache cleanup races with those active CUDA operations.
             torch.cuda.synchronize()
             move_to_device(model, torch.device("cpu"), optimizer)
-            torch.cuda.empty_cache()
 
     def _eval_epoch(
         self,
@@ -509,9 +511,9 @@ class EnsembleTrainer(BaseTrainer):
                 additional_log_items={"eval/epoch": epoch},
             )
 
-            # Synchronize and move model back to CPU
+            # Synchronize before moving the model back to CPU.  Avoid global
+            # empty_cache() while other ensemble threads may still be active.
             torch.cuda.synchronize()
             model.to("cpu")
-            torch.cuda.empty_cache()
 
             return avg_epoch_metrics.get("loss", 0.0)
