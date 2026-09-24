@@ -28,6 +28,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         output_dir: str,
         annotators_config: Union[str, Dict[str, Any], DictConfig] = "alpaca_eval_gpt4",
         num_samples: Optional[int] = None,
+        start_index: int = 0,
         stop_after_generation: bool = False,
         wandb_run: Optional[WandbRun] = None,
     ) -> None:
@@ -47,6 +48,7 @@ class AlpacaEvalEvaluator(BaseEvaluator):
             dataset_split=dataset_split,
             output_dir=output_dir + "/alpaca_eval/",
             num_samples=num_samples,
+            start_index=start_index,
             stop_after_generation=stop_after_generation,
         )
         self.num_samples = num_samples
@@ -278,7 +280,6 @@ class AlpacaEvalEvaluator(BaseEvaluator):
 
         model.load(epoch=epoch)
         outputs, metrics = model.generate_responses(prompts=instructions)
-        model.unload()
 
         if metrics and self.wandb_run is not None:
             if model.generator is None:
@@ -304,6 +305,11 @@ class AlpacaEvalEvaluator(BaseEvaluator):
         with open(save_path, "w", encoding="utf-8") as f:
             json.dump(formatted_outputs, f, indent=2, ensure_ascii=False)
         logger.info(f"Saved {len(formatted_outputs)} responses to {save_path}")
+        # Persist responses before unloading the model.  On some multi-GPU
+        # runs, teardown can raise a low-level bus error after generation has
+        # completed; the generated responses are still valid and should not
+        # be lost because cleanup failed.
+        model.unload()
 
     def _prepare_annotator_config(self) -> str:
         """Prepare annotator config file and return its path."""

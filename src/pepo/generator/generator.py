@@ -1,6 +1,7 @@
 import logging
 import queue
 import threading
+import time
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
@@ -23,6 +24,9 @@ class Generator(BaseGenerator):
         batch_queue: queue.Queue,
         results: list[dict[str, Any]],
         results_lock: threading.Lock,
+        generation_barrier: threading.Barrier,
+        worker_timings: list[tuple[float, float]],
+        timing_lock: threading.Lock,
         token_callback: Optional[Callable[[str], None]] = None,
     ) -> int:
         """Worker loop for processing batches of prompts."""
@@ -33,6 +37,9 @@ class Generator(BaseGenerator):
         # Note: BaseGenerator doesn't enforce expected device handling
         with model.device_manager.request_gpu() as device:
             model.to(device)
+            self._synchronize_device(device)
+            generation_barrier.wait()
+            worker_start = time.perf_counter()
             try:
                 while True:
                     try:
@@ -67,6 +74,7 @@ class Generator(BaseGenerator):
 
                     starting_idx = input_ids.shape[1]
                     output_mask[:, :starting_idx] = False
+                    response_token_counts = output_mask[:, starting_idx:].sum(dim=1)
                     output_ids = output_ids.where(
                         output_mask.bool(), tokenizer.pad_token_id
                     )
@@ -81,6 +89,7 @@ class Generator(BaseGenerator):
                                 "index": start_idx + j,
                                 "prompt": prompt,
                                 "output": response,
+                                "response_tokens": int(response_token_counts[j].item()),
                             }
                         )
 
@@ -91,6 +100,10 @@ class Generator(BaseGenerator):
                     batch_queue.task_done()
 
             finally:
+                self._synchronize_device(device)
+                worker_end = time.perf_counter()
+                with timing_lock:
+                    worker_timings.append((worker_start, worker_end))
                 model.cpu()
 
         return total_processed
@@ -183,6 +196,9 @@ class Generator(BaseGenerator):
 
         results = []
         results_lock = threading.Lock()
+        generation_barrier = threading.Barrier(num_gpus)
+        worker_timings: list[tuple[float, float]] = []
+        timing_lock = threading.Lock()
 
         # Use shared parallel worker runner from BaseGenerator
         # We pass queue and shared results list as kwargs to the worker function
@@ -195,6 +211,9 @@ class Generator(BaseGenerator):
             batch_queue=batch_queue,
             results=results,
             results_lock=results_lock,
+            generation_barrier=generation_barrier,
+            worker_timings=worker_timings,
+            timing_lock=timing_lock,
             token_callback=token_callback,
         )
 
@@ -203,6 +222,14 @@ class Generator(BaseGenerator):
         final_outputs = [
             {"prompt": r["prompt"], "output": r["output"]} for r in results
         ]
+        response_tokens = sum(int(r["response_tokens"]) for r in results)
+        metrics = self._generation_metrics(worker_timings, response_tokens)
+        logger.info(
+            "Generation timing: %.3f s, %d response tokens, %.3f ms/response token",
+            metrics["generation_wall_time_s"],
+            response_tokens,
+            metrics["generation_ms_per_response_token"],
+        )
 
         logger.info(f"Successfully generated {len(final_outputs)} responses")
-        return final_outputs, {}
+        return final_outputs, metrics

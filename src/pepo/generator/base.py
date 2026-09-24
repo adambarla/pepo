@@ -6,6 +6,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
+import torch
+
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
@@ -156,6 +158,36 @@ class BaseGenerator(ABC):
     def get_short_name(self) -> str:
         parts = [f"mt{self.max_new_tokens}"]
         return "-".join(parts)
+
+    @staticmethod
+    def _synchronize_device(device: torch.device) -> None:
+        """Wait for all work queued on one generation device to finish."""
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+
+    @staticmethod
+    def _generation_metrics(
+        worker_timings: list[tuple[float, float]], response_tokens: int
+    ) -> dict[str, float | int]:
+        """Summarize timed generation after model transfer is complete."""
+        if worker_timings:
+            start = min(timing[0] for timing in worker_timings)
+            end = max(timing[1] for timing in worker_timings)
+            elapsed = max(0.0, end - start)
+        else:
+            elapsed = 0.0
+
+        return {
+            "generation_wall_time_s": elapsed,
+            "generation_response_tokens": response_tokens,
+            "generation_ms_per_response_token": (
+                1000.0 * elapsed / response_tokens if response_tokens else 0.0
+            ),
+            "generation_response_tokens_per_s": (
+                response_tokens / elapsed if elapsed else 0.0
+            ),
+            "generation_worker_count": len(worker_timings),
+        }
 
     def _run_parallel_workers(
         self,

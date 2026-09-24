@@ -20,6 +20,7 @@ class BaseEvaluator(ABC):
         dataset_split: str,
         output_dir: str,
         num_samples: Optional[int] = None,
+        start_index: int = 0,
         stop_after_generation: bool = False,
     ) -> None:
         """
@@ -34,6 +35,7 @@ class BaseEvaluator(ABC):
         self.dataset_split = dataset_split
         self.output_dir = Path(output_dir)
         self.num_samples = num_samples
+        self.start_index = max(0, start_index)
         self.stop_after_generation = stop_after_generation
 
     @abstractmethod
@@ -72,10 +74,16 @@ class BaseEvaluator(ABC):
             ),
         )
         if self.num_samples is not None and self.num_samples > 0:
-            dataset = dataset.select(range(min(self.num_samples, len(dataset))))
+            start = min(self.start_index, len(dataset))
+            stop = min(start + self.num_samples, len(dataset))
+            dataset = dataset.select(range(start, stop))
+        elif self.start_index:
+            dataset = dataset.select(range(self.start_index, len(dataset)))
 
-        count = self.num_samples if self.num_samples else len(dataset)
-        logger.info(f"Loaded {count} samples from {self.dataset_id}")
+        logger.info(
+            f"Loaded {len(dataset)} samples from {self.dataset_id}"
+            f" (start_index={self.start_index})"
+        )
         return dataset
 
     def _get_filename(
@@ -98,6 +106,8 @@ class BaseEvaluator(ABC):
         parts = [model_name]
         if self.num_samples:
             parts.append(f"ns{self.num_samples}")
+        if self.start_index:
+            parts.append(f"start{self.start_index}")
         if model.generator is not None:
             generator_name = model.generator.get_name()
             parts.append(generator_name)

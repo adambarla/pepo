@@ -14,6 +14,7 @@ from pepo.utils import (
     constants,
     init_device_manager,
     init_hub_manager,
+    set_seed,
     setup_logging,
     strip_hydra_targets,
 )
@@ -54,6 +55,11 @@ def main(cfg: DictConfig) -> None:
     if debug:
         log_level_str = "DEBUG"
     logger = setup_logging(level=log_level_str)
+
+    # Make stochastic generation reproducible across repeated evaluation jobs.
+    # The seed is intentionally configurable so timing replicates can use
+    # independent, recorded random streams.
+    set_seed(cfg.get("seed", 42))
 
     logger.debug(f"Config: \n{OmegaConf.to_yaml(cfg, resolve=True)}")
     logger.info("PEPO Evaluation Script - Starting")

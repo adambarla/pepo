@@ -29,6 +29,11 @@ if [[ -z "$BACKBONE" ]]; then
 fi
 
 MAX_ROUNDS=8
+# Override these if the account's partition/QoS associations change.
+TRAIN_PARTITION="${PEPO_TRAIN_PARTITION:-normal}"
+TRAIN_QOS="${PEPO_TRAIN_QOS:-normal}"
+EVAL_PARTITION="${PEPO_EVAL_PARTITION:-normal}"
+EVAL_QOS="${PEPO_EVAL_QOS:-normal}"
 
 COMMON_ARGS=(
     model=deppo
@@ -38,6 +43,9 @@ COMMON_ARGS=(
     b=0.1
     backbone="$BACKBONE"
     split_mode=overlap_subsample
+    model.shared_backbone=false
+    # Evaluation is submitted separately below; keep training memory bounded.
+    skip_eval=true
     "$@"
 )
 
@@ -63,15 +71,16 @@ PREV_JOB_ID=""
 for ROUND in $(seq 1 "$MAX_ROUNDS"); do
     JOB_NAME="overlap_tr_${BACKBONE}_r${ROUND}"
 
+    # Continue from the latest checkpoint when one exists; the trainer falls
+    # back to fresh initialization for the first round when none exists.
+    ROUND_ARGS=("${COMMON_ARGS[@]}" continue=true)
     if [[ "$ROUND" -eq 1 ]]; then
-        ROUND_ARGS=("${COMMON_ARGS[@]}" continue=false)
         DEP_ARGS=()
     else
-        ROUND_ARGS=("${COMMON_ARGS[@]}" continue=true)
         DEP_ARGS=(--dependency="afterany:${PREV_JOB_ID}")
     fi
 
-    OUT=$(sbatch "${DEP_ARGS[@]}" --job-name="$JOB_NAME" \
+    OUT=$(sbatch --requeue --partition="$TRAIN_PARTITION" --qos="$TRAIN_QOS" "${DEP_ARGS[@]}" --job-name="$JOB_NAME" \
         scripts/slurm/train.slurm "${ROUND_ARGS[@]}")
     echo "$OUT"
     JOB_ID=$(echo "$OUT" | grep -oP '\d+')
@@ -89,8 +98,9 @@ for ROUND in $(seq 1 "$MAX_ROUNDS"); do
     END=$(( END > 16 ? 16 : END ))
 
     for e in $(seq "$START" "$END"); do
-        sbatch \
-            --dependency="afterok:${TRAIN_JOB_IDS[$ROUND-1]}" \
+        # Training rounds may end at the wall-time limit after saving a checkpoint.
+        sbatch --requeue --partition="$EVAL_PARTITION" --qos="$EVAL_QOS" \
+            --dependency="afterany:${TRAIN_JOB_IDS[$ROUND-1]}" \
             --job-name="overlap_ev_${BACKBONE}_e${e}" \
             scripts/slurm/eval.slurm \
             "${EVAL_ARGS[@]}" e="$e"
@@ -103,7 +113,7 @@ echo "=== Submitting catch-all evaluations (after final training round) ==="
 # last training round guarantees every epoch is evaluated.
 LAST_TRAIN=${TRAIN_JOB_IDS[$MAX_ROUNDS-1]}
 for e in $(seq 1 16); do
-    sbatch \
+    sbatch --requeue --partition="$EVAL_PARTITION" --qos="$EVAL_QOS" \
         --dependency="afterany:${LAST_TRAIN}" \
         --job-name="overlap_ev_${BACKBONE}_e${e}" \
         scripts/slurm/eval.slurm \
