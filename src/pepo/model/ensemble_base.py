@@ -183,7 +183,13 @@ class EnsembleModel(BaseModel):
 
         past_key_values_list = cast(Optional[list[Any]], past_key_values)
         model = self.models[0]
-        new_past_key_values_list: list[Any] = []
+        # One cache slot per member, indexed by model_idx; members not in
+        # model_indices keep their (unused) slot untouched.
+        new_past_key_values_list: list[Any] = (
+            list(past_key_values_list)
+            if past_key_values_list is not None
+            else [None] * self._num_models
+        )
 
         # Determine which models to use
         indices = (
@@ -216,7 +222,7 @@ class EnsembleModel(BaseModel):
                     use_cache=use_cache,
                 )
                 log_probs_list.append(log_probs)
-                new_past_key_values_list.append(new_past)
+                new_past_key_values_list[model_idx] = new_past
 
         log_probs_tensor = torch.stack(log_probs_list, dim=0)  # (L, B, V)
         min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
