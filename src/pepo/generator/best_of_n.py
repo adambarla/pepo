@@ -36,11 +36,54 @@ class Slot:
     trial_idx: int = 0
 
 
+def acceptance_log_probs(
+    log_probs: torch.Tensor,
+    sampling_mode: Literal["min", "mean_std"],
+    eta: float,
+) -> torch.Tensor:
+    """Log acceptance probability for proposals drawn from the ensemble mixture.
+
+    Proposals are drawn from q(a) = (1/L) sum_l pi_l(a|x). Accepting with
+    probability f_out(a) / q(a) then yields exact samples from f_out / sum f_out:
+      - "min":      f_out = min_l pi_l,               acceptance = min / mean
+      - "mean_std": f_out = max(0, mean - eta * std), acceptance = 1 - eta * CV
+    Both ratios lie in [0, 1], so no envelope constant or clamping is needed.
+    ``std`` is the population standard deviation over members; by Samuelson's
+    inequality, eta = sqrt(L - 1) gives f_out <= min_l pi_l.
+
+    Args:
+        log_probs: (L, B) sequence log-probabilities under each member.
+        sampling_mode: Target numerator, see above.
+        eta: Standard deviation coefficient for "mean_std".
+
+    Returns:
+        (B,) log acceptance probabilities (-inf where f_out = 0).
+    """
+    num_models = log_probs.shape[0]
+    log_mean = torch.logsumexp(log_probs, dim=0) - math.log(num_models)
+    if sampling_mode == "min":
+        return log_probs.min(dim=0).values - log_mean
+    # CV^2 = E[p^2] / E[p]^2 - 1, computed in log space since sequence
+    # probabilities underflow in float32.
+    log_second_moment = torch.logsumexp(2 * log_probs, dim=0) - math.log(num_models)
+    cv = torch.expm1(log_second_moment - 2 * log_mean).clamp(min=0.0).sqrt()
+    remaining = 1.0 - eta * cv
+    return torch.where(
+        remaining > 0,
+        torch.log(remaining.clamp(min=torch.finfo(remaining.dtype).tiny)),
+        torch.full_like(remaining, -torch.inf),
+    )
+
+
 class BestOfNGenerator(BaseGenerator):
     """Best of N Generator using rejection sampling with slot-based batching.
 
-    Uses the model's generate method with model_indices=[0] for proposal-only
-    generation, then scores with all ensemble members for rejection sampling.
+    Each round draws one ensemble member uniformly at random and generates
+    proposals with it, so every proposal is a sample from the uniform mixture
+    of members. All members then score the proposals and each one is accepted
+    with probability ``acceptance_log_probs``. With top_p=1 and temperature=1
+    the accepted samples are exact draws from the target; with top-p the
+    proposal is the mixture of truncated members instead.
     Processes multiple prompts in parallel using a slot-based approach.
     Assumes shared_backbone=True (all adapters on single model).
     """
@@ -50,27 +93,22 @@ class BestOfNGenerator(BaseGenerator):
         max_trials: int = 16,
         sampling_mode: Literal["min", "mean_std"] = "min",
         eta: float = 0.1,
-        probability_space_mean_std: bool = False,
         **kwargs: Any,
     ):
         """Initialize Best of N Generator.
 
         Args:
             max_trials: Maximum attempts per prompt before accepting best candidate.
-            sampling_mode: How to compute f_out (both apply exp(-α/β) penalty):
-                - "min": f_out = min_π * exp(-α/β)
-                - "mean_std": f_out = (mean_π - η*std_π) * exp(-α/β)
+            sampling_mode: Target numerator f_out:
+                - "min": f_out = min_l pi_l
+                - "mean_std": f_out = max(0, mean_l pi_l - eta * std_l pi_l)
             eta: Standard deviation coefficient for mean_std mode.
-            probability_space_mean_std: Use the exact probability-space
-                mean-minus-standard-deviation score instead of the legacy
-                log-probability approximation.
             **kwargs: Arguments passed to parent Generator.
         """
         super().__init__(**kwargs)
         self.max_trials = max_trials
         self.sampling_mode = sampling_mode
         self.eta = eta
-        self.probability_space_mean_std = probability_space_mean_std
         self.greedy_sampling = False  # Force non-greedy for candidate generation
 
     def _extract_response(
@@ -93,13 +131,7 @@ class BestOfNGenerator(BaseGenerator):
         attention_mask: torch.Tensor,
         prompt_lengths: list[int],
         device: torch.device,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]:
+    ) -> torch.Tensor:
         """Compute log probs for sequences across all ensemble members.
 
         Args:
@@ -110,8 +142,7 @@ class BestOfNGenerator(BaseGenerator):
             device: Device the model is on.
 
         Returns:
-            Tuple of proposal, minimum, mean, and standard-deviation log
-            probabilities, plus the per-model log-probability tensor.
+            (L, B) per-model sequence log-probabilities.
         """
         from ..utils.model_utils import get_log_probs
 
@@ -144,22 +175,7 @@ class BestOfNGenerator(BaseGenerator):
                     batch_log_probs.append(lp.cpu())
                 log_probs_per_model.append(torch.cat(batch_log_probs, dim=0))
 
-        log_probs_tensor = torch.stack(log_probs_per_model, dim=0)  # (L, B)
-        min_log_probs, _ = torch.min(log_probs_tensor, dim=0)
-        mean_log_probs = log_probs_tensor.mean(dim=0)
-        # A one-member reference ensemble has zero dispersion.  Keep the
-        # historical sample standard deviation for actual ensembles while
-        # avoiding NaNs from torch.std's unbiased estimator when L == 1.
-        std_log_probs = log_probs_tensor.std(
-            dim=0, unbiased=log_probs_tensor.shape[0] > 1
-        )
-        return (
-            log_probs_per_model[0],
-            min_log_probs,
-            mean_log_probs,
-            std_log_probs,
-            log_probs_tensor,
-        )
+        return torch.stack(log_probs_per_model, dim=0)  # (L, B)
 
     def _fill_slots(
         self,
@@ -207,7 +223,12 @@ class BestOfNGenerator(BaseGenerator):
         active_slots: list[Slot],
         tokenizer: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        """Generate candidates for active slots using proposal model (model_idx=0)."""
+        """Generate candidates from one uniformly drawn ensemble member.
+
+        Drawing the member independently each round makes every proposal a
+        sample from the uniform mixture of members.
+        """
+        proposal_idx = int(torch.randint(model.num_models, (1,)).item())
         tokenizer.padding_side = "left"
         tokenized = tokenizer(
             [s.formatted for s in active_slots],
@@ -222,7 +243,7 @@ class BestOfNGenerator(BaseGenerator):
             greedy_sampling=False,
             temperature=self.temperature,
             top_p=self.top_p,
-            model_indices=[0],
+            model_indices=[proposal_idx],
         )
         return output_ids, output_mask, tokenized["input_ids"].shape[1]
 
@@ -234,18 +255,11 @@ class BestOfNGenerator(BaseGenerator):
         active_slots: list[Slot],
         prompt_end_idx: int,
         device: torch.device,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]:
+    ) -> torch.Tensor:
         """Score generated candidates with all ensemble members.
 
         Returns:
-            Tuple of proposal, minimum, mean, standard-deviation, and all
-            per-model log probabilities.
+            (L, B) per-model sequence log-probabilities.
         """
         prompt_lengths = []
         for i, slot in enumerate(active_slots):
@@ -418,53 +432,27 @@ class BestOfNGenerator(BaseGenerator):
                         output_ids, output_mask, prompt_end_idx = (
                             self._generate_candidates(model, active_slots, tokenizer)
                         )
-                        proposal_lps, min_lps, mean_lps, std_lps, log_probs_tensor = (
-                            self._score_candidates(
-                                model,
-                                output_ids,
-                                output_mask,
-                                active_slots,
-                                prompt_end_idx,
-                                device,
-                            )
+                        log_probs_tensor = self._score_candidates(
+                            model,
+                            output_ids,
+                            output_mask,
+                            active_slots,
+                            prompt_end_idx,
+                            device,
                         )
                     except Exception as e:
                         logger.error(f"Worker {worker_id} error: {e}")
                         raise
 
-                    # Calculate penalty term: exp(-α/β) from model params
-                    model_alpha = getattr(model, "alpha", 0.0)
-                    model_beta = getattr(model, "beta", 0.1)
-                    log_penalty = -model_alpha / model_beta
-
-                    # Compute f_out based on sampling mode
-                    if self.sampling_mode == "min":
-                        # f_out = min_π * exp(-α/β)
-                        f_out_log = min_lps + log_penalty
-                    elif self.probability_space_mean_std:
-                        # Exact probability-space mean minus standard deviation,
-                        # represented in log space for numerical stability.
-                        log_l = math.log(log_probs_tensor.shape[0])
-                        log_mean_p = torch.logsumexp(log_probs_tensor, dim=0) - log_l
-                        log_second_moment = (
-                            torch.logsumexp(2 * log_probs_tensor, dim=0) - log_l
-                        )
-                        relative_variance = torch.expm1(
-                            log_second_moment - 2 * log_mean_p
-                        ).clamp(min=0.0)
-                        coefficient_of_variation = torch.sqrt(relative_variance)
-                        remaining_mass = 1.0 - self.eta * coefficient_of_variation
-                        f_out_log = torch.where(
-                            remaining_mass > 0,
-                            log_mean_p + torch.log(remaining_mass) + log_penalty,
-                            torch.full_like(log_mean_p, -torch.inf),
-                        )
-                    else:  # mean_std
-                        # Legacy log-probability approximation used in prior runs.
-                        mean_p = torch.exp(mean_lps)
-                        std_p = torch.exp(mean_lps) * std_lps.clamp(min=1e-8)
-                        f_out_p = (mean_p - self.eta * std_p).clamp(min=1e-10)
-                        f_out_log = torch.log(f_out_p) + log_penalty
+                    # Mixture proposal log-prob and target numerator, for
+                    # diagnostics only; acceptance never needs their ratio.
+                    proposal_lps = torch.logsumexp(log_probs_tensor, dim=0) - math.log(
+                        log_probs_tensor.shape[0]
+                    )
+                    log_alphas = acceptance_log_probs(
+                        log_probs_tensor, self.sampling_mode, self.eta
+                    )
+                    f_out_log = proposal_lps + log_alphas
 
                     proposal_finite = torch.isfinite(proposal_lps)
                     fout_finite = torch.isfinite(f_out_log)
@@ -482,7 +470,8 @@ class BestOfNGenerator(BaseGenerator):
                         finite_fout = f_out_log[fout_finite]
                         min_fout_lp = min(min_fout_lp, finite_fout.min().item())
                         max_fout_lp = max(max_fout_lp, finite_fout.max().item())
-                    raw_alphas = torch.exp(f_out_log - proposal_lps)
+                    # Exact ratios are <= 1; the clamp only absorbs rounding.
+                    raw_alphas = torch.exp(log_alphas)
                     alphas = raw_alphas.clamp(0.0, 1.0)
                     total_raw_alpha_sum += raw_alphas.sum().item()
                     raw_alpha_above_one += int((raw_alphas > 1.0).sum().item())
@@ -771,8 +760,10 @@ class BestOfNGenerator(BaseGenerator):
         parts: list[str] = [f"bon-{self.sampling_mode}"]
         if self.sampling_mode == "mean_std":
             parts.append(f"eta{self.eta}")
-            if self.probability_space_mean_std:
-                parts.append("prob")
+        # "mix" marks the exact mixture-proposal sampler; earlier response
+        # files (member-0 proposal, alpha/beta penalty) lack it, so
+        # overwrite=false never reuses them.
+        parts.append("mix")
         parts.append(f"n{self.max_trials}")
         parts.append(super().get_name())
         return "-".join(parts)
